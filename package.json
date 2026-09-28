@@ -1,0 +1,39 @@
+{
+  "name": "claudecord",
+  "version": "2.0.0-alpha.1",
+  "description": "Control multiple Claude Code sessions from Discord (mobile-friendly)",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsup src/index.ts src/cli.ts --format esm",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.86",
+    "better-sqlite3": "^11.0.0",
+    "discord.js": "^14.19.3",
+    "dotenv": "^17.2.4",
+    "node-pty": "^1.1.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^22.0.0",
+    "tsup": "^8.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "bin": {
+    "claudecord": "dist/cli.js"
+  },
+  "allowScripts": {
+    "node-pty@1.1.0": true
+  }
+}
