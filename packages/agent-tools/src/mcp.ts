@@ -43,4 +43,18 @@ server.tool(
   ({ path, to, caption, thread }) => send({ op: "send", agentId: currentAgentId(), path, to, caption, thread }),
 );
 
+server.tool(
+  "assign",
+  "Lead only. Give a subtask to one peer. It is tracked as a task id, and you are told when the peer accepts and when they finish.",
+  { agent: z.string(), task: z.string(), thread: z.string().optional() },
+  ({ agent, task, thread }) => send({ op: "assign", agentId: currentAgentId(), to: agent, task, thread }),
+);
+
+server.tool(
+  "task_done",
+  "Mark a task you were assigned as finished, with a short summary of the result.",
+  { id: z.string(), summary: z.string() },
+  ({ id, summary }) => send({ op: "taskdone", agentId: currentAgentId(), taskId: id, summary }),
+);
+
 await server.connect(new StdioServerTransport());

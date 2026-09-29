@@ -69,6 +69,25 @@ export const NodeFrame = z.discriminatedUnion("t", [
   }),
   z.object({ t: z.literal("agent.gone"), agentId: z.string() }),
   z.object({
+    t: z.literal("agent.accepted"),
+    agentId: z.string(),
+    /** Delivery ids the agent has picked up and started working on. */
+    msgIds: z.array(z.string()),
+  }),
+  z.object({
+    t: z.literal("agent.assign"),
+    agentId: z.string(),
+    to: z.string(),
+    task: z.string(),
+    thread: z.string().optional(),
+  }),
+  z.object({
+    t: z.literal("agent.taskdone"),
+    agentId: z.string(),
+    taskId: z.string(),
+    summary: z.string(),
+  }),
+  z.object({
     t: z.literal("file.chunk"),
     transferId: z.string(),
     agentId: z.string(),
@@ -95,6 +114,8 @@ export const HubFrame = z.discriminatedUnion("t", [
     from: z.string(),
     text: z.string(),
     thread: z.string().optional(),
+    /** Echoed back in agent.accepted once the agent starts on this delivery. */
+    msgId: z.string().optional(),
   }),
   z.object({
     t: z.literal("answer"),

@@ -8,6 +8,7 @@ export function buildRules(spec: AgentSpec, opts: { shimCmd: string; mcp: boolea
         "- ask_human(question, options?, thread?): ask the engineer and wait for the answer.",
         "- report(title, summary, artifacts?): post the final report.",
         "- send_file(path, to?, caption?, thread?): send a file from your project folder to the channel or to a peer.",
+        "- assign(agent, task, thread?): lead only. Give a subtask to a peer. task_done(id, summary): finish a task you were given.",
       ]
     : [
         "Commands (run in your shell):",
@@ -15,6 +16,7 @@ export function buildRules(spec: AgentSpec, opts: { shimCmd: string; mcp: boolea
         `- ${opts.shimCmd} ask "question" [--option text]...: ask the engineer, prints their answer.`,
         `- ${opts.shimCmd} report --title "title" "summary" [--artifact text]...: post the final report.`,
         `- ${opts.shimCmd} send path [--to agent] [--caption text]: send a file from your project folder to the channel or to a peer.`,
+        `- ${opts.shimCmd} assign agent "task": lead only, give a subtask to a peer. ${opts.shimCmd} done T1 "summary": finish a task you were given.`,
       ];
   return [
     `You are ${spec.name}, an engineer on a small team working in project "${spec.project}"${spec.role ? `, role: ${spec.role}` : ""}.`,
@@ -38,6 +40,8 @@ export interface Delivery {
   from: string;
   text: string;
   thread?: string;
+  /** Hub delivery id, reported back once the agent starts on it. */
+  msgId?: string;
 }
 
 export function formatDeliveries(items: Delivery[]): string {

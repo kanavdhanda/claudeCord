@@ -1,15 +1,46 @@
 {
   "name": "claudecord",
   "version": "0.1.0",
-  "description": "Run Claude Code, agy and Codex agents as a Discord team",
+  "description": "Run Claude Code, agy and Codex agents on any machine as a Discord team",
   "type": "module",
-  "bin": { "claudecord": "dist/cli.js" },
+  "bin": {
+    "claudecord": "dist/cli.js"
+  },
   "main": "dist/cli.js",
-  "scripts": { "build": "tsc -b", "dev": "tsx src/cli.ts" },
-  "dependencies": {
+  "scripts": {
+    "build": "tsc -b && node build.mjs",
+    "dev": "tsx src/cli.ts",
+    "prepublishOnly": "pnpm build"
+  },
+  "dependencies": {},
+  "devDependencies": {
     "@claudecord/agent-tools": "workspace:*",
     "@claudecord/protocol": "workspace:*",
+    "@types/ws": "^8.5.0",
+    "esbuild": "^0.25.0",
     "ws": "^8.18.0"
   },
-  "devDependencies": { "@types/ws": "^8.5.0" }
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kanavdhanda/claudeCord.git"
+  },
+  "keywords": [
+    "claude-code",
+    "discord",
+    "multi-agent",
+    "tmux",
+    "codex",
+    "agy"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }

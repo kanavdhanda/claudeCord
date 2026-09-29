@@ -6,6 +6,8 @@ export type AgentRequest =
   | { op: "say"; agentId: string; text: string; thread?: string }
   | { op: "ask"; agentId: string; question: string; options?: string[]; thread?: string }
   | { op: "report"; agentId: string; title: string; summary: string; artifacts?: string[] }
+  | { op: "assign"; agentId: string; to: string; task: string; thread?: string }
+  | { op: "taskdone"; agentId: string; taskId: string; summary: string }
   | { op: "send"; agentId: string; path: string; to?: string; caption?: string; thread?: string };
 
 export type ControlRequest =

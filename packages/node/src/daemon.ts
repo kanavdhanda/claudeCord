@@ -30,6 +30,12 @@ import * as tmux from "./tmux.js";
 
 const VERSION = "0.1.0";
 
+/** The MCP server ships next to the CLI in the published bundle. In a dev checkout it comes from the workspace package. */
+export function mcpPath(): string {
+  const sibling = fileURLToPath(new URL("./mcp.js", import.meta.url));
+  return existsSync(sibling) ? sibling : fileURLToPath(import.meta.resolve("@claudecord/agent-tools/mcp"));
+}
+
 export function cliPath(): string {
   return fileURLToPath(new URL("./cli.js", import.meta.url));
 }
@@ -108,7 +114,7 @@ export class Daemon {
         if (f.t === "error") console.error("hub:", f.message);
         return;
       case "deliver":
-        this.agents.get(f.agentId)?.enqueue({ from: f.from, text: f.text, thread: f.thread });
+        this.agents.get(f.agentId)?.enqueue({ from: f.from, text: f.text, thread: f.thread, msgId: f.msgId });
         return;
       case "answer": {
         const ask = this.asks.get(f.askId);
@@ -188,7 +194,7 @@ export class Daemon {
       const dir = join(meshDir(), "agents", spec.agentId.replace(/[^\w.-]+/g, "_"));
       mkdirSync(dir, { recursive: true });
       mcpConfigPath = join(dir, "mcp.json");
-      const mcpBin = fileURLToPath(import.meta.resolve("@claudecord/agent-tools/mcp"));
+      const mcpBin = mcpPath();
       writeFileSync(
         mcpConfigPath,
         JSON.stringify({
@@ -221,6 +227,7 @@ export class Daemon {
         status: (id, status, detail) => this.send({ t: "agent.status", agentId: id, status, detail }),
         ask: (id, askId, question, options) => this.send({ t: "agent.ask", agentId: id, askId, question, options }),
         limit: (id, info) => this.send({ t: "agent.limit", agentId: id, kind: info.kind, resetsAt: info.resetsAt }),
+        accepted: (id, msgIds) => this.send({ t: "agent.accepted", agentId: id, msgIds }),
         gone: (id) => {
           this.agents.delete(id);
           this.send({ t: "agent.gone", agentId: id });
@@ -307,8 +314,20 @@ export class Daemon {
         }
         return { ok: true, data: n };
       }
+      case "assign":
+      case "taskdone": {
+        const rt = this.agents.get(req.agentId);
+        if (!rt) return { ok: false, error: "unknown agent" };
+        rt.noteActivity();
+        const frame: NodeFrame =
+          req.op === "assign"
+            ? { t: "agent.assign", agentId: req.agentId, to: req.to, task: req.task, thread: req.thread }
+            : { t: "agent.taskdone", agentId: req.agentId, taskId: req.taskId, summary: req.summary };
+        return this.send(frame) ? { ok: true, data: req.op === "assign" ? "assignment sent" : "marked done" } : { ok: false, error: "hub offline" };
+      }
       case "say":
         if (!this.agents.has(req.agentId)) return { ok: false, error: "unknown agent" };
+        this.agents.get(req.agentId)!.noteActivity();
         return this.send({ t: "agent.say", agentId: req.agentId, text: req.text, thread: req.thread })
           ? { ok: true }
           : { ok: false, error: "hub offline" };
@@ -338,6 +357,7 @@ export class Daemon {
           t: "agent.ask", agentId: req.agentId, askId, question: req.question, options: req.options, thread: req.thread,
         });
         if (!sent) return { ok: false, error: "hub offline" };
+        rt.noteActivity();
         rt.beginAsk();
         const answer = await new Promise<string>((resolve) => this.asks.set(askId, { agentId: req.agentId, resolve }));
         rt.endAsk();
