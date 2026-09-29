@@ -163,7 +163,10 @@ export class AgentRuntime {
       }
       this.pending = undefined;
 
-      if (this.awaiting && (st.busy || (this.awaiting.snippet && screen.replace(/\s+/g, " ").includes(this.awaiting.snippet)))) {
+      if (
+        this.awaiting &&
+        (st.busy || (this.awaiting.snippet && screen.replace(/\s+/g, " ").includes(this.awaiting.snippet)))
+      ) {
         this.markAccepted();
       }
 
@@ -192,7 +195,11 @@ export class AgentRuntime {
       this.emitStatus(s, this.limited ? st.limit?.kind : undefined);
 
       const canDeliver =
-        st.ready && this.sawReady && !this.held && !this.limited && this.blockingAsks === 0 &&
+        st.ready &&
+        this.sawReady &&
+        !this.held &&
+        !this.limited &&
+        this.blockingAsks === 0 &&
         Date.now() - this.lastInject > INJECT_COOLDOWN_MS;
       if (canDeliver && this.queue.length) {
         const batch = this.queue.splice(0);
@@ -200,7 +207,10 @@ export class AgentRuntime {
         // Anything still awaiting acceptance from an earlier batch is superseded by this one.
         const ids = batch.map((b) => b.msgId).filter((x): x is string => !!x);
         const last = batch[batch.length - 1]!;
-        this.awaiting = { ids: [...(this.awaiting?.ids ?? []), ...ids], snippet: last.text.replace(/\s+/g, " ").slice(0, 24) };
+        this.awaiting = {
+          ids: [...(this.awaiting?.ids ?? []), ...ids],
+          snippet: last.text.replace(/\s+/g, " ").slice(0, 24),
+        };
         debug(`${this.spec.name} injecting ${batch.length} message(s)`);
         await tmux.pasteAndSubmit(this.paneId, formatDeliveries(batch));
         this.emitStatus("thinking");

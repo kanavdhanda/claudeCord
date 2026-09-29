@@ -41,19 +41,41 @@ describe("path safety", () => {
 
 describe("sensitive files", () => {
   it.each([
-    ".env", ".env.production", ".env.local", "config/.env", "id_rsa", "id_ed25519", "deploy.pem", "server.key",
-    "keystore.jks", ".npmrc", ".netrc", ".git-credentials", "credentials.json", "secrets.yaml", "terraform.tfvars",
-    "terraform.tfstate", "service-account-prod.json", ".ssh/config", "home/.aws/credentials", "x/.gnupg/pubring.kbx",
+    ".env",
+    ".env.production",
+    ".env.local",
+    "config/.env",
+    "id_rsa",
+    "id_ed25519",
+    "deploy.pem",
+    "server.key",
+    "keystore.jks",
+    ".npmrc",
+    ".netrc",
+    ".git-credentials",
+    "credentials.json",
+    "secrets.yaml",
+    "terraform.tfvars",
+    "terraform.tfstate",
+    "service-account-prod.json",
+    ".ssh/config",
+    "home/.aws/credentials",
+    "x/.gnupg/pubring.kbx",
   ])("treats %s as sensitive", (p) => {
     expect(isSensitivePath(p)).toBe(true);
   });
 
-  it.each(["src/index.ts", "README.md", "environment.md", "envelope.ts", "docs/keyboard.md", "notes.txt", ".claudecord/inbox/data.csv"])(
-    "allows %s",
-    (p) => {
-      expect(isSensitivePath(p)).toBe(false);
-    },
-  );
+  it.each([
+    "src/index.ts",
+    "README.md",
+    "environment.md",
+    "envelope.ts",
+    "docs/keyboard.md",
+    "notes.txt",
+    ".claudecord/inbox/data.csv",
+  ])("allows %s", (p) => {
+    expect(isSensitivePath(p)).toBe(false);
+  });
 
   it("refuses to resolve a credential file inside the project", () => {
     writeFileSync(join(root, ".env"), "API_KEY=abc");
@@ -99,7 +121,8 @@ describe("chunked round trip", () => {
     writeFileSync(src, "one");
     const recv = new FileReceiver();
     const paths: string[] = [];
-    for (let i = 0; i < 2; i++) for await (const c of readChunks(src)) paths.push((await recv.receive(root, c))?.path ?? "");
+    for (let i = 0; i < 2; i++)
+      for await (const c of readChunks(src)) paths.push((await recv.receive(root, c))?.path ?? "");
     const done = paths.filter(Boolean);
     expect(done[0]).not.toBe(done[1]);
     expect(done[1]).toContain("a-1.txt");
@@ -131,12 +154,17 @@ describe("chunked round trip", () => {
       writeFileSync(join(root, name), content);
       for await (const _ of readChunks(join(root, name))) void _;
     };
-    await expect(send("notes.md", "deploy key:\n-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----")).rejects.toThrow(/private key/);
+    await expect(
+      send("notes.md", "deploy key:\n-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----"),
+    ).rejects.toThrow(/private key/);
     await expect(send("readme.txt", "token ghp_" + "a".repeat(36))).rejects.toThrow(/github token/);
   });
 
   it("refuses an environment file renamed to something harmless", async () => {
-    writeFileSync(join(root, "meeting-notes.md"), "DATABASE_PASSWORD=hunter2hunter2\nSTRIPE_SECRET_KEY=abcdefghijklmnop\nPORT=3000\n");
+    writeFileSync(
+      join(root, "meeting-notes.md"),
+      "DATABASE_PASSWORD=hunter2hunter2\nSTRIPE_SECRET_KEY=abcdefghijklmnop\nPORT=3000\n",
+    );
     await expect(async () => {
       for await (const _ of readChunks(join(root, "meeting-notes.md"))) void _;
     }).rejects.toThrow(/environment variable dump/);

@@ -32,7 +32,10 @@ export interface PaneOpts {
 export async function serverEnvNames(): Promise<string[]> {
   try {
     const out = await run(["show-environment", "-g"]);
-    return out.split("\n").map((l) => l.replace(/^-/, "").split("=")[0]!).filter(Boolean);
+    return out
+      .split("\n")
+      .map((l) => l.replace(/^-/, "").split("=")[0]!)
+      .filter(Boolean);
   } catch {
     return [];
   }
@@ -65,12 +68,39 @@ export async function openPane(o: PaneOpts): Promise<string> {
   let paneId: string;
   if (await hasSession(o.session)) {
     paneId = (
-      await run(["split-window", "-t", `=${o.session}:`, "-c", o.cwd, "-P", "-F", "#{pane_id}", ...envArgs(o.env), ...withScrubbedEnv(o.argv, o.unset ?? [])])
+      await run([
+        "split-window",
+        "-t",
+        `=${o.session}:`,
+        "-c",
+        o.cwd,
+        "-P",
+        "-F",
+        "#{pane_id}",
+        ...envArgs(o.env),
+        ...withScrubbedEnv(o.argv, o.unset ?? []),
+      ])
     ).trim();
     await run(["select-layout", "-t", `=${o.session}:`, "tiled"]);
   } else {
     paneId = (
-      await run(["new-session", "-d", "-s", o.session, "-c", o.cwd, "-x", "220", "-y", "55", "-P", "-F", "#{pane_id}", ...envArgs(o.env), ...withScrubbedEnv(o.argv, o.unset ?? [])])
+      await run([
+        "new-session",
+        "-d",
+        "-s",
+        o.session,
+        "-c",
+        o.cwd,
+        "-x",
+        "220",
+        "-y",
+        "55",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        ...envArgs(o.env),
+        ...withScrubbedEnv(o.argv, o.unset ?? []),
+      ])
     ).trim();
     await run(["set-option", "-t", `=${o.session}`, "pane-border-status", "top"]).catch(() => {});
     await run(["set-option", "-t", `=${o.session}`, "pane-border-format", " #{pane_title} "]).catch(() => {});

@@ -70,36 +70,46 @@ export default function () {
           JSON.stringify({
             t: "agent.register",
             cwd: "/k6",
-            agent: { agentId: `${project(vu, i)}/${agentName(vu, i)}`, name: agentName(vu, i), project: project(vu, i), adapter: "claude" },
+            agent: {
+              agentId: `${project(vu, i)}/${agentName(vu, i)}`,
+              name: agentName(vu, i),
+              project: project(vu, i),
+              adapter: "claude",
+            },
           }),
         );
         registered.add(1);
       }
       // Wait for the other nodes in the group to register before chatting.
-      socket.setTimeout(() => {
-        const period = Math.max(1, Math.floor(1000 / (RATE_PER_AGENT * PER_NODE)));
-        let n = 0;
-        // Everyone stops sending before anyone disconnects, so a peer is never gone when a message to it is sent.
-        let sending = true;
-        socket.setInterval(() => {
-          if (!sending) return;
-          const i = n++ % PER_NODE;
-          const peers = peersOf(vu, i);
-          if (!peers.length) return;
-          const targeted = Math.random() >= BROADCAST;
-          const peer = peers[Math.floor(Math.random() * peers.length)];
-          socket.send(
-            JSON.stringify({
-              t: "agent.say",
-              agentId: `${project(vu, i)}/${agentName(vu, i)}`,
-              text: `${Date.now()}|${targeted ? "@" + peer + " " : ""}ping`,
-            }),
-          );
-          sent.add(1);
-          expected.add(targeted ? 1 : peers.length);
-        }, period);
-        socket.setTimeout(() => { sending = false; }, SESSION_S * 1000);
-      }, 8000 + Math.random() * 2000);
+      socket.setTimeout(
+        () => {
+          const period = Math.max(1, Math.floor(1000 / (RATE_PER_AGENT * PER_NODE)));
+          let n = 0;
+          // Everyone stops sending before anyone disconnects, so a peer is never gone when a message to it is sent.
+          let sending = true;
+          socket.setInterval(() => {
+            if (!sending) return;
+            const i = n++ % PER_NODE;
+            const peers = peersOf(vu, i);
+            if (!peers.length) return;
+            const targeted = Math.random() >= BROADCAST;
+            const peer = peers[Math.floor(Math.random() * peers.length)];
+            socket.send(
+              JSON.stringify({
+                t: "agent.say",
+                agentId: `${project(vu, i)}/${agentName(vu, i)}`,
+                text: `${Date.now()}|${targeted ? "@" + peer + " " : ""}ping`,
+              }),
+            );
+            sent.add(1);
+            expected.add(targeted ? 1 : peers.length);
+          }, period);
+          socket.setTimeout(() => {
+            sending = false;
+          }, SESSION_S * 1000);
+        },
+        8000 + Math.random() * 2000,
+      );
     });
 
     socket.on("message", (data) => {
@@ -112,7 +122,10 @@ export default function () {
       }
     });
 
-    socket.on("error", (e) => console.error(`vu ${vu}: ${e.error()}`));
+    socket.on("error", (e) => {
+      // A socket that is already closing reports this when the session ends. It is not a failure.
+      if (!/close sent|use of closed/i.test(e.error())) console.error(`vu ${vu}: ${e.error()}`);
+    });
     // Start jitter (5 s) + send delay (10 s) + send window + time for the last messages to drain.
     socket.setTimeout(() => socket.close(), (SESSION_S + 25) * 1000);
   });
@@ -121,15 +134,27 @@ export default function () {
 
 export function handleSummary(data) {
   const m = (k, f) => (data.metrics[k] && data.metrics[k].values[f]) || 0;
-  const exp = m("msgs_expected", "count");
-  const pct = exp ? ((m("msgs_delivered", "count") / exp) * 100).toFixed(2) : "n/a";
+  const expected = m("msgs_expected", "count");
+  const delivered = m("msgs_delivered", "count");
+  const pct = expected ? (delivered / expected) * 100 : 0;
   const lines = [
     "",
     `agents registered : ${m("agents_registered", "count")}`,
     `messages sent     : ${m("msgs_sent", "count")}  (${m("msgs_sent", "rate").toFixed(0)}/s)`,
-    `delivered         : ${m("msgs_delivered", "count")} of ${exp} expected (${pct}%)`,
+    `delivered         : ${delivered} of ${expected} expected (${expected ? pct.toFixed(2) : "n/a"}%)`,
     `latency ms        : p50 ${m("deliver_latency_ms", "med").toFixed(1)}  p95 ${m("deliver_latency_ms", "p(95)").toFixed(1)}  p99 ${m("deliver_latency_ms", "p(99)").toFixed(1)}  max ${m("deliver_latency_ms", "max").toFixed(1)}`,
     "",
   ];
-  return { stdout: lines.join("\n") + "\n" };
+  return {
+    stdout: lines.join("\n") + "\n",
+    // Read by scripts/ci/run.mjs k6-delivery, because k6 thresholds cannot express a ratio of two counters.
+    "k6-summary.json": JSON.stringify({
+      sent: m("msgs_sent", "count"),
+      expected,
+      delivered,
+      deliveredPct: pct,
+      p99: m("deliver_latency_ms", "p(99)"),
+      registered: m("agents_registered", "count"),
+    }),
+  };
 }

@@ -1,4 +1,13 @@
-import { type Adapter, type LaunchCtx, type PromptInfo, detectLimit, detectRateLimit, menuKeys, parseMenu, tail } from "./types.js";
+import {
+  type Adapter,
+  type LaunchCtx,
+  type PromptInfo,
+  detectLimit,
+  detectRateLimit,
+  menuKeys,
+  parseMenu,
+  tail,
+} from "./types.js";
 
 const MENU_HINT = /esc to cancel|enter to select|do you want|do you trust|bypass permissions|select/i;
 
@@ -28,7 +37,8 @@ export const claude: Adapter = {
     const busy = /esc to interrupt/i.test(t);
     const menu = parseMenu(screen);
     const prompt = menu && MENU_HINT.test(tail(screen, 30)) ? menu : undefined;
-    const ready = !busy && !prompt && /(\? for shortcuts|bypass permissions|plan mode|accept edits|auto mode|❯)/i.test(t);
+    const ready =
+      !busy && !prompt && /(\? for shortcuts|bypass permissions|plan mode|accept edits|auto mode|❯)/i.test(t);
     const executing = busy && /(running|⎿\s+\S+\.{3}|\(\d+s)/i.test(t);
     return { busy, ready, executing, prompt, limit: detectLimit(screen) ?? detectRateLimit(screen) };
   },

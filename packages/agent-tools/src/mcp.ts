@@ -24,16 +24,14 @@ server.tool(
   "ask_human",
   "Ask the engineer (the human) a question when blocked or at a decision point. Blocks until they reply and returns their answer.",
   { question: z.string(), options: z.array(z.string()).optional(), thread: z.string().optional() },
-  ({ question, options, thread }) =>
-    send({ op: "ask", agentId: currentAgentId(), question, options, thread }),
+  ({ question, options, thread }) => send({ op: "ask", agentId: currentAgentId(), question, options, thread }),
 );
 
 server.tool(
   "report",
   "Post the single final report when the task is complete: what was done and any artifacts such as files or PR links.",
   { title: z.string(), summary: z.string(), artifacts: z.array(z.string()).optional() },
-  ({ title, summary, artifacts }) =>
-    send({ op: "report", agentId: currentAgentId(), title, summary, artifacts }),
+  ({ title, summary, artifacts }) => send({ op: "report", agentId: currentAgentId(), title, summary, artifacts }),
 );
 
 server.tool(

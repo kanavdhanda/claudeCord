@@ -11,10 +11,9 @@ import {
   type ChatInputCommandInteraction,
   type TextChannel,
 } from "discord.js";
-import { AdapterId, MAX_FILE_BYTES, autoName } from "@claudecord/protocol";
+import { AdapterId, AgentSpec, MAX_FILE_BYTES, autoName } from "@claudecord/protocol";
 import type { HubConfig } from "./config.js";
 import type { Auth } from "./auth.js";
-import { formatCode } from "./auth.js";
 import type { Hub, Outbound, PendingAsk } from "./hub.js";
 import type { AgentRow } from "./db.js";
 
@@ -33,8 +32,17 @@ const STATUS_LABEL: Record<string, string> = {
 const SEEN_REACTION = "\u{1F440}";
 const ACCEPTED_REACTION = "\u2705";
 
+/** Everything that touches the network can be swapped, so tests can run the bridge against a fake Discord. */
+export interface DiscordDeps {
+  client?: Client;
+  webhook?: (id: string, token: string) => WebhookClient;
+  putCommands?: (appId: string, guildId: string, body: unknown[]) => Promise<void>;
+}
+
 export class DiscordBridge implements Outbound {
   client: Client;
+  private makeWebhook: (id: string, token: string) => WebhookClient;
+  private putCommands: (appId: string, guildId: string, body: unknown[]) => Promise<void>;
   private hooks = new Map<string, WebhookClient>();
   private threads = new Map<string, string>();
   private statusTimers = new Map<string, NodeJS.Timeout>();
@@ -44,10 +52,20 @@ export class DiscordBridge implements Outbound {
     private cfg: HubConfig,
     private hub: Hub,
     private auth: Auth,
+    deps: DiscordDeps = {},
   ) {
-    this.client = new Client({
-      intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
-    });
+    this.client =
+      deps.client ??
+      new Client({
+        intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+      });
+    this.makeWebhook = deps.webhook ?? ((id, token) => new WebhookClient({ id, token }));
+    this.putCommands =
+      deps.putCommands ??
+      (async (appId, guildId, body) => {
+        const rest = new REST().setToken(this.cfg.discordToken);
+        await rest.put(Routes.applicationGuildCommands(appId, guildId), { body });
+      });
   }
 
   async start(): Promise<void> {
@@ -58,7 +76,7 @@ export class DiscordBridge implements Outbound {
     await this.client.login(this.cfg.discordToken);
     await new Promise<void>((r) => this.client.once("clientReady", () => r()));
     await this.registerCommands();
-    this.typingTimer = setInterval(() => void this.typing(), 8000);
+    this.typingTimer = setInterval(() => void this.typing().catch(() => {}), 8000);
     console.log(`discord ready as ${this.client.user?.tag}`);
   }
 
@@ -77,15 +95,25 @@ export class DiscordBridge implements Outbound {
       const guild = await this.guild();
       const me = await guild.members.fetchMe();
       const need = {
-        ViewChannel: "View Channels", ManageChannels: "Manage Channels", ManageWebhooks: "Manage Webhooks",
-        SendMessages: "Send Messages", AddReactions: "Add Reactions", AttachFiles: "Attach Files",
-        CreatePublicThreads: "Create Public Threads", SendMessagesInThreads: "Send Messages in Threads",
-        ReadMessageHistory: "Read Message History", ManageMessages: "Manage Messages (to pin the status board)",
+        ViewChannel: "View Channels",
+        ManageChannels: "Manage Channels",
+        ManageWebhooks: "Manage Webhooks",
+        SendMessages: "Send Messages",
+        AddReactions: "Add Reactions",
+        AttachFiles: "Attach Files",
+        CreatePublicThreads: "Create Public Threads",
+        SendMessagesInThreads: "Send Messages in Threads",
+        ReadMessageHistory: "Read Message History",
+        ManageMessages: "Manage Messages (to pin the status board)",
       } as const;
-      const missing = Object.entries(need).filter(([k]) => !me.permissions.has(k as keyof typeof need)).map(([, label]) => label);
+      const missing = Object.entries(need)
+        .filter(([k]) => !me.permissions.has(k as keyof typeof need))
+        .map(([, label]) => label);
       if (missing.length) problems.push(`The bot is missing permissions in ${guild.name}: ${missing.join(", ")}.`);
     } catch {
-      problems.push(`The bot cannot see the server with ID ${this.cfg.guildId}. Check the ID and that the bot was invited to it.`);
+      problems.push(
+        `The bot cannot see the server with ID ${this.cfg.guildId}. Check the ID and that the bot was invited to it.`,
+      );
     }
     return problems;
   }
@@ -126,7 +154,7 @@ export class DiscordBridge implements Outbound {
     if (!h) {
       const p = this.hub.db.getProject(project);
       if (!p?.webhook_id || !p.webhook_token) throw new Error(`no webhook for ${project}`);
-      h = new WebhookClient({ id: p.webhook_id, token: p.webhook_token });
+      h = this.makeWebhook(p.webhook_id, p.webhook_token);
       this.hooks.set(project, h);
     }
     return h;
@@ -186,7 +214,13 @@ export class DiscordBridge implements Outbound {
     });
   }
 
-  async postReport(project: string, agent: AgentRow, title: string, summary: string, artifacts?: string[]): Promise<void> {
+  async postReport(
+    project: string,
+    agent: AgentRow,
+    title: string,
+    summary: string,
+    artifacts?: string[],
+  ): Promise<void> {
     const embed = new EmbedBuilder().setTitle(title.slice(0, 250)).setDescription(summary.slice(0, 4000));
     if (artifacts?.length) embed.addFields({ name: "Artifacts", value: artifacts.join("\n").slice(0, 1000) });
     await this.hook(project).send({
@@ -197,7 +231,14 @@ export class DiscordBridge implements Outbound {
     });
   }
 
-  async postFile(project: string, agent: AgentRow, name: string, data: Buffer, caption?: string, thread?: string): Promise<void> {
+  async postFile(
+    project: string,
+    agent: AgentRow,
+    name: string,
+    data: Buffer,
+    caption?: string,
+    thread?: string,
+  ): Promise<void> {
     const threadId = await this.threadId(project, thread);
     await this.hook(project).send({
       content: caption?.slice(0, 1900),
@@ -214,7 +255,10 @@ export class DiscordBridge implements Outbound {
     const ch = await this.client.channels.fetch(channelId);
     if (!ch?.isTextBased()) return;
     const msg = await ch.messages.fetch(messageId);
-    await msg.reactions.cache.get(SEEN_REACTION)?.users.remove(this.client.user!.id).catch(() => {});
+    await msg.reactions.cache
+      .get(SEEN_REACTION)
+      ?.users.remove(this.client.user!.id)
+      .catch(() => {});
     await msg.react(ACCEPTED_REACTION);
     void agentName;
   }
@@ -252,7 +296,10 @@ export class DiscordBridge implements Outbound {
     if (!rows.length) return "No tasks yet.";
     const name = (id: string) => this.hub.agent(id)?.name ?? id.split("/").pop();
     return rows
-      .map((t) => `${t.id}  ${t.state.padEnd(8)} ${name(t.to_agent)}: ${t.text.slice(0, 80)}${t.summary ? `  -> ${t.summary.slice(0, 80)}` : ""}`)
+      .map(
+        (t) =>
+          `${t.id}  ${t.state.padEnd(8)} ${name(t.to_agent)}: ${t.text.slice(0, 80)}${t.summary ? `  -> ${t.summary.slice(0, 80)}` : ""}`,
+      )
       .join("\n");
   }
 
@@ -281,7 +328,13 @@ export class DiscordBridge implements Outbound {
       const s = this.hub.status.get(a.agent_id)?.status;
       if (s === "thinking" || s === "executing") busy.add(a.project);
     }
-    for (const p of busy) await (await this.channel(p)).sendTyping().catch(() => {});
+    for (const p of busy) {
+      try {
+        await (await this.channel(p)).sendTyping();
+      } catch {
+        /* the indicator is cosmetic, so a failed fetch or a rate limit is not worth reporting */
+      }
+    }
   }
 
   // Inbound
@@ -307,29 +360,44 @@ export class DiscordBridge implements Outbound {
       return;
     }
     if (res.offline.length === res.targets.length) {
-      await m.reply({ content: `${res.offline.join(", ")} not connected, so nothing was delivered.`, allowedMentions: { repliedUser: false } });
+      await m.reply({
+        content: `${res.offline.join(", ")} not connected, so nothing was delivered.`,
+        allowedMentions: { repliedUser: false },
+      });
       return;
     }
     await m.react(SEEN_REACTION).catch(() => {});
     for (const h of res.held) {
-      await m.reply({ content: `${h.name} is ${h.why}. Your message is queued and will be picked up when it can.`, allowedMentions: { repliedUser: false } });
+      await m.reply({
+        content: `${h.name} is ${h.why}. Your message is queued and will be picked up when it can.`,
+        allowedMentions: { repliedUser: false },
+      });
     }
   }
 
   private async forwardAttachments(m: import("discord.js").Message, project: string, thread?: string): Promise<void> {
+    const reply = (content: string) => m.reply({ content, allowedMentions: { repliedUser: false } });
     let delivered: string[] = [];
+    let tried = 0;
     for (const att of m.attachments.values()) {
       if (att.size > MAX_FILE_BYTES) {
-        await m.reply({ content: `${att.name} is over the ${MAX_FILE_BYTES / 1048576} MB limit.`, allowedMentions: { repliedUser: false } });
+        await reply(`${att.name} is over the ${MAX_FILE_BYTES / 1048576} MB limit.`);
         continue;
       }
-      if (!isDiscordCdn(att.url)) continue;
-      const res = await fetch(att.url, { redirect: "error" });
-      if (!res.ok) continue;
+      if (!isDiscordCdn(att.url)) {
+        await reply(`${att.name} was skipped because it is not hosted on Discord.`);
+        continue;
+      }
+      tried++;
+      const res = await fetch(att.url, { redirect: "error" }).catch(() => undefined);
+      if (!res?.ok) {
+        await reply(`Could not download ${att.name}.`);
+        continue;
+      }
       delivered = this.hub.sendFile(project, m.content, att.name, Buffer.from(await res.arrayBuffer()), thread);
     }
     if (delivered.length) await m.react(SEEN_REACTION).catch(() => {});
-    else await m.reply({ content: "No agents are connected to this project.", allowedMentions: { repliedUser: false } });
+    else if (tried) await reply("No agents are connected to this project.");
   }
 
   // Slash commands
@@ -337,33 +405,51 @@ export class DiscordBridge implements Outbound {
   private async registerCommands(): Promise<void> {
     const adapters = AdapterId.options.map((o) => ({ name: o, value: o }));
     const cmds = [
-      new SlashCommandBuilder().setName("killall").setDescription("Stop all agents")
+      new SlashCommandBuilder()
+        .setName("killall")
+        .setDescription("Stop all agents")
         .addStringOption((o) => o.setName("project").setDescription("Limit to a project")),
-      new SlashCommandBuilder().setName("stop").setDescription("Stop one agent")
+      new SlashCommandBuilder()
+        .setName("stop")
+        .setDescription("Stop one agent")
         .addStringOption((o) => o.setName("agent").setDescription("Agent name").setRequired(true)),
-      new SlashCommandBuilder().setName("pause").setDescription("Hold message delivery")
+      new SlashCommandBuilder()
+        .setName("pause")
+        .setDescription("Hold message delivery")
         .addStringOption((o) => o.setName("agent").setDescription("One agent, default all in project")),
-      new SlashCommandBuilder().setName("resume").setDescription("Resume message delivery")
+      new SlashCommandBuilder()
+        .setName("resume")
+        .setDescription("Resume message delivery")
         .addStringOption((o) => o.setName("agent").setDescription("One agent, default all in project")),
-      new SlashCommandBuilder().setName("spawn").setDescription("Add an agent to this project")
+      new SlashCommandBuilder()
+        .setName("spawn")
+        .setDescription("Add an agent to this project")
         .addStringOption((o) => o.setName("node").setDescription("Device name").setRequired(true))
         .addStringOption((o) => o.setName("name").setDescription("Agent name, auto if empty"))
-        .addStringOption((o) => o.setName("adapter").setDescription("Agent type").addChoices(...adapters))
+        .addStringOption((o) =>
+          o
+            .setName("adapter")
+            .setDescription("Agent type")
+            .addChoices(...adapters),
+        )
         .addStringOption((o) => o.setName("model").setDescription("Model"))
         .addStringOption((o) => o.setName("role").setDescription("Role")),
       new SlashCommandBuilder().setName("agents").setDescription("List agents"),
       new SlashCommandBuilder().setName("status").setDescription("Show project status"),
       new SlashCommandBuilder().setName("tasks").setDescription("Show the task board for this project"),
-      new SlashCommandBuilder().setName("lead").setDescription("Set the lead agent")
+      new SlashCommandBuilder()
+        .setName("lead")
+        .setDescription("Set the lead agent")
         .addStringOption((o) => o.setName("agent").setDescription("Agent name").setRequired(true)),
       new SlashCommandBuilder().setName("connect").setDescription("Get a one-time code to connect a machine"),
       new SlashCommandBuilder().setName("dashboard").setDescription("Get a one-time link to open the dashboard"),
       new SlashCommandBuilder().setName("devices").setDescription("List connected machines"),
-      new SlashCommandBuilder().setName("revoke").setDescription("Revoke a device token")
+      new SlashCommandBuilder()
+        .setName("revoke")
+        .setDescription("Revoke a device token")
         .addStringOption((o) => o.setName("device").setDescription("Device name").setRequired(true)),
     ].map((c) => c.setDefaultMemberPermissions(0).setContexts(InteractionContextType.Guild).toJSON());
-    const rest = new REST().setToken(this.cfg.discordToken);
-    await rest.put(Routes.applicationGuildCommands(this.client.user!.id, this.cfg.guildId), { body: cmds });
+    await this.putCommands(this.client.user!.id, this.cfg.guildId, cmds);
   }
 
   private projectOf(i: ChatInputCommandInteraction): string | undefined {
@@ -407,7 +493,13 @@ export class DiscordBridge implements Outbound {
           model: s("model"),
           role: s("role"),
         };
-        const ok = this.hub.spawn(s("node")!, spec);
+        // The device would drop an invalid spec without a word, so say what is wrong here.
+        const valid = AgentSpec.safeParse(spec);
+        if (!valid.success) {
+          const why = valid.error.issues.map((i) => `${i.path.join(".") || "agent"} ${i.message}`).join("; ");
+          return void (await reply(`Cannot spawn: ${why}.`, true));
+        }
+        const ok = this.hub.spawn(s("node")!, valid.data);
         return void (await reply(ok ? `Spawning ${name}.` : `Node ${s("node")} is not connected.`));
       }
       case "agents":
@@ -437,12 +529,20 @@ export class DiscordBridge implements Outbound {
       case "dashboard": {
         const { token, expiresInMs } = this.auth.createLoginToken();
         const url = `${this.cfg.publicUrl.replace(/\/$/, "")}/dashboard/login?t=${token}`;
-        return void (await reply(`Open this link to sign in. It works once and expires in ${Math.round(expiresInMs / 60_000)} minutes.\n${url}`, true));
+        return void (await reply(
+          `Open this link to sign in. It works once and expires in ${Math.round(expiresInMs / 60_000)} minutes.\n${url}`,
+          true,
+        ));
       }
       case "devices": {
         const rows = this.hub.db.listDevices().filter((d) => !d.revoked);
         const text = rows.length
-          ? rows.map((d) => `${d.node_name.padEnd(20)} ${this.hub.nodes.has(d.node_name) ? "online" : "offline"}  ${this.hub.db.agentsOfNode(d.node_name).length} agent(s)`).join("\n")
+          ? rows
+              .map(
+                (d) =>
+                  `${d.node_name.padEnd(20)} ${this.hub.nodes.has(d.node_name) ? "online" : "offline"}  ${this.hub.db.agentsOfNode(d.node_name).length} agent(s)`,
+              )
+              .join("\n")
           : "No devices yet. Run /connect.";
         return void (await reply("```\n" + text + "\n```", true));
       }
@@ -465,7 +565,13 @@ export function isDiscordCdn(url: string): boolean {
 }
 
 function slug(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9-_]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 90) || "project";
+  return (
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9-_]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 90) || "project"
+  );
 }
 
 function* chunks(text: string, size = 1900): Generator<string> {

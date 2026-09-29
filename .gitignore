@@ -9,3 +9,4 @@ packages/hub/bench/k6/tokens.json
 hub.json
 .claudecord/
 coverage/
+k6-summary.json

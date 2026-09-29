@@ -23,12 +23,42 @@ export interface Tier {
 
 export const TIERS: Record<string, Tier> = {
   reference: { name: "reference", vcpu: Infinity, ramMb: 16384, note: "this machine, unconstrained" },
-  "oracle-ampere": { name: "oracle-ampere", vcpu: 2, ramMb: 12288, note: "Oracle Always Free Ampere A1, 2 OCPU 12 GB (since June 2026)" },
-  "railway-free": { name: "railway-free", vcpu: 1, ramMb: 512, note: "Railway free plan, 1 vCPU 0.5 GB (credit limited)" },
-  "gcp-e2-micro": { name: "gcp-e2-micro", vcpu: 0.25, ramMb: 1024, note: "Google Cloud Always Free e2-micro, 0.25 vCPU sustained 1 GB" },
-  "oracle-amd-micro": { name: "oracle-amd-micro", vcpu: 0.125, ramMb: 1024, note: "Oracle Always Free AMD micro, 1/8 OCPU 1 GB" },
-  "render-free": { name: "render-free", vcpu: 0.1, ramMb: 512, note: "Render free web service, 0.1 CPU 512 MB (sleeps after 15 min idle)" },
-  "fly-shared-256": { name: "fly-shared-256", vcpu: 0.0625, ramMb: 256, note: "Fly.io shared-cpu-1x 256 MB (legacy free allowance), ~1/16 baseline" },
+  "oracle-ampere": {
+    name: "oracle-ampere",
+    vcpu: 2,
+    ramMb: 12288,
+    note: "Oracle Always Free Ampere A1, 2 OCPU 12 GB (since June 2026)",
+  },
+  "railway-free": {
+    name: "railway-free",
+    vcpu: 1,
+    ramMb: 512,
+    note: "Railway free plan, 1 vCPU 0.5 GB (credit limited)",
+  },
+  "gcp-e2-micro": {
+    name: "gcp-e2-micro",
+    vcpu: 0.25,
+    ramMb: 1024,
+    note: "Google Cloud Always Free e2-micro, 0.25 vCPU sustained 1 GB",
+  },
+  "oracle-amd-micro": {
+    name: "oracle-amd-micro",
+    vcpu: 0.125,
+    ramMb: 1024,
+    note: "Oracle Always Free AMD micro, 1/8 OCPU 1 GB",
+  },
+  "render-free": {
+    name: "render-free",
+    vcpu: 0.1,
+    ramMb: 512,
+    note: "Render free web service, 0.1 CPU 512 MB (sleeps after 15 min idle)",
+  },
+  "fly-shared-256": {
+    name: "fly-shared-256",
+    vcpu: 0.0625,
+    ramMb: 256,
+    note: "Fly.io shared-cpu-1x 256 MB (legacy free allowance), ~1/16 baseline",
+  },
 };
 
 const PERIOD_MS = 100;
@@ -70,11 +100,27 @@ export async function startTierHub(tier: Tier, nodeCount: number, derate: number
 
   const child: ChildProcess = spawn(
     process.execPath,
-    [...process.execArgv, `--max-old-space-size=${Math.max(64, Math.floor(limitMb * 0.8))}`, serve, "--nodes", String(nodeCount), "--port", "0", "--tokens", tokensFile],
+    [
+      ...process.execArgv,
+      `--max-old-space-size=${Math.max(64, Math.floor(limitMb * 0.8))}`,
+      serve,
+      "--nodes",
+      String(nodeCount),
+      "--port",
+      "0",
+      "--tokens",
+      tokensFile,
+    ],
     { stdio: ["ignore", "pipe", "inherit"] },
   );
   const pid = child.pid!;
-  process.on("exit", () => { try { process.kill(pid, "SIGKILL"); } catch { /* gone */ } });
+  process.on("exit", () => {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      /* gone */
+    }
+  });
 
   let peakRss = 0;
   let loopMax = 0;
@@ -106,10 +152,18 @@ export async function startTierHub(tier: Tier, nodeCount: number, derate: number
   if (quota < 1) {
     void (async () => {
       while (alive) {
-        try { process.kill(pid, "SIGCONT"); } catch { return; }
+        try {
+          process.kill(pid, "SIGCONT");
+        } catch {
+          return;
+        }
         await sleep(PERIOD_MS * quota);
         if (!alive) return;
-        try { process.kill(pid, "SIGSTOP"); } catch { return; }
+        try {
+          process.kill(pid, "SIGSTOP");
+        } catch {
+          return;
+        }
         await sleep(PERIOD_MS * (1 - quota));
       }
     })();
@@ -122,7 +176,11 @@ export async function startTierHub(tier: Tier, nodeCount: number, derate: number
     peakRss = Math.max(peakRss, mb);
     if (mb > limitMb && alive) {
       reason = `OOM killed at ${Math.round(mb)} MB (limit ${limitMb} MB)`;
-      try { process.kill(pid, "SIGKILL"); } catch { /* gone */ }
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        /* gone */
+      }
     }
   }, 200);
 
@@ -137,7 +195,12 @@ export async function startTierHub(tier: Tier, nodeCount: number, derate: number
     async stop() {
       clearInterval(watch);
       alive = false;
-      try { process.kill(pid, "SIGCONT"); process.kill(pid, "SIGKILL"); } catch { /* gone */ }
+      try {
+        process.kill(pid, "SIGCONT");
+        process.kill(pid, "SIGKILL");
+      } catch {
+        /* gone */
+      }
       rmSync(tokensFile, { force: true });
     },
   };

@@ -12,7 +12,9 @@ const spec = (o: Record<string, unknown> = {}) => ({
 describe("agent spec validation", () => {
   it("accepts ordinary names", () => {
     expect(AgentSpec.safeParse(spec()).success).toBe(true);
-    expect(AgentSpec.safeParse(spec({ model: "claude-opus-5-5[1m]", role: "executor on the GPU box" })).success).toBe(true);
+    expect(AgentSpec.safeParse(spec({ model: "claude-opus-5-5[1m]", role: "executor on the GPU box" })).success).toBe(
+      true,
+    );
   });
 
   it.each([
@@ -45,14 +47,23 @@ describe("frame parsing", () => {
     const say = (text: string) => JSON.stringify({ t: "agent.say", agentId: "p/a", text });
     expect(parseNodeFrame(say("x".repeat(8000)))).not.toBeNull();
     expect(parseNodeFrame(say("x".repeat(8001)))).toBeNull();
-    const ask = (options: string[]) => JSON.stringify({ t: "agent.ask", agentId: "p/a", askId: "1", question: "q", options });
+    const ask = (options: string[]) =>
+      JSON.stringify({ t: "agent.ask", agentId: "p/a", askId: "1", question: "q", options });
     expect(parseNodeFrame(ask(Array(12).fill("o")))).not.toBeNull();
     expect(parseNodeFrame(ask(Array(13).fill("o")))).toBeNull();
   });
 
   it("caps a file chunk at the chunk size", () => {
     const chunk = (len: number) =>
-      JSON.stringify({ t: "file.chunk", transferId: "t", agentId: "p/a", name: "f", seq: 0, last: true, data: "A".repeat(len) });
+      JSON.stringify({
+        t: "file.chunk",
+        transferId: "t",
+        agentId: "p/a",
+        name: "f",
+        seq: 0,
+        last: true,
+        data: "A".repeat(len),
+      });
     expect(parseNodeFrame(chunk(Math.ceil((FILE_CHUNK_BYTES * 4) / 3)))).not.toBeNull();
     expect(parseNodeFrame(chunk(FILE_CHUNK_BYTES * 2))).toBeNull();
   });

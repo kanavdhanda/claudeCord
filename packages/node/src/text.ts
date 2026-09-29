@@ -31,6 +31,8 @@ export interface Delivery {
 
 export function formatDeliveries(items: Delivery[]): string {
   return items
-    .map((d) => `[${stripControl(d.from)}${d.thread ? ` | thread: ${stripControl(d.thread)}` : ""}] ${quoteBody(d.text)}`)
+    .map(
+      (d) => `[${stripControl(d.from)}${d.thread ? ` | thread: ${stripControl(d.thread)}` : ""}] ${quoteBody(d.text)}`,
+    )
     .join("\n\n");
 }

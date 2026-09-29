@@ -42,21 +42,27 @@ async function register(node: string, project: string, name: string) {
     conns.set(node, conn);
     hub.nodeConnected(conn);
   }
-  await hub.onNodeFrame(conn, { t: "agent.register", cwd: "/x", agent: { agentId: `${project}/${name}`, name, project, adapter: "claude" } });
+  await hub.onNodeFrame(conn, {
+    t: "agent.register",
+    cwd: "/x",
+    agent: { agentId: `${project}/${name}`, name, project, adapter: "claude" },
+  });
 }
 
 /** A raw request, because fetch hides compression and will not let a test choose the Host header. */
 function raw(path: string, headers: Record<string, string> = {}) {
-  return new Promise<{ status: number; headers: Record<string, string | string[] | undefined>; length: number }>((resolve, reject) => {
-    const url = new URL(base);
-    const req = httpRequest({ host: url.hostname, port: url.port, path, headers }, (res) => {
-      let length = 0;
-      res.on("data", (c: Buffer) => (length += c.length));
-      res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers, length }));
-    });
-    req.on("error", reject);
-    req.end();
-  });
+  return new Promise<{ status: number; headers: Record<string, string | string[] | undefined>; length: number }>(
+    (resolve, reject) => {
+      const url = new URL(base);
+      const req = httpRequest({ host: url.hostname, port: url.port, path, headers }, (res) => {
+        let length = 0;
+        res.on("data", (c: Buffer) => (length += c.length));
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers, length }));
+      });
+      req.on("error", reject);
+      req.end();
+    },
+  );
 }
 
 beforeAll(async () => {
@@ -83,7 +89,8 @@ beforeAll(async () => {
   await new Promise((r) => server.once("listening", r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
-  for (let i = 0; i < 30; i++) await register(i % 2 ? "mac" : "gpu", `proj${i % 6}`, `agent${String(i).padStart(2, "0")}`);
+  for (let i = 0; i < 30; i++)
+    await register(i % 2 ? "mac" : "gpu", `proj${i % 6}`, `agent${String(i).padStart(2, "0")}`);
   db.createToken("mac");
   db.createToken("gpu");
 });
@@ -131,7 +138,9 @@ describe("static site", () => {
   });
 
   it("caches hashed assets forever and pages briefly", async () => {
-    expect((await get("/assets/app.abc123.js")).headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    expect((await get("/assets/app.abc123.js")).headers.get("cache-control")).toBe(
+      "public, max-age=31536000, immutable",
+    );
     expect((await get("/assets/app.abc123.js")).headers.get("content-type")).toContain("text/javascript");
     expect((await get("/")).headers.get("cache-control")).toContain("max-age=300");
   });
@@ -174,14 +183,17 @@ describe("static site", () => {
     expect(await res.text()).toContain("User-agent");
   });
 
-  it.each(["/..%2f..%2f..%2fetc%2fpasswd", "/%2e%2e/%2e%2e/etc/passwd", "/assets/..%2f..%2f..%2fetc%2fhosts", "/%00", "/..\\..\\etc\\passwd"])(
-    "will not serve files outside the site: %s",
-    async (path) => {
-      const res = await get(path);
-      expect([400, 403, 404]).toContain(res.status);
-      expect(await res.text()).not.toContain("root:");
-    },
-  );
+  it.each([
+    "/..%2f..%2f..%2fetc%2fpasswd",
+    "/%2e%2e/%2e%2e/etc/passwd",
+    "/assets/..%2f..%2f..%2fetc%2fhosts",
+    "/%00",
+    "/..\\..\\etc\\passwd",
+  ])("will not serve files outside the site: %s", async (path) => {
+    const res = await get(path);
+    expect([400, 403, 404]).toContain(res.status);
+    expect(await res.text()).not.toContain("root:");
+  });
 
   it("only allows GET and HEAD on pages", async () => {
     const res = await fetch(`${base}/`, { method: "POST", body: "x" });
@@ -213,14 +225,20 @@ describe("https enforcement", () => {
   });
 
   it("sends HSTS only over https", async () => {
-    expect((await get("/", { "x-forwarded-proto": "https" })).headers.get("strict-transport-security")).toContain("max-age=63072000");
+    expect((await get("/", { "x-forwarded-proto": "https" })).headers.get("strict-transport-security")).toContain(
+      "max-age=63072000",
+    );
     expect((await get("/")).headers.get("strict-transport-security")).toBeNull();
   });
 });
 
 describe("pairing endpoint", () => {
   const pair = (body: unknown, raw = false) =>
-    fetch(`${base}/api/v1/pair`, { method: "POST", headers: { "content-type": "application/json" }, body: raw ? (body as string) : JSON.stringify(body) });
+    fetch(`${base}/api/v1/pair`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: raw ? (body as string) : JSON.stringify(body),
+    });
 
   it("exchanges a one-time code for a device token and the hub address", async () => {
     const { code } = auth.createPairCode();
@@ -259,7 +277,8 @@ describe("pairing endpoint", () => {
 
 describe("dashboard", () => {
   it("needs a session for every API route", async () => {
-    for (const r of ["summary", "agents", "tasks", "devices"]) expect((await get(`/api/v1/dash/${r}`)).status).toBe(401);
+    for (const r of ["summary", "agents", "tasks", "devices"])
+      expect((await get(`/api/v1/dash/${r}`)).status).toBe(401);
     expect((await get("/api/v1/dash/agents", { cookie: "cc_session=forged" })).status).toBe(401);
   });
 
@@ -296,7 +315,13 @@ describe("dashboard", () => {
 
   it("paginates, searches and filters agents", async () => {
     const cookie = await signIn();
-    const page = async (q: string) => (await (await get(`/api/v1/dash/agents${q}`, { cookie })).json()) as { items: { name: string; project: string }[]; page: number; pages: number; total: number };
+    const page = async (q: string) =>
+      (await (await get(`/api/v1/dash/agents${q}`, { cookie })).json()) as {
+        items: { name: string; project: string }[];
+        page: number;
+        pages: number;
+        total: number;
+      };
     const p1 = await page("?limit=10");
     expect(p1.items).toHaveLength(10);
     expect(p1.total).toBe(30);
@@ -314,14 +339,20 @@ describe("dashboard", () => {
 
   it("sorts agents by project then name", async () => {
     const cookie = await signIn();
-    const body = (await (await get("/api/v1/dash/agents?limit=100", { cookie })).json()) as { items: { name: string; project: string }[] };
+    const body = (await (await get("/api/v1/dash/agents?limit=100", { cookie })).json()) as {
+      items: { name: string; project: string }[];
+    };
     const keys = body.items.map((a) => `${a.project}/${a.name}`);
     expect(keys).toEqual([...keys].sort((a, b) => a.localeCompare(b)));
   });
 
   it("lists devices and tasks", async () => {
     const cookie = await signIn();
-    const devices = (await (await get("/api/v1/dash/devices", { cookie })).json()) as { name: string; online: boolean; agents: number }[];
+    const devices = (await (await get("/api/v1/dash/devices", { cookie })).json()) as {
+      name: string;
+      online: boolean;
+      agents: number;
+    }[];
     expect(devices.find((d) => d.name === "mac")?.agents).toBe(15);
     const tasks = (await (await get("/api/v1/dash/tasks", { cookie })).json()) as { items: unknown[]; total: number };
     expect(tasks.total).toBe(0);
@@ -346,8 +377,13 @@ describe("dashboard", () => {
     const cookie = await signIn();
     expect((await fetch(`${base}/api/v1/dash/agents`, { method: "POST", headers: { cookie } })).status).toBe(405);
     expect((await fetch(`${base}/api/v1/dash/logout`, { method: "POST", headers: { cookie } })).status).toBe(403);
-    expect((await fetch(`${base}/api/v1/dash/logout`, { headers: { cookie, "x-requested-with": "claudecord" } })).status).toBe(403);
-    const out = await fetch(`${base}/api/v1/dash/logout`, { method: "POST", headers: { cookie, "x-requested-with": "claudecord" } });
+    expect(
+      (await fetch(`${base}/api/v1/dash/logout`, { headers: { cookie, "x-requested-with": "claudecord" } })).status,
+    ).toBe(403);
+    const out = await fetch(`${base}/api/v1/dash/logout`, {
+      method: "POST",
+      headers: { cookie, "x-requested-with": "claudecord" },
+    });
     expect(out.status).toBe(204);
     expect(out.headers.get("set-cookie")).toContain("Max-Age=0");
     expect((await get("/api/v1/dash/summary", { cookie })).status).toBe(401);
@@ -357,7 +393,7 @@ describe("dashboard", () => {
     let last = "";
     for (let i = 0; i < 14; i++) {
       const r = await get("/dashboard/login?t=bogus");
-      last = r.status === 429 ? "429" : r.headers.get("location") ?? "";
+      last = r.status === 429 ? "429" : (r.headers.get("location") ?? "");
     }
     expect(last).toBe("429");
   });

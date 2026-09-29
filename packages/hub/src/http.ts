@@ -104,7 +104,10 @@ export function createHttpHandler(deps: HttpDeps) {
 
   const siteDir = deps.siteDir && existsSync(deps.siteDir) ? deps.siteDir : undefined;
   if (siteDir && existsSync(join(siteDir, "manifest.json"))) {
-    const m = JSON.parse(readFileSync(join(siteDir, "manifest.json"), "utf8")) as { cssHash?: string; pages?: string[] };
+    const m = JSON.parse(readFileSync(join(siteDir, "manifest.json"), "utf8")) as {
+      cssHash?: string;
+      pages?: string[];
+    };
     cssHash = m.cssHash ?? "";
     manifestPages = new Set(m.pages ?? []);
   }
@@ -137,7 +140,14 @@ export function createHttpHandler(deps: HttpDeps) {
     return h;
   }
 
-  function send(req: IncomingMessage, res: ServerResponse, status: number, body: Buffer | string, headers: Record<string, string>, priv = false) {
+  function send(
+    req: IncomingMessage,
+    res: ServerResponse,
+    status: number,
+    body: Buffer | string,
+    headers: Record<string, string>,
+    priv = false,
+  ) {
     const buf = typeof body === "string" ? Buffer.from(body) : body;
     res.writeHead(status, { ...securityHeaders(req, priv), "Content-Length": buf.length, ...headers });
     res.end(req.method === "HEAD" ? undefined : buf);
@@ -153,10 +163,21 @@ export function createHttpHandler(deps: HttpDeps) {
     return { body, headers };
   }
 
-  function json(req: IncomingMessage, res: ServerResponse, status: number, data: unknown, extra: Record<string, string> = {}) {
+  function json(
+    req: IncomingMessage,
+    res: ServerResponse,
+    status: number,
+    data: unknown,
+    extra: Record<string, string> = {},
+  ) {
     const raw = Buffer.from(JSON.stringify(data));
     const etag = `W/"${createHash("sha1").update(raw).digest("base64url")}"`;
-    const base = { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "private, no-cache", ETag: etag, ...extra };
+    const base = {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "private, no-cache",
+      ETag: etag,
+      ...extra,
+    };
     if (status === 200 && req.headers["if-none-match"] === etag) {
       res.writeHead(304, { ...securityHeaders(req, true), ...base });
       return res.end();
@@ -188,7 +209,8 @@ export function createHttpHandler(deps: HttpDeps) {
   async function pair(req: IncomingMessage, res: ServerResponse) {
     const ip = clientIp(req);
     const noStore = { "Cache-Control": "no-store" };
-    if (pairFailures.blocked(ip)) return json(req, res, 429, { error: "too many attempts, wait a minute" }, { ...noStore, "Retry-After": "60" });
+    if (pairFailures.blocked(ip))
+      return json(req, res, 429, { error: "too many attempts, wait a minute" }, { ...noStore, "Retry-After": "60" });
     const body = await readBody(req);
     let parsed: { code?: unknown; device?: unknown } = {};
     try {
@@ -196,11 +218,18 @@ export function createHttpHandler(deps: HttpDeps) {
     } catch {
       return json(req, res, 400, { error: "invalid JSON" }, noStore);
     }
-    if (typeof parsed.code !== "string" || typeof parsed.device !== "string") return json(req, res, 400, { error: "code and device are required" }, noStore);
+    if (typeof parsed.code !== "string" || typeof parsed.device !== "string")
+      return json(req, res, 400, { error: "code and device are required" }, noStore);
     const out = auth.redeemPairCode(parsed.code, parsed.device);
     if (!out) {
       pairFailures.fail(ip);
-      return json(req, res, 401, { error: "that code is wrong, used or expired. Run /connect in Discord for a new one" }, noStore);
+      return json(
+        req,
+        res,
+        401,
+        { error: "that code is wrong, used or expired. Run /connect in Discord for a new one" },
+        noStore,
+      );
     }
     const hubUrl = publicUrl().replace(/^http/, "ws");
     json(req, res, 200, { token: out.token, device: out.device, hub: hubUrl }, noStore);
@@ -217,17 +246,37 @@ export function createHttpHandler(deps: HttpDeps) {
 
   function dashboardLogin(req: IncomingMessage, res: ServerResponse, url: URL) {
     const ip = clientIp(req);
-    if (loginFailures.blocked(ip)) return send(req, res, 429, "Too many attempts. Wait a minute.", { "Content-Type": "text/plain; charset=utf-8", "Retry-After": "60" }, true);
+    if (loginFailures.blocked(ip))
+      return send(
+        req,
+        res,
+        429,
+        "Too many attempts. Wait a minute.",
+        { "Content-Type": "text/plain; charset=utf-8", "Retry-After": "60" },
+        true,
+      );
     const session = auth.redeemLoginToken(url.searchParams.get("t") ?? "");
     if (!session) {
       loginFailures.fail(ip);
       return send(req, res, 303, "", { Location: "/dashboard/?expired=1", "Cache-Control": "no-store" }, true);
     }
-    send(req, res, 303, "", { Location: "/dashboard/", "Set-Cookie": cookie(req, session, SESSION_TTL_MS / 1000), "Cache-Control": "no-store" }, true);
+    send(
+      req,
+      res,
+      303,
+      "",
+      {
+        Location: "/dashboard/",
+        "Set-Cookie": cookie(req, session, SESSION_TTL_MS / 1000),
+        "Cache-Control": "no-store",
+      },
+      true,
+    );
   }
 
   function page(url: URL): { page: number; limit: number } {
-    const n = (k: string, d: number, min: number, max: number) => Math.min(max, Math.max(min, Number.parseInt(url.searchParams.get(k) ?? "", 10) || d));
+    const n = (k: string, d: number, min: number, max: number) =>
+      Math.min(max, Math.max(min, Number.parseInt(url.searchParams.get(k) ?? "", 10) || d));
     return { page: n("page", 1, 1, 100_000), limit: n("limit", 25, 1, 100) };
   }
 
@@ -253,7 +302,12 @@ export function createHttpHandler(deps: HttpDeps) {
         const tasks = { assigned: 0, accepted: 0, done: 0 };
         for (const p of projects) for (const t of hub.db.tasksOfProject(p)) tasks[t.state]++;
         const devices = hub.db.listDevices().filter((d) => !d.revoked);
-        data = { devices: { total: devices.length, online: hub.nodes.size }, agents: { total: agents.length, byStatus }, projects: projects.size, tasks };
+        data = {
+          devices: { total: devices.length, online: hub.nodes.size },
+          agents: { total: agents.length, byStatus },
+          projects: projects.size,
+          tasks,
+        };
       } else if (route === "agents") {
         const q = (url.searchParams.get("q") ?? "").trim().toLowerCase().slice(0, 64);
         const status = url.searchParams.get("status");
@@ -261,8 +315,15 @@ export function createHttpHandler(deps: HttpDeps) {
           .allAgents()
           .filter((a) => !q || a.name.toLowerCase().includes(q) || a.project.toLowerCase().includes(q))
           .map((a) => ({
-            id: a.agent_id, name: a.name, project: a.project, adapter: a.adapter, model: a.model, role: a.role,
-            lead: !!a.is_lead, device: a.node_name, status: hub.status.get(a.agent_id)?.status ?? "offline",
+            id: a.agent_id,
+            name: a.name,
+            project: a.project,
+            adapter: a.adapter,
+            model: a.model,
+            role: a.role,
+            lead: !!a.is_lead,
+            device: a.node_name,
+            status: hub.status.get(a.agent_id)?.status ?? "offline",
           }))
           .filter((a) => !status || a.status === status)
           .sort((a, b) => a.project.localeCompare(b.project) || a.name.localeCompare(b.name));
@@ -272,7 +333,16 @@ export function createHttpHandler(deps: HttpDeps) {
         const projects = project ? [project] : [...new Set(hub.db.allAgents().map((a) => a.project))];
         const rows = projects
           .flatMap((p) => hub.db.tasksOfProject(p))
-          .map((t) => ({ id: t.id, project: t.project, to: t.to_agent.split("/").pop(), from: t.from_agent.split("/").pop(), text: t.text, state: t.state, summary: t.summary, updated: t.updated }))
+          .map((t) => ({
+            id: t.id,
+            project: t.project,
+            to: t.to_agent.split("/").pop(),
+            from: t.from_agent.split("/").pop(),
+            text: t.text,
+            state: t.state,
+            summary: t.summary,
+            updated: t.updated,
+          }))
           .sort((a, b) => b.updated - a.updated);
         data = paged(rows, page(url));
       } else if (route === "devices") {
@@ -281,7 +351,11 @@ export function createHttpHandler(deps: HttpDeps) {
         data = hub.db
           .listDevices()
           .filter((d) => !d.revoked)
-          .map((d) => ({ name: d.node_name, online: hub.nodes.has(d.node_name), agents: counts.get(d.node_name) ?? 0 }));
+          .map((d) => ({
+            name: d.node_name,
+            online: hub.nodes.has(d.node_name),
+            agents: counts.get(d.node_name) ?? 0,
+          }));
       } else return json(req, res, 404, { error: "not found" });
       apiCache.set(key, data);
     }
@@ -317,14 +391,17 @@ export function createHttpHandler(deps: HttpDeps) {
     if (rel.includes("\0")) return send(req, res, 400, "Bad request", { "Content-Type": "text/plain; charset=utf-8" });
     // Old-style URLs go to the clean slug.
     if (rel.endsWith("/index.html")) return send(req, res, 301, "", { Location: rel.slice(0, -"index.html".length) });
-    if (rel.endsWith(".html") && rel !== "/404.html") return send(req, res, 301, "", { Location: `${rel.slice(0, -".html".length)}/` });
+    if (rel.endsWith(".html") && rel !== "/404.html")
+      return send(req, res, 301, "", { Location: `${rel.slice(0, -".html".length)}/` });
     const root = normalize(siteDir + sep);
     let file = normalize(join(siteDir, rel));
-    if (!file.startsWith(root) && file + sep !== root) return send(req, res, 403, "Forbidden", { "Content-Type": "text/plain; charset=utf-8" });
+    if (!file.startsWith(root) && file + sep !== root)
+      return send(req, res, 403, "Forbidden", { "Content-Type": "text/plain; charset=utf-8" });
     let entry: Cached | undefined;
     if (!extname(rel)) {
       // A page: /setup and /setup/ both mean setup/index.html, and the canonical form has the slash.
-      if (!rel.endsWith("/") && existsSync(join(file, "index.html"))) return send(req, res, 301, "", { Location: `${rel}/` });
+      if (!rel.endsWith("/") && existsSync(join(file, "index.html")))
+        return send(req, res, 301, "", { Location: `${rel}/` });
       file = join(file, "index.html");
     }
     entry = load(file);
@@ -346,9 +423,18 @@ export function createHttpHandler(deps: HttpDeps) {
       body = entry.gz;
       headers["Content-Encoding"] = "gzip";
     }
-    headers["Cache-Control"] = isAsset ? "public, max-age=31536000, immutable" : priv ? "no-cache" : "public, max-age=300, stale-while-revalidate=3600";
+    headers["Cache-Control"] = isAsset
+      ? "public, max-age=31536000, immutable"
+      : priv
+        ? "no-cache"
+        : "public, max-age=300, stale-while-revalidate=3600";
     if (status === 200 && req.headers["if-none-match"] === entry.etag) {
-      res.writeHead(304, { ...securityHeaders(req, priv), ETag: entry.etag, "Cache-Control": headers["Cache-Control"], Vary: "Accept-Encoding" });
+      res.writeHead(304, {
+        ...securityHeaders(req, priv),
+        ETag: entry.etag,
+        "Cache-Control": headers["Cache-Control"],
+        Vary: "Accept-Encoding",
+      });
       return res.end();
     }
     send(req, res, status, body, headers, priv);
@@ -359,9 +445,15 @@ export function createHttpHandler(deps: HttpDeps) {
       try {
         const url = new URL((req.url ?? "/").slice(0, 2048), "http://hub");
         const path = url.pathname;
-        if (path === "/healthz") return send(req, res, 200, "ok", { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
+        if (path === "/healthz")
+          return send(req, res, 200, "ok", {
+            "Content-Type": "text/plain; charset=utf-8",
+            "Cache-Control": "no-store",
+          });
         if (publicUrl().startsWith("https://") && protoOf(req) === "http" && !isLocalHost(req.headers.host)) {
-          return send(req, res, 308, "", { Location: `https://${req.headers.host ?? new URL(publicUrl()).host}${req.url ?? "/"}` });
+          return send(req, res, 308, "", {
+            Location: `https://${req.headers.host ?? new URL(publicUrl()).host}${req.url ?? "/"}`,
+          });
         }
         if (path === "/api/v1/pair") {
           if (req.method !== "POST") return json(req, res, 405, { error: "use POST" }, { Allow: "POST" });
@@ -369,16 +461,22 @@ export function createHttpHandler(deps: HttpDeps) {
         }
         if (path === "/dashboard/login" && req.method === "GET") return dashboardLogin(req, res, url);
         if (path === "/api/v1/dash/logout") {
-          if (req.method !== "POST" || req.headers["x-requested-with"] !== "claudecord") return json(req, res, 403, { error: "forbidden" });
+          if (req.method !== "POST" || req.headers["x-requested-with"] !== "claudecord")
+            return json(req, res, 403, { error: "forbidden" });
           auth.endSession(sessionOf(req));
           return send(req, res, 204, "", { "Set-Cookie": cookie(req, "", 0), "Cache-Control": "no-store" }, true);
         }
         if (path.startsWith("/api/v1/dash/")) {
-          if (req.method !== "GET" && req.method !== "HEAD") return json(req, res, 405, { error: "read only" }, { Allow: "GET" });
+          if (req.method !== "GET" && req.method !== "HEAD")
+            return json(req, res, 405, { error: "read only" }, { Allow: "GET" });
           return dash(req, res, url, path.slice("/api/v1/dash/".length));
         }
         if (path.startsWith("/api/")) return json(req, res, 404, { error: "not found" });
-        if (req.method !== "GET" && req.method !== "HEAD") return send(req, res, 405, "Method not allowed", { Allow: "GET, HEAD", "Content-Type": "text/plain; charset=utf-8" });
+        if (req.method !== "GET" && req.method !== "HEAD")
+          return send(req, res, 405, "Method not allowed", {
+            Allow: "GET, HEAD",
+            "Content-Type": "text/plain; charset=utf-8",
+          });
         return serveStatic(req, res, path);
       } catch (e) {
         console.error("http error", (e as Error).message);

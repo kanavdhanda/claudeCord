@@ -48,7 +48,8 @@ describe("redact", () => {
   });
 
   it("leaves ordinary text and code alone", () => {
-    const text = "Plan: heron takes the API (POST /export), I take the UI.\nconst tokenizer = new Tokenizer(); // sk-learn style names\nSee README.md";
+    const text =
+      "Plan: heron takes the API (POST /export), I take the UI.\nconst tokenizer = new Tokenizer(); // sk-learn style names\nSee README.md";
     const r = redact(text);
     expect(r.text).toBe(text);
     expect(r.found).toEqual([]);
@@ -94,7 +95,9 @@ describe("idempotence", () => {
 describe("findSecretsInFile", () => {
   it("flags text files that contain high confidence secrets", () => {
     expect(findSecretsInFile(Buffer.from(`config\nkey=${fake.aws}\n`))).toContain("aws key");
-    expect(findSecretsInFile(Buffer.from("-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----"))).toContain("private key");
+    expect(findSecretsInFile(Buffer.from("-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----"))).toContain(
+      "private key",
+    );
   });
 
   it("does not block on weak signals such as a variable named token", () => {
@@ -114,7 +117,12 @@ describe("findSecretsInFile", () => {
 });
 
 describe("environment dumps", () => {
-  const dump = ["# my notes", "DATABASE_PASSWORD=hunter2hunter2", "STRIPE_SECRET_KEY=abcdefghijklmnop", "PORT=3000"].join("\n");
+  const dump = [
+    "# my notes",
+    "DATABASE_PASSWORD=hunter2hunter2",
+    "STRIPE_SECRET_KEY=abcdefghijklmnop",
+    "PORT=3000",
+  ].join("\n");
 
   it("detects a pasted .env however it is named", () => {
     expect(looksLikeEnvDump(dump)).toBe(true);

@@ -43,9 +43,12 @@ describe("FailureLimiter", () => {
 });
 
 describe("isDiscordCdn", () => {
-  it.each(["https://cdn.discordapp.com/attachments/1/2/f.txt", "https://media.discordapp.net/attachments/1/2/f.png"])("allows %s", (u) => {
-    expect(isDiscordCdn(u)).toBe(true);
-  });
+  it.each(["https://cdn.discordapp.com/attachments/1/2/f.txt", "https://media.discordapp.net/attachments/1/2/f.png"])(
+    "allows %s",
+    (u) => {
+      expect(isDiscordCdn(u)).toBe(true);
+    },
+  );
 
   it.each([
     "http://cdn.discordapp.com/x",

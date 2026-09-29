@@ -77,14 +77,19 @@ export class Daemon {
     for (const a of [...this.agents.values()]) await this.stopAgent(a.spec.agentId);
     this.ws?.close();
     await new Promise<void>((r) => (this.server ? this.server.close(() => r()) : r()));
-    try { unlinkSync(sockPath()); } catch { /* already gone */ }
+    try {
+      unlinkSync(sockPath());
+    } catch {
+      /* already gone */
+    }
   }
 
   async start(): Promise<void> {
     if (process.platform === "win32") {
       throw new Error("The node daemon needs tmux, which is not available on native Windows. Run it inside WSL2.");
     }
-    if (!(await tmux.hasTmux())) throw new Error("tmux is required but was not found on PATH. Install it with brew or apt.");
+    if (!(await tmux.hasTmux()))
+      throw new Error("tmux is required but was not found on PATH. Install it with brew or apt.");
     ensureMeshDir();
     this.listen();
     this.connect();
@@ -158,7 +163,11 @@ export class Daemon {
         if (r) {
           const kb = Math.max(1, Math.round(r.bytes / 1024));
           const note = f.caption ? ` Note: ${f.caption}` : "";
-          rt.enqueue({ from: f.from, thread: f.thread, text: `sent you a file, saved at ${relative(rt.cwd, r.path)} (${kb} KB).${note}` });
+          rt.enqueue({
+            from: f.from,
+            thread: f.thread,
+            text: `sent you a file, saved at ${relative(rt.cwd, r.path)} (${kb} KB).${note}`,
+          });
         }
         return;
       }
@@ -166,7 +175,11 @@ export class Daemon {
         // Only folders this device registered itself. The hub never gets to choose a directory.
         const dir = loadProjectDirs()[f.agent.project];
         if (!dir) {
-          this.send({ t: "agent.say", agentId: f.agent.agentId, text: `No directory known for project ${f.agent.project} on this device.` });
+          this.send({
+            t: "agent.say",
+            agentId: f.agent.agentId,
+            text: `No directory known for project ${f.agent.project} on this device.`,
+          });
           return;
         }
         await this.spawnAgent({ ...f.agent, cwd: dir });
@@ -176,7 +189,8 @@ export class Daemon {
         await this.stopAgent(f.agentId);
         return;
       case "killall":
-        for (const a of [...this.agents.values()]) if (!f.project || a.spec.project === f.project) await this.stopAgent(a.spec.agentId);
+        for (const a of [...this.agents.values()])
+          if (!f.project || a.spec.project === f.project) await this.stopAgent(a.spec.agentId);
         return;
       case "hold":
         for (const a of this.agents.values()) {
@@ -193,7 +207,9 @@ export class Daemon {
     const pc = loadProjectConfig(cwd);
     const adapterId = (o.adapter ?? pc?.adapter ?? this.cfg.adapter) as AdapterId;
     const adapter = getAdapter(adapterId);
-    const taken = new Set([...this.agents.values()].filter((a) => a.spec.project === o.project).map((a) => a.spec.name));
+    const taken = new Set(
+      [...this.agents.values()].filter((a) => a.spec.project === o.project).map((a) => a.spec.name),
+    );
     const name = o.name ?? autoName(taken);
     const spec: AgentSpec = {
       agentId: `${o.project}/${name}`,
@@ -204,7 +220,10 @@ export class Daemon {
       role: o.role ?? pc?.role ?? this.cfg.role,
     };
     const checked = AgentSpecSchema.safeParse(spec);
-    if (!checked.success) throw new Error(`invalid agent: ${checked.error.issues.map((i) => `${i.path.join(".") || "spec"} ${i.message}`).join("; ")}`);
+    if (!checked.success)
+      throw new Error(
+        `invalid agent: ${checked.error.issues.map((i) => `${i.path.join(".") || "spec"} ${i.message}`).join("; ")}`,
+      );
     if (this.agents.has(spec.agentId)) throw new Error(`agent ${name} already running`);
     const policy = o.policy ?? pc?.policy ?? this.cfg.policy;
 
@@ -234,7 +253,15 @@ export class Daemon {
     // Agents do not inherit credentials from this shell. Includes variables the tmux server already carries.
     const scrub = (this.cfg.envPolicy ?? "scrub") === "scrub";
     const unset = scrub
-      ? [...new Set([...secretEnvNames(process.env, adapterId), ...secretEnvNames(Object.fromEntries((await tmux.serverEnvNames()).map((n) => [n, process.env[n] ?? "x"])), adapterId)])]
+      ? [
+          ...new Set([
+            ...secretEnvNames(process.env, adapterId),
+            ...secretEnvNames(
+              Object.fromEntries((await tmux.serverEnvNames()).map((n) => [n, process.env[n] ?? "x"])),
+              adapterId,
+            ),
+          ]),
+        ]
       : [];
     const paneId = await tmux.openPane({
       session: `claude-${o.project}`,
@@ -292,7 +319,11 @@ export class Daemon {
     if (this.opts.handleSignals === false) return;
     const cleanup = () => {
       this.closing = true;
-      try { unlinkSync(p); } catch { /* already gone */ }
+      try {
+        unlinkSync(p);
+      } catch {
+        /* already gone */
+      }
       process.exit(0);
     };
     process.on("SIGINT", cleanup);
@@ -302,7 +333,9 @@ export class Daemon {
   private onSocket(sock: Socket): void {
     let buf = "";
     let live = true;
-    sock.on("close", () => { live = false; });
+    sock.on("close", () => {
+      live = false;
+    });
     sock.on("error", () => {});
     sock.on("data", (d) => {
       buf += d.toString();
@@ -316,7 +349,7 @@ export class Daemon {
       } catch {
         return void sock.end(JSON.stringify({ ok: false, error: "bad request" }) + "\n");
       }
-      this.handle(req)
+      void this.handle(req)
         .catch((e): DaemonResponse => ({ ok: false, error: (e as Error).message }))
         .then((res) => live && sock.end(JSON.stringify(res) + "\n"));
     });
@@ -345,7 +378,11 @@ export class Daemon {
       case "down": {
         let n = 0;
         for (const a of [...this.agents.values()]) {
-          if (req.agent ? a.spec.name === req.agent || a.spec.agentId === req.agent : !req.project || a.spec.project === req.project) {
+          if (
+            req.agent
+              ? a.spec.name === req.agent || a.spec.agentId === req.agent
+              : !req.project || a.spec.project === req.project
+          ) {
             if (await this.stopAgent(a.spec.agentId)) n++;
           }
         }
@@ -360,7 +397,9 @@ export class Daemon {
           req.op === "assign"
             ? { t: "agent.assign", agentId: req.agentId, to: req.to, task: redact(req.task).text, thread: req.thread }
             : { t: "agent.taskdone", agentId: req.agentId, taskId: req.taskId, summary: redact(req.summary).text };
-        return this.send(frame) ? { ok: true, data: req.op === "assign" ? "assignment sent" : "marked done" } : { ok: false, error: "hub offline" };
+        return this.send(frame)
+          ? { ok: true, data: req.op === "assign" ? "assignment sent" : "marked done" }
+          : { ok: false, error: "hub offline" };
       }
       case "say":
         if (!this.agents.has(req.agentId)) return { ok: false, error: "unknown agent" };
@@ -370,7 +409,13 @@ export class Daemon {
           : { ok: false, error: "hub offline" };
       case "report":
         if (!this.agents.has(req.agentId)) return { ok: false, error: "unknown agent" };
-        return this.send({ t: "agent.report", agentId: req.agentId, title: redact(req.title).text, summary: redact(req.summary).text, artifacts: req.artifacts })
+        return this.send({
+          t: "agent.report",
+          agentId: req.agentId,
+          title: redact(req.title).text,
+          summary: redact(req.summary).text,
+          artifacts: req.artifacts,
+        })
           ? { ok: true }
           : { ok: false, error: "hub offline" };
       case "send": {
@@ -381,7 +426,14 @@ export class Daemon {
         for await (const c of readChunks(path)) {
           while ((this.ws?.bufferedAmount ?? 0) > 1 << 20) await new Promise((r) => setTimeout(r, 20));
           name = c.name;
-          const ok = this.send({ t: "file.chunk", agentId: req.agentId, ...c, to: req.to, caption: req.caption, thread: req.thread });
+          const ok = this.send({
+            t: "file.chunk",
+            agentId: req.agentId,
+            ...c,
+            to: req.to,
+            caption: req.caption,
+            thread: req.thread,
+          });
           if (!ok) return { ok: false, error: "hub offline" };
         }
         return { ok: true, data: `sent ${name}${req.to ? ` to ${req.to}` : ""}` };
@@ -391,7 +443,12 @@ export class Daemon {
         if (!rt) return { ok: false, error: "unknown agent" };
         const askId = `${req.agentId}#a${++this.askSeq}`;
         const sent = this.send({
-          t: "agent.ask", agentId: req.agentId, askId, question: redact(req.question).text, options: req.options, thread: req.thread,
+          t: "agent.ask",
+          agentId: req.agentId,
+          askId,
+          question: redact(req.question).text,
+          options: req.options,
+          thread: req.thread,
         });
         if (!sent) return { ok: false, error: "hub offline" };
         rt.noteActivity();

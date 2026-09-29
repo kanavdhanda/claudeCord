@@ -26,14 +26,25 @@ describe("secretEnvNames", () => {
 
   it("removes credentials by name, by prefix and by value", () => {
     const out = secretEnvNames(env, "agy");
-    for (const n of ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "MY_SERVICE_TOKEN", "DB_PASSWORD", "STRIPE_API_KEY", "DATABASE_URL", "NPM_CONFIG_USERCONFIG", "INNOCENT_NAME"]) {
+    for (const n of [
+      "AWS_ACCESS_KEY_ID",
+      "AWS_SECRET_ACCESS_KEY",
+      "GITHUB_TOKEN",
+      "MY_SERVICE_TOKEN",
+      "DB_PASSWORD",
+      "STRIPE_API_KEY",
+      "DATABASE_URL",
+      "NPM_CONFIG_USERCONFIG",
+      "INNOCENT_NAME",
+    ]) {
       expect(out, n).toContain(n);
     }
   });
 
   it("keeps ordinary variables and claudecord's own", () => {
     const out = secretEnvNames(env, "claude");
-    for (const n of ["PATH", "HOME", "LANG", "EDITOR", "CLAUDECORD_AGENT_ID", "CLAUDECORD_SOCK"]) expect(out).not.toContain(n);
+    for (const n of ["PATH", "HOME", "LANG", "EDITOR", "CLAUDECORD_AGENT_ID", "CLAUDECORD_SOCK"])
+      expect(out).not.toContain(n);
   });
 
   it("keeps only the login each agent needs for its own service", () => {
@@ -44,7 +55,9 @@ describe("secretEnvNames", () => {
   });
 
   it("keeps the ssh agent socket so git over ssh still works", () => {
-    expect(secretEnvNames({ SSH_AUTH_SOCK: "/tmp/ssh-agent.sock", SSH_PASSWORD: "hunter2hunter2" }, "claude")).toEqual(["SSH_PASSWORD"]);
+    expect(secretEnvNames({ SSH_AUTH_SOCK: "/tmp/ssh-agent.sock", SSH_PASSWORD: "hunter2hunter2" }, "claude")).toEqual([
+      "SSH_PASSWORD",
+    ]);
   });
 
   it("ignores variables with no value", () => {
@@ -54,7 +67,16 @@ describe("secretEnvNames", () => {
 
 describe("withScrubbedEnv", () => {
   it("wraps the command with env -u for each name", () => {
-    expect(withScrubbedEnv(["claude", "--model", "x"], ["A", "B"])).toEqual(["env", "-u", "A", "-u", "B", "claude", "--model", "x"]);
+    expect(withScrubbedEnv(["claude", "--model", "x"], ["A", "B"])).toEqual([
+      "env",
+      "-u",
+      "A",
+      "-u",
+      "B",
+      "claude",
+      "--model",
+      "x",
+    ]);
   });
 
   it("leaves the command alone when there is nothing to remove", () => {
