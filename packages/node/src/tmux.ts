@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { withScrubbedEnv } from "./env.js";
 import { stripControl } from "./text.js";
 
@@ -8,7 +9,11 @@ function socketArgs(): string[] {
   return sock ? ["-L", sock] : [];
 }
 
+/** Counts tmux processes started, so tests and diagnostics can see how much work the daemon is doing. */
+export const stats = { execs: 0, fallbacks: 0 };
+
 function run(args: string[], input?: string): Promise<string> {
+  stats.execs++;
   return new Promise((resolve, reject) => {
     const p = execFile("tmux", [...socketArgs(), ...args], { maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) reject(new Error(`tmux ${args[0]}: ${stderr.trim() || err.message}`));
@@ -115,6 +120,55 @@ export async function openPane(o: PaneOpts): Promise<string> {
  */
 export async function capture(paneId: string): Promise<string> {
   return run(["capture-pane", "-p", "-t", paneId]);
+}
+
+/**
+ * Screens of many panes with two tmux commands in total, however many panes there are. Starting a process is the
+ * expensive part of watching an agent, so one process for all of them is what keeps ten idle agents from using a
+ * fifth of a core. Returns null for a pane that no longer exists.
+ *
+ * A pane's screen is text an agent controls, so the line between two screens carries a random value that is new for
+ * every call. A hostile agent cannot print it, and so cannot fake the start of another pane's screen.
+ */
+export async function sampleMany(paneIds: string[]): Promise<Map<string, string | null>> {
+  const out = new Map<string, string | null>(paneIds.map((id) => [id, null]));
+  if (!paneIds.length) return out;
+  let alive: Set<string>;
+  try {
+    alive = new Set(
+      (await run(["list-panes", "-a", "-F", "#{pane_id} #{pane_dead}"]))
+        .split("\n")
+        .filter((l) => l.endsWith(" 0"))
+        .map((l) => l.split(" ")[0]!),
+    );
+  } catch {
+    // No tmux server means no panes.
+    return out;
+  }
+  const live = paneIds.filter((id) => alive.has(id));
+  if (!live.length) return out;
+  // Must not start with a dash, or tmux reads it as a flag and the whole batched command fails.
+  const sep = `@@cc-${randomBytes(12).toString("hex")}@@`;
+  const args = live.flatMap((id, i) => [
+    ...(i ? [";"] : []),
+    "capture-pane",
+    "-p",
+    "-t",
+    id,
+    ";",
+    "display-message",
+    "-p",
+    sep,
+  ]);
+  try {
+    const parts = (await run(args)).split(`${sep}\n`);
+    live.forEach((id, i) => out.set(id, parts[i] ?? ""));
+  } catch {
+    // A pane vanished between the two commands. Fall back to one at a time for this round only.
+    stats.fallbacks++;
+    for (const id of live) out.set(id, await run(["capture-pane", "-p", "-t", id]).catch(() => null));
+  }
+  return out;
 }
 
 export async function paneAlive(paneId: string): Promise<boolean> {
