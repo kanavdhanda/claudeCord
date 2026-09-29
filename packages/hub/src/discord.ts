@@ -3,6 +3,7 @@ import {
   Client,
   EmbedBuilder,
   GatewayIntentBits,
+  InteractionContextType,
   REST,
   Routes,
   SlashCommandBuilder,
@@ -12,6 +13,8 @@ import {
 } from "discord.js";
 import { AdapterId, MAX_FILE_BYTES, autoName } from "@claudecord/protocol";
 import type { HubConfig } from "./config.js";
+import type { Auth } from "./auth.js";
+import { formatCode } from "./auth.js";
 import type { Hub, Outbound, PendingAsk } from "./hub.js";
 import type { AgentRow } from "./db.js";
 
@@ -40,6 +43,7 @@ export class DiscordBridge implements Outbound {
   constructor(
     private cfg: HubConfig,
     private hub: Hub,
+    private auth: Auth,
   ) {
     this.client = new Client({
       intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
@@ -56,6 +60,34 @@ export class DiscordBridge implements Outbound {
     await this.registerCommands();
     this.typingTimer = setInterval(() => void this.typing(), 8000);
     console.log(`discord ready as ${this.client.user?.tag}`);
+  }
+
+  /** Problems that would stop the bot working, in plain words. Empty when it is set up correctly. */
+  async selfCheck(): Promise<string[]> {
+    const problems: string[] = [];
+    try {
+      const app = await this.client.application!.fetch();
+      if (!app.flags.has("GatewayMessageContent") && !app.flags.has("GatewayMessageContentLimited")) {
+        problems.push("The Message Content intent is off. Turn it on for the bot in the Discord developer portal.");
+      }
+    } catch {
+      problems.push("Could not read the bot's application settings.");
+    }
+    try {
+      const guild = await this.guild();
+      const me = await guild.members.fetchMe();
+      const need = {
+        ViewChannel: "View Channels", ManageChannels: "Manage Channels", ManageWebhooks: "Manage Webhooks",
+        SendMessages: "Send Messages", AddReactions: "Add Reactions", AttachFiles: "Attach Files",
+        CreatePublicThreads: "Create Public Threads", SendMessagesInThreads: "Send Messages in Threads",
+        ReadMessageHistory: "Read Message History", ManageMessages: "Manage Messages (to pin the status board)",
+      } as const;
+      const missing = Object.entries(need).filter(([k]) => !me.permissions.has(k as keyof typeof need)).map(([, label]) => label);
+      if (missing.length) problems.push(`The bot is missing permissions in ${guild.name}: ${missing.join(", ")}.`);
+    } catch {
+      problems.push(`The bot cannot see the server with ID ${this.cfg.guildId}. Check the ID and that the bot was invited to it.`);
+    }
+    return problems;
   }
 
   // Outbound
@@ -120,10 +152,10 @@ export class DiscordBridge implements Outbound {
   }
 
   private identity(a: AgentRow) {
-    return {
-      username: `${a.name} (${a.adapter})`.slice(0, 80),
-      avatarURL: `https://api.dicebear.com/9.x/bottts/png?seed=${encodeURIComponent(a.name)}`,
-    };
+    const id: { username: string; avatarURL?: string } = { username: `${a.name} (${a.adapter})`.slice(0, 80) };
+    // Avatars come from a third party that would learn agent names, so they are opt-in.
+    if (this.cfg.avatarTemplate) id.avatarURL = this.cfg.avatarTemplate.replace("{name}", encodeURIComponent(a.name));
+    return id;
   }
 
   async post(project: string, agent: AgentRow, text: string, thread?: string): Promise<void> {
@@ -291,7 +323,8 @@ export class DiscordBridge implements Outbound {
         await m.reply({ content: `${att.name} is over the ${MAX_FILE_BYTES / 1048576} MB limit.`, allowedMentions: { repliedUser: false } });
         continue;
       }
-      const res = await fetch(att.url);
+      if (!isDiscordCdn(att.url)) continue;
+      const res = await fetch(att.url, { redirect: "error" });
       if (!res.ok) continue;
       delivered = this.hub.sendFile(project, m.content, att.name, Buffer.from(await res.arrayBuffer()), thread);
     }
@@ -323,11 +356,12 @@ export class DiscordBridge implements Outbound {
       new SlashCommandBuilder().setName("tasks").setDescription("Show the task board for this project"),
       new SlashCommandBuilder().setName("lead").setDescription("Set the lead agent")
         .addStringOption((o) => o.setName("agent").setDescription("Agent name").setRequired(true)),
-      new SlashCommandBuilder().setName("token").setDescription("Create a device token")
-        .addStringOption((o) => o.setName("device").setDescription("Device name").setRequired(true)),
+      new SlashCommandBuilder().setName("connect").setDescription("Get a one-time code to connect a machine"),
+      new SlashCommandBuilder().setName("dashboard").setDescription("Get a one-time link to open the dashboard"),
+      new SlashCommandBuilder().setName("devices").setDescription("List connected machines"),
       new SlashCommandBuilder().setName("revoke").setDescription("Revoke a device token")
         .addStringOption((o) => o.setName("device").setDescription("Device name").setRequired(true)),
-    ].map((c) => c.toJSON());
+    ].map((c) => c.setDefaultMemberPermissions(0).setContexts(InteractionContextType.Guild).toJSON());
     const rest = new REST().setToken(this.cfg.discordToken);
     await rest.put(Routes.applicationGuildCommands(this.client.user!.id, this.cfg.guildId), { body: cmds });
   }
@@ -392,15 +426,41 @@ export class DiscordBridge implements Outbound {
         this.hub.setLead(project, a.agent_id);
         return void (await reply(`${a.name} is now lead.`));
       }
-      case "token": {
-        const tok = this.hub.db.createToken(s("device")!);
-        return void (await reply(`Token for ${s("device")} (shown once):\n\`${tok}\``, true));
+      case "connect": {
+        const { code, expiresInMs } = this.auth.createPairCode();
+        const mins = Math.round(expiresInMs / 60_000);
+        return void (await reply(
+          `Run this on the machine you want to connect. It works once and expires in ${mins} minutes.\n\`\`\`\nnpx claudecord login ${this.cfg.publicUrl} ${code}\n\`\`\``,
+          true,
+        ));
+      }
+      case "dashboard": {
+        const { token, expiresInMs } = this.auth.createLoginToken();
+        const url = `${this.cfg.publicUrl.replace(/\/$/, "")}/dashboard/login?t=${token}`;
+        return void (await reply(`Open this link to sign in. It works once and expires in ${Math.round(expiresInMs / 60_000)} minutes.\n${url}`, true));
+      }
+      case "devices": {
+        const rows = this.hub.db.listDevices().filter((d) => !d.revoked);
+        const text = rows.length
+          ? rows.map((d) => `${d.node_name.padEnd(20)} ${this.hub.nodes.has(d.node_name) ? "online" : "offline"}  ${this.hub.db.agentsOfNode(d.node_name).length} agent(s)`).join("\n")
+          : "No devices yet. Run /connect.";
+        return void (await reply("```\n" + text + "\n```", true));
       }
       case "revoke": {
         const ok = this.hub.db.revokeToken(s("device")!);
         return void (await reply(ok ? "Revoked." : "No such device.", true));
       }
     }
+  }
+}
+
+/** Attachment URLs come from Discord, but only ever fetch from its own CDN. */
+export function isDiscordCdn(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" && (u.hostname === "cdn.discordapp.com" || u.hostname === "media.discordapp.net");
+  } catch {
+    return false;
   }
 }
 

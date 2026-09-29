@@ -61,3 +61,44 @@ describe("node gateway", () => {
     ws.close();
   });
 });
+
+describe("gateway limits", () => {
+  const closed = (ws: WebSocket) => new Promise<number>((r) => ws.once("close", (code) => r(code)));
+
+  it("closes a connection that sends a frame over the size limit", async () => {
+    const { ws, ok } = await open(`Bearer ${token}`);
+    expect(ok).toBe(true);
+    const done = closed(ws);
+    ws.send("x".repeat(2 * 1024 * 1024));
+    expect(await done).toBe(1009); // message too big
+  });
+
+  it("closes a connection that floods frames faster than the rate limit", async () => {
+    const { ws, ok } = await open(`Bearer ${token}`);
+    expect(ok).toBe(true);
+    const done = closed(ws);
+    const frame = encode({ t: "hello", nodeName: "mac", version: "t" });
+    for (let i = 0; i < 2000; i++) ws.send(frame);
+    expect(await done).toBe(1008); // policy violation
+  });
+
+  it("replies with an error to a malformed frame and stays connected", async () => {
+    const { ws, ok, frames } = await open(`Bearer ${token}`);
+    expect(ok).toBe(true);
+    ws.send(JSON.stringify({ t: "agent.say", agentId: "p/a", text: "x".repeat(9000) }));
+    await new Promise((r) => setTimeout(r, 100));
+    expect(frames.some((f) => f?.t === "error")).toBe(true);
+    expect(ws.readyState).toBe(ws.OPEN);
+    ws.close();
+  });
+});
+
+describe("gateway under abuse", () => {
+  it("answers 429 to an address that keeps sending bad tokens, even when a later token is valid", async () => {
+    let refused = 0;
+    for (let i = 0; i < 25; i++) if (!(await open(`Bearer bad${i}`)).ok) refused++;
+    expect(refused).toBe(25);
+    // The address is now blocked, so even the real token is turned away until the window passes.
+    expect((await open(`Bearer ${token}`)).ok).toBe(false);
+  });
+});

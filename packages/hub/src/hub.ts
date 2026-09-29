@@ -1,4 +1,4 @@
-import { FILE_CHUNK_BYTES, MAX_FILE_BYTES, type AgentSpec, type AgentStatus, type HubFrame, type NodeFrame } from "@claudecord/protocol";
+import { FILE_CHUNK_BYTES, MAX_FILE_BYTES, findSecretsInFile, redact, type AgentSpec, type AgentStatus, type HubFrame, type NodeFrame } from "@claudecord/protocol";
 import type { Db, AgentRow } from "./db.js";
 
 export interface NodeConn {
@@ -45,6 +45,10 @@ export interface PendingAsk {
 
 const DEFAULT_STREAK_LIMIT = 20;
 const DEFAULT_ACCEPT_TIMEOUT_MS = 30_000;
+/** Uploads to Discord are held in memory until the last chunk, so they are bounded in count, size and age. */
+const MAX_ACTIVE_UPLOADS = 16;
+const MAX_UPLOAD_MEMORY = 64 * 1024 * 1024;
+const UPLOAD_TTL_MS = 2 * 60_000;
 const HOLD_REASONS: Partial<Record<AgentStatus, string>> = {
   paused: "paused",
   limited: "at a usage limit",
@@ -59,7 +63,7 @@ export class Hub {
   status = new Map<string, { status: AgentStatus; detail?: string }>();
   asks = new Map<string, PendingAsk[]>();
   private streak = new Map<string, number>();
-  private uploads = new Map<string, { chunks: Buffer[]; bytes: number }>();
+  private uploads = new Map<string, { chunks: Buffer[]; bytes: number; at: number }>();
   private pending = new Map<string, Pending>();
   private seq = 0;
   out!: Outbound;
@@ -92,6 +96,15 @@ export class Hub {
   // Frames from nodes
 
   async onNodeFrame(conn: NodeConn, f: NodeFrame): Promise<void> {
+    // A device may only act for agents it registered. Without this a compromised device could speak as, answer
+    // for, or finish tasks for agents on other machines.
+    if ("agentId" in f) {
+      const owner = this.agent(f.agentId);
+      if (owner && owner.node_name !== conn.nodeName) {
+        console.warn(`device ${conn.nodeName} sent ${f.t} for an agent owned by ${owner.node_name}, dropped`);
+        return;
+      }
+    }
     switch (f.t) {
       case "hello":
         return;
@@ -109,8 +122,9 @@ export class Hub {
       case "agent.say": {
         const a = this.agent(f.agentId);
         if (!a) return;
-        await this.out.post(a.project, a, f.text, f.thread);
-        this.routeAgentMessage(a, f.text, f.thread);
+        const clean = await this.scrub(a, f.text);
+        await this.out.post(a.project, a, clean, f.thread);
+        this.routeAgentMessage(a, clean, f.thread);
         return;
       }
       case "agent.ask": {
@@ -119,7 +133,7 @@ export class Hub {
         const ask: PendingAsk = {
           askId: f.askId,
           agentId: f.agentId,
-          question: f.question,
+          question: await this.scrub(a, f.question),
           options: f.options,
           thread: f.thread,
         };
@@ -132,7 +146,7 @@ export class Hub {
       case "agent.report": {
         const a = this.agent(f.agentId);
         if (!a) return;
-        await this.out.postReport(a.project, a, f.title, f.summary, f.artifacts);
+        await this.out.postReport(a.project, a, await this.scrub(a, f.title), await this.scrub(a, f.summary), f.artifacts);
         return;
       }
       case "agent.limit": {
@@ -165,6 +179,11 @@ export class Hub {
   }
 
   private async register(conn: NodeConn, spec: AgentSpec): Promise<void> {
+    const existing = this.agent(spec.agentId);
+    if (existing && existing.node_name !== conn.nodeName) {
+      conn.send({ t: "error", message: `agent ${spec.agentId} is already registered by another device` });
+      return;
+    }
     await this.out.ensureProject(spec.project);
     const first = this.db.agentsOfProject(spec.project).length === 0;
     this.db.upsertAgent({
@@ -273,6 +292,7 @@ export class Hub {
       this.system(from, `Cannot assign to ${toName}. Peers: ${this.db.agentsOfProject(from.project).filter((p) => p.agent_id !== from.agent_id).map((p) => p.name).join(", ") || "none"}.`);
       return;
     }
+    task = await this.scrub(from, task);
     const t = this.db.createTask(from.project, from.agent_id, to.agent_id, task);
     const sent = this.deliver(to, from.name, `Task ${t.id}: ${task}\nWhen finished, call task_done with id ${t.id} and a short summary.`, { thread, taskId: t.id });
     await this.out.post(from.project, from, `@${to.name} ${t.id}: ${task}`, thread);
@@ -287,6 +307,7 @@ export class Hub {
       this.system(a, `Task ${taskId} is not assigned to you.`);
       return;
     }
+    summary = await this.scrub(a, summary);
     this.db.setTaskState(a.project, t.id, "done", summary);
     await this.out.post(a.project, a, `Finished ${t.id}: ${summary}`);
     const lead = this.agent(t.from_agent);
@@ -298,6 +319,16 @@ export class Hub {
         await this.out.notice(a.project, `All ${all.length} task(s) are done.`);
       }
     }
+  }
+
+  /** Removes credentials from text an agent is about to share, and tells the room when something was removed. */
+  private async scrub(a: AgentRow, text: string): Promise<string> {
+    const r = redact(text);
+    if (r.found.length) {
+      const kinds = [...new Set(r.found)].join(", ");
+      await this.out.notice(a.project, `Removed ${r.found.length} possible secret(s) (${kinds}) from a message by ${a.name}.`);
+    }
+    return r.text;
   }
 
   // Files
@@ -319,12 +350,19 @@ export class Hub {
       if (f.last) await this.out.post(a.project, a, `Sent ${f.name} to @${peer.name}.${f.caption ? ` ${f.caption}` : ""}`, f.thread);
       return;
     }
+    this.pruneUploads();
     let u = this.uploads.get(f.transferId);
     if (!u) {
       if (f.seq !== 0) return;
-      u = { chunks: [], bytes: 0 };
+      const held = [...this.uploads.values()].reduce((n, x) => n + x.bytes, 0);
+      if (this.uploads.size >= MAX_ACTIVE_UPLOADS || held >= MAX_UPLOAD_MEMORY) {
+        await this.out.notice(a.project, `Too many files in flight, so ${f.name} from ${a.name} was refused. Try again shortly.`);
+        return;
+      }
+      u = { chunks: [], bytes: 0, at: Date.now() };
       this.uploads.set(f.transferId, u);
     }
+    u.at = Date.now();
     const buf = Buffer.from(f.data, "base64");
     u.bytes += buf.length;
     if (u.bytes > MAX_FILE_BYTES) {
@@ -335,7 +373,17 @@ export class Hub {
     u.chunks.push(buf);
     if (!f.last) return;
     this.uploads.delete(f.transferId);
-    await this.out.postFile(a.project, a, f.name, Buffer.concat(u.chunks), f.caption, f.thread);
+    const data = Buffer.concat(u.chunks);
+    const secrets = findSecretsInFile(data);
+    if (secrets.length) {
+      await this.out.notice(a.project, `Blocked ${f.name} from ${a.name}: it appears to contain ${secrets.join(", ")}.`, true);
+      return;
+    }
+    await this.out.postFile(a.project, a, f.name, data, f.caption, f.thread);
+  }
+
+  private pruneUploads(now = Date.now()): void {
+    for (const [id, u] of this.uploads) if (now - u.at > UPLOAD_TTL_MS) this.uploads.delete(id);
   }
 
   /** Sends a file from the human to the agents the message addresses (mentions, otherwise the lead). */

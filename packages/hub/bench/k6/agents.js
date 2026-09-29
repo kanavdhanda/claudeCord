@@ -27,12 +27,14 @@ const connectFailed = new Rate("ws_connect_failed");
 const registered = new Counter("agents_registered");
 
 export const options = {
+  // The summary only carries percentiles listed here, and the report below reads p(99).
+  summaryTrendStats: ["avg", "med", "p(90)", "p(95)", "p(99)", "max"],
   scenarios: {
     nodes: {
       executor: "per-vu-iterations",
       vus: NODES,
       iterations: 1,
-      maxDuration: `${SESSION_S + 120}s`,
+      maxDuration: `${SESSION_S + 150}s`,
     },
   },
   thresholds: {
@@ -77,7 +79,10 @@ export default function () {
       socket.setTimeout(() => {
         const period = Math.max(1, Math.floor(1000 / (RATE_PER_AGENT * PER_NODE)));
         let n = 0;
+        // Everyone stops sending before anyone disconnects, so a peer is never gone when a message to it is sent.
+        let sending = true;
         socket.setInterval(() => {
+          if (!sending) return;
           const i = n++ % PER_NODE;
           const peers = peersOf(vu, i);
           if (!peers.length) return;
@@ -93,6 +98,7 @@ export default function () {
           sent.add(1);
           expected.add(targeted ? 1 : peers.length);
         }, period);
+        socket.setTimeout(() => { sending = false; }, SESSION_S * 1000);
       }, 8000 + Math.random() * 2000);
     });
 
@@ -107,7 +113,8 @@ export default function () {
     });
 
     socket.on("error", (e) => console.error(`vu ${vu}: ${e.error()}`));
-    socket.setTimeout(() => socket.close(), (SESSION_S + 10) * 1000);
+    // Start jitter (5 s) + send delay (10 s) + send window + time for the last messages to drain.
+    socket.setTimeout(() => socket.close(), (SESSION_S + 25) * 1000);
   });
   connectFailed.add(!check(res, { "upgraded to websocket": (r) => r && r.status === 101 }));
 }

@@ -275,6 +275,137 @@ describe("acceptance and task assignment", () => {
   });
 });
 
+describe("security: device ownership", () => {
+  const frames = (agentId: string) => ({
+    say: { t: "agent.say", agentId, text: "I am definitely otter" } as const,
+    ask: { t: "agent.ask", agentId, askId: "x", question: "q" } as const,
+    report: { t: "agent.report", agentId, title: "t", summary: "s" } as const,
+    status: { t: "agent.status", agentId, status: "idle" } as const,
+    gone: { t: "agent.gone", agentId } as const,
+    done: { t: "agent.taskdone", agentId, taskId: "T1", summary: "x" } as const,
+    assign: { t: "agent.assign", agentId, to: "heron", task: "x" } as const,
+    accepted: { t: "agent.accepted", agentId, msgIds: ["m1"] } as const,
+    limit: { t: "agent.limit", agentId, kind: "session" } as const,
+  });
+
+  it("ignores every frame a device sends for an agent that belongs to another device", async () => {
+    const s = setup();
+    await s.reg(s.conn("mac"), "otter");
+    await s.reg(s.conn("gpu"), "heron");
+    const evil = s.conn("evil");
+    for (const f of Object.values(frames("alpha/otter"))) await s.hub.onNodeFrame(evil, f);
+    expect(s.posts).toEqual([]);
+    expect(s.hub.asks.get("alpha") ?? []).toEqual([]);
+    expect(s.db.getAgent("alpha/otter")).toBeDefined();
+    expect(s.hub.status.get("alpha/otter")?.status).toBe("idle");
+    expect(s.db.tasksOfProject("alpha")).toHaveLength(0);
+  });
+
+  it("ignores a file chunk for another device's agent", async () => {
+    const s = setup();
+    const files: string[] = [];
+    s.hub.out.postFile = async (_p, _a, name) => void files.push(name);
+    await s.reg(s.conn("mac"), "otter");
+    const evil = s.conn("evil");
+    await s.hub.onNodeFrame(evil, { t: "file.chunk", transferId: "t", agentId: "alpha/otter", name: "x.txt", seq: 0, last: true, data: "QQ==" });
+    expect(files).toEqual([]);
+  });
+
+  it("refuses to let another device register an agent id that is already taken", async () => {
+    const s = setup();
+    await s.reg(s.conn("mac"), "otter");
+    const evil = s.conn("evil");
+    await s.reg(evil, "otter");
+    expect(s.sent.evil!.some((f) => f.t === "error")).toBe(true);
+    expect(s.db.getAgent("alpha/otter")?.node_name).toBe("mac");
+  });
+
+  it("lets the owning device re-register after reconnecting", async () => {
+    const s = setup();
+    const first = s.conn("mac");
+    await s.reg(first, "otter");
+    const again = s.conn("mac");
+    await s.reg(again, "otter");
+    expect(s.sent.mac!.some((f) => f.t === "error" && f.message.includes("already registered"))).toBe(false);
+    expect(s.db.getAgent("alpha/otter")?.node_name).toBe("mac");
+  });
+});
+
+describe("security: secrets", () => {
+  const secret = "ghp_" + "a".repeat(36);
+
+  it("redacts a secret from chat before it reaches Discord or peers, and says so", async () => {
+    const s = setup();
+    const a = s.conn("mac");
+    await s.reg(a, "otter");
+    await s.reg(s.conn("gpu"), "heron");
+    await s.hub.onNodeFrame(a, { t: "agent.say", agentId: "alpha/otter", text: `use this token ${secret} for the deploy` });
+    expect(s.posts.join("\n")).not.toContain(secret);
+    expect(s.posts.join("\n")).toContain("[redacted github token]");
+    const toPeer = s.sent.gpu!.filter((f) => f.t === "deliver" && f.from === "otter");
+    expect(JSON.stringify(toPeer)).not.toContain(secret);
+    expect(s.notices.some((n) => n.includes("Removed 1 possible secret"))).toBe(true);
+  });
+
+  it("redacts secrets in questions, reports and task text", async () => {
+    const s = setup();
+    const asks: string[] = [];
+    const reports: string[] = [];
+    s.hub.out.postAsk = async (_p, _a, ask) => void asks.push(ask.question);
+    s.hub.out.postReport = async (_p, _a, title, summary) => void reports.push(`${title}|${summary}`);
+    const lead = s.conn("mac");
+    await s.reg(lead, "otter");
+    await s.reg(s.conn("gpu"), "heron");
+    await s.hub.onNodeFrame(lead, { t: "agent.ask", agentId: "alpha/otter", askId: "q", question: `is ${secret} right?` });
+    await s.hub.onNodeFrame(lead, { t: "agent.report", agentId: "alpha/otter", title: "done", summary: `key ${secret}` });
+    await s.hub.onNodeFrame(lead, { t: "agent.assign", agentId: "alpha/otter", to: "heron", task: `deploy with ${secret}` });
+    expect(asks.join()).not.toContain(secret);
+    expect(reports.join()).not.toContain(secret);
+    expect(s.db.getTask("alpha", "T1")?.text).not.toContain(secret);
+    expect(JSON.stringify(s.sent.gpu)).not.toContain(secret);
+  });
+
+  it("blocks a file upload that contains a private key", async () => {
+    const s = setup();
+    const files: string[] = [];
+    s.hub.out.postFile = async (_p, _a, name) => void files.push(name);
+    const a = s.conn("mac");
+    await s.reg(a, "otter");
+    const key = "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----";
+    await s.hub.onNodeFrame(a, { t: "file.chunk", transferId: "t", agentId: "alpha/otter", name: "notes.txt", seq: 0, last: true, data: Buffer.from(key).toString("base64") });
+    expect(files).toEqual([]);
+    expect(s.notices.some((n) => n.includes("Blocked notes.txt") && n.includes("private key"))).toBe(true);
+  });
+});
+
+describe("security: upload bounds", () => {
+  const start = (id: string) => ({ t: "file.chunk" as const, transferId: id, agentId: "alpha/otter", name: `${id}.bin`, seq: 0, last: false, data: "QUJD" });
+
+  it("refuses new uploads once too many are in flight", async () => {
+    const s = setup();
+    const a = s.conn("mac");
+    await s.reg(a, "otter");
+    for (let i = 0; i < 20; i++) await s.hub.onNodeFrame(a, start(`t${i}`));
+    expect(s.notices.some((n) => n.includes("Too many files in flight"))).toBe(true);
+    expect(s.notices.filter((n) => n.includes("Too many files in flight"))).toHaveLength(4);
+  });
+
+  it("drops uploads that stall, freeing the slot", async () => {
+    vi.useFakeTimers();
+    try {
+      const s = setup();
+      const a = s.conn("mac");
+      await s.reg(a, "otter");
+      for (let i = 0; i < 16; i++) await s.hub.onNodeFrame(a, start(`t${i}`));
+      await vi.advanceTimersByTimeAsync(3 * 60_000);
+      await s.hub.onNodeFrame(a, start("fresh"));
+      expect(s.notices.some((n) => n.includes("Too many files in flight"))).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("file transfer", () => {
   const chunk = (agentId: string, o: Partial<Extract<import("@claudecord/protocol").NodeFrame, { t: "file.chunk" }>> = {}) => ({
     t: "file.chunk" as const, transferId: "t1", agentId, name: "a.txt", seq: 0, last: true,

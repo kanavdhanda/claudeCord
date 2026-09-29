@@ -8,17 +8,21 @@
   },
   "scripts": {
     "build": "pnpm -r build",
-    "test": "vitest run",
+    "test": "vitest run --exclude \"**/*.e2e.test.ts\"",
     "typecheck": "tsc -b",
     "bench": "pnpm --filter @claudecord/hub exec tsx bench/load.ts",
     "bench:serve": "pnpm --filter @claudecord/hub exec tsx bench/serve.ts",
-    "bench:k6": "k6 run packages/hub/bench/k6/agents.js"
+    "bench:k6": "k6 run packages/hub/bench/k6/agents.js",
+    "test:e2e": "vitest run e2e",
+    "test:all": "vitest run",
+    "test:coverage": "vitest run --coverage"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^4.1.11",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
-    "vitest": "^2.1.0"
+    "vitest": "^4.1.11"
   },
   "packageManager": "pnpm@11.13.0"
 }

@@ -1,6 +1,7 @@
 import { createRequire } from "node:module";
 import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 import { createHash, randomBytes } from "node:crypto";
+import { chmodSync, existsSync } from "node:fs";
 
 // Loaded via require so bundlers and test runners that do not know node:sqlite leave it alone.
 const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
@@ -48,6 +49,8 @@ export class Db {
 
   constructor(path: string) {
     this.db = new DatabaseSync(path);
+    // The database holds webhook tokens and task text. Keep it private to this user.
+    if (path !== ":memory:" && existsSync(path)) chmodSync(path, 0o600);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS tokens (
         hash TEXT PRIMARY KEY,
@@ -71,6 +74,18 @@ export class Db {
         role TEXT,
         is_lead INTEGER NOT NULL DEFAULT 0
       );
+      CREATE TABLE IF NOT EXISTS pair_codes (
+        hash TEXT PRIMARY KEY,
+        expires INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS login_tokens (
+        hash TEXT PRIMARY KEY,
+        expires INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS sessions (
+        hash TEXT PRIMARY KEY,
+        expires INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS tasks (
         project TEXT NOT NULL,
         num INTEGER NOT NULL,
@@ -83,6 +98,14 @@ export class Db {
         updated INTEGER NOT NULL,
         PRIMARY KEY (project, num)
       );
+      -- Lookups by project, device and expiry are on every hot path, so they are indexed.
+      CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project);
+      CREATE INDEX IF NOT EXISTS idx_agents_node ON agents(node_name);
+      CREATE INDEX IF NOT EXISTS idx_tasks_project_state ON tasks(project, state);
+      CREATE INDEX IF NOT EXISTS idx_tokens_node ON tokens(node_name);
+      CREATE INDEX IF NOT EXISTS idx_pair_expires ON pair_codes(expires);
+      CREATE INDEX IF NOT EXISTS idx_login_expires ON login_tokens(expires);
+      CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires);
     `);
     for (const t of this.db.prepare("SELECT * FROM tasks").all() as unknown as Omit<TaskRow, "id">[]) this.cacheTask(t);
     for (const a of this.db.prepare("SELECT * FROM agents").all() as unknown as AgentRow[]) this.cache(a);
@@ -156,6 +179,42 @@ export class Db {
       )
       .run(hash(token), nodeName);
     return token;
+  }
+
+  /** Stores a secret as its hash with an expiry. Only the hash is ever kept. */
+  putSecret(table: "pair_codes" | "login_tokens" | "sessions", secret: string, ttlMs: number): void {
+    this.db.prepare(`INSERT INTO ${table}(hash,expires) VALUES(?,?)`).run(hash(secret), Date.now() + ttlMs);
+  }
+
+  /** Deletes the secret and returns true if it existed and had not expired. Single use. */
+  takeSecret(table: "pair_codes" | "login_tokens", secret: string): boolean {
+    const h = hash(secret);
+    const row = this.db.prepare(`SELECT expires FROM ${table} WHERE hash=?`).get(h) as { expires: number } | undefined;
+    if (!row) return false;
+    this.db.prepare(`DELETE FROM ${table} WHERE hash=?`).run(h);
+    return row.expires > Date.now();
+  }
+
+  hasSecret(table: "sessions", secret: string): boolean {
+    const row = this.db.prepare(`SELECT expires FROM ${table} WHERE hash=?`).get(hash(secret)) as { expires: number } | undefined;
+    return !!row && row.expires > Date.now();
+  }
+
+  deleteSecret(table: "sessions", secret: string): void {
+    this.db.prepare(`DELETE FROM ${table} WHERE hash=?`).run(hash(secret));
+  }
+
+  pruneExpired(): void {
+    const now = Date.now();
+    for (const t of ["pair_codes", "login_tokens", "sessions"]) this.db.prepare(`DELETE FROM ${t} WHERE expires < ?`).run(now);
+  }
+
+  deviceExists(nodeName: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM tokens WHERE node_name=?").get(nodeName);
+  }
+
+  listDevices(): { node_name: string; revoked: number }[] {
+    return this.db.prepare("SELECT node_name, revoked FROM tokens ORDER BY node_name").all() as unknown as { node_name: string; revoked: number }[];
   }
 
   revokeToken(nodeName: string): boolean {
