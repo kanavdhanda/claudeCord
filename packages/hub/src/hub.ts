@@ -9,6 +9,7 @@ import {
   type NodeFrame,
 } from "@claudecord/protocol";
 import type { Db, AgentRow } from "./db.js";
+import { Metrics } from "./metrics.js";
 
 export interface NodeConn {
   nodeName: string;
@@ -49,6 +50,8 @@ interface Pending {
   /** Opaque Discord message reference of the human message, if any. */
   ref?: string;
   taskId?: string;
+  /** When it was sent, to measure how long the agent took to pick it up. */
+  at: number;
 }
 
 export interface PendingAsk {
@@ -88,6 +91,8 @@ export class Hub {
     readonly db: Db,
     private streakLimit = DEFAULT_STREAK_LIMIT,
     private acceptTimeoutMs = DEFAULT_ACCEPT_TIMEOUT_MS,
+    /** Counters for the dashboard. Each event is one array write, so this is free on the message path. */
+    readonly metrics = new Metrics(),
   ) {}
 
   // Node lifecycle
@@ -130,6 +135,7 @@ export class Hub {
         const a = this.agent(f.agentId);
         if (!a) return;
         this.status.set(f.agentId, { status: f.status, detail: f.detail });
+        this.metrics.status(f.agentId, f.status);
         // The agent moved on (for example the prompt was answered in its terminal), so drop stale questions.
         if (f.status !== "waiting_input") this.dropAsks(a.project, f.agentId);
         this.out.refreshStatus(a.project);
@@ -138,6 +144,7 @@ export class Hub {
       case "agent.say": {
         const a = this.agent(f.agentId);
         if (!a) return;
+        this.metrics.inc("msg_agent");
         const clean = await this.scrub(a, f.text);
         await this.out.post(a.project, a, clean, f.thread);
         this.routeAgentMessage(a, clean, f.thread);
@@ -175,6 +182,7 @@ export class Hub {
         const a = this.agent(f.agentId);
         if (!a) return;
         this.status.set(a.agent_id, { status: "limited", detail: f.kind });
+        this.metrics.inc("limits");
         const when = f.resetsAt ? ` Resets ${f.resetsAt}.` : "";
         await this.out.notice(a.project, `${a.name} hit a ${f.kind} limit.${when}`, true);
         this.out.refreshStatus(a.project);
@@ -193,6 +201,7 @@ export class Hub {
         if (!a) return;
         this.db.removeAgent(f.agentId);
         this.status.delete(f.agentId);
+        this.metrics.forget(f.agentId);
         this.dropAsks(a.project, f.agentId);
         this.out.refreshStatus(a.project);
         return;
@@ -219,6 +228,7 @@ export class Hub {
       is_lead: first ? 1 : 0,
     });
     this.status.set(spec.agentId, { status: "idle" });
+    this.metrics.inc("agent_joined");
     const a = this.agent(spec.agentId)!;
     await this.out.notice(
       spec.project,
@@ -290,7 +300,13 @@ export class Hub {
     let msgId: string | undefined;
     if (o.ref || o.taskId) {
       msgId = `m${++this.seq}`;
-      this.pending.set(msgId, { project: a.project, agentId: a.agent_id, ref: o.ref, taskId: o.taskId });
+      this.pending.set(msgId, {
+        project: a.project,
+        agentId: a.agent_id,
+        ref: o.ref,
+        taskId: o.taskId,
+        at: Date.now(),
+      });
     }
     const sent = this.sendTo(a, { t: "deliver", agentId: a.agent_id, from, text, thread: o.thread, msgId });
     if (!sent && msgId) this.pending.delete(msgId);
@@ -304,9 +320,11 @@ export class Hub {
       const p = this.pending.get(id);
       if (!p || p.agentId !== agentId) continue;
       this.pending.delete(id);
+      this.metrics.accepted(Date.now() - p.at);
       if (p.ref) await this.out.confirm(p.project, p.ref, a.name).catch(() => {});
       if (p.taskId) {
         this.db.setTaskState(p.project, p.taskId, "accepted");
+        this.metrics.inc("task_accepted");
         await this.out.notice(p.project, `${a.name} accepted ${p.taskId}.`);
       }
     }
@@ -336,6 +354,7 @@ export class Hub {
     }
     task = await this.scrub(from, task);
     const t = this.db.createTask(from.project, from.agent_id, to.agent_id, task);
+    this.metrics.inc("task_assigned");
     const sent = this.deliver(
       to,
       from.name,
@@ -356,6 +375,7 @@ export class Hub {
     }
     summary = await this.scrub(a, summary);
     this.db.setTaskState(a.project, t.id, "done", summary);
+    this.metrics.taskFinished(Date.now() - t.created);
     await this.out.post(a.project, a, `Finished ${t.id}: ${summary}`);
     const lead = this.agent(t.from_agent);
     if (lead) {
@@ -375,6 +395,7 @@ export class Hub {
   private async scrub(a: AgentRow, text: string): Promise<string> {
     const r = redact(text);
     if (r.found.length) {
+      this.metrics.inc("redactions", r.found.length);
       const kinds = [...new Set(r.found)].join(", ");
       await this.out.notice(
         a.project,
@@ -412,6 +433,8 @@ export class Hub {
         caption: f.caption,
         thread: f.thread,
       });
+      this.metrics.inc("file_bytes", Math.floor((f.data.length * 3) / 4));
+      if (f.last) this.metrics.inc("file_count");
       if (f.last)
         await this.out.post(
           a.project,
@@ -453,6 +476,7 @@ export class Hub {
     const data = Buffer.concat(u.chunks);
     const secrets = findSecretsInFile(data);
     if (secrets.length) {
+      this.metrics.inc("secret_blocks");
       await this.out.notice(
         a.project,
         `Blocked ${f.name} from ${a.name}: it appears to contain ${secrets.join(", ")}.`,
@@ -460,6 +484,8 @@ export class Hub {
       );
       return;
     }
+    this.metrics.inc("file_count");
+    this.metrics.inc("file_bytes", data.length);
     await this.out.postFile(a.project, a, f.name, data, f.caption, f.thread);
   }
 
@@ -543,6 +569,7 @@ export class Hub {
 
     const targets = mentioned.length ? mentioned : this.pickTargets(project, text);
     const res: RouteResult = { targets: targets.map((t) => t.name), offline: [], held: [] };
+    if (targets.length) this.metrics.inc("msg_human");
     const clean = text.trim();
     for (const t of targets) {
       if (!this.deliver(t, "engineer", clean, { thread, ref })) {
