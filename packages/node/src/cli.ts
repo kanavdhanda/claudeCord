@@ -57,6 +57,7 @@ Used by agents
   claudecord say "text" [--thread t]
   claudecord ask "question" [--option text]...
   claudecord report --title t "summary" [--artifact text]...
+  claudecord send path [--to agent] [--caption text] [--thread t]
 `;
 
 async function init(a: Args): Promise<void> {
@@ -206,6 +207,17 @@ async function main(): Promise<void> {
       if (!summary || !title) throw new Error('usage: claudecord report --title t "summary" [--artifact text]...');
       const r = await callDaemon({ op: "report", agentId: currentAgentId(), title, summary, artifacts: a.flags.get("artifact") });
       if (!r.ok) throw new Error(r.error);
+      return;
+    }
+    case "send": {
+      const path = a.pos[0];
+      if (!path) throw new Error("usage: claudecord send path [--to agent] [--caption text] [--thread t]");
+      const r = await callDaemon(
+        { op: "send", agentId: currentAgentId(), path, to: flag(a, "to"), caption: flag(a, "caption"), thread: flag(a, "thread") },
+        120_000,
+      );
+      if (!r.ok) throw new Error(r.error);
+      console.log(String(r.data));
       return;
     }
     default:

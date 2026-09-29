@@ -68,6 +68,19 @@ export const NodeFrame = z.discriminatedUnion("t", [
     resetsAt: z.string().optional(),
   }),
   z.object({ t: z.literal("agent.gone"), agentId: z.string() }),
+  z.object({
+    t: z.literal("file.chunk"),
+    transferId: z.string(),
+    agentId: z.string(),
+    name: z.string(),
+    seq: z.number().int().nonnegative(),
+    last: z.boolean(),
+    data: z.string(),
+    /** Peer agent name to deliver to. Omitted means post to the Discord channel. */
+    to: z.string().optional(),
+    caption: z.string().optional(),
+    thread: z.string().optional(),
+  }),
 ]);
 export type NodeFrame = z.infer<typeof NodeFrame>;
 
@@ -89,6 +102,19 @@ export const HubFrame = z.discriminatedUnion("t", [
     askId: z.string(),
     text: z.string(),
   }),
+  z.object({
+    t: z.literal("file.chunk"),
+    transferId: z.string(),
+    /** Recipient agent. */
+    agentId: z.string(),
+    from: z.string(),
+    name: z.string(),
+    seq: z.number().int().nonnegative(),
+    last: z.boolean(),
+    data: z.string(),
+    caption: z.string().optional(),
+    thread: z.string().optional(),
+  }),
   z.object({ t: z.literal("spawn"), agent: AgentSpec, cwd: z.string().optional() }),
   z.object({ t: z.literal("stop"), agentId: z.string() }),
   z.object({ t: z.literal("killall"), project: z.string().optional() }),
@@ -100,6 +126,10 @@ export const HubFrame = z.discriminatedUnion("t", [
   }),
 ]);
 export type HubFrame = z.infer<typeof HubFrame>;
+
+/** Raw bytes per chunk. Base64 on the wire makes each frame about a third larger. */
+export const FILE_CHUNK_BYTES = 192 * 1024;
+export const MAX_FILE_BYTES = 10 * 1024 * 1024;
 
 export const NODE_CONNECT_PATH = "/api/v1/node/connect";
 

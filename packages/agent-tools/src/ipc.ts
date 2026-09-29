@@ -5,7 +5,8 @@ import { join } from "node:path";
 export type AgentRequest =
   | { op: "say"; agentId: string; text: string; thread?: string }
   | { op: "ask"; agentId: string; question: string; options?: string[]; thread?: string }
-  | { op: "report"; agentId: string; title: string; summary: string; artifacts?: string[] };
+  | { op: "report"; agentId: string; title: string; summary: string; artifacts?: string[] }
+  | { op: "send"; agentId: string; path: string; to?: string; caption?: string; thread?: string };
 
 export type ControlRequest =
   | { op: "ping" }

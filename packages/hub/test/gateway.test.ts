@@ -21,6 +21,7 @@ beforeAll(async () => {
     post: async (_p, a, t) => void posts.push(`${a.name}: ${t}`),
     postAsk: async () => {},
     postReport: async () => {},
+    postFile: async () => {},
     notice: async () => {},
     refreshStatus: () => {},
   } satisfies Outbound;

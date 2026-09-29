@@ -10,7 +10,7 @@ import {
   type ChatInputCommandInteraction,
   type TextChannel,
 } from "discord.js";
-import { AdapterId, autoName } from "@claudecord/protocol";
+import { AdapterId, MAX_FILE_BYTES, autoName } from "@claudecord/protocol";
 import type { HubConfig } from "./config.js";
 import type { Hub, Outbound, PendingAsk } from "./hub.js";
 import type { AgentRow } from "./db.js";
@@ -163,6 +163,17 @@ export class DiscordBridge implements Outbound {
     });
   }
 
+  async postFile(project: string, agent: AgentRow, name: string, data: Buffer, caption?: string, thread?: string): Promise<void> {
+    const threadId = await this.threadId(project, thread);
+    await this.hook(project).send({
+      content: caption?.slice(0, 1900),
+      files: [{ attachment: data, name }],
+      ...this.identity(agent),
+      threadId,
+      allowedMentions: { users: [this.cfg.ownerId] },
+    });
+  }
+
   async notice(project: string, text: string, mention = false): Promise<void> {
     const ch = await this.channel(project);
     await ch.send({
@@ -222,7 +233,8 @@ export class DiscordBridge implements Outbound {
   // Inbound
 
   private async onMessage(m: import("discord.js").Message): Promise<void> {
-    if (m.author.bot || m.webhookId || m.author.id !== this.cfg.ownerId || !m.content.trim()) return;
+    if (m.author.bot || m.webhookId || m.author.id !== this.cfg.ownerId) return;
+    if (!m.content.trim() && !m.attachments.size) return;
     let channelId = m.channelId;
     let thread: string | undefined;
     if (m.channel.isThread() && m.channel.parentId) {
@@ -231,12 +243,31 @@ export class DiscordBridge implements Outbound {
     }
     const p = this.hub.db.projectByChannel(channelId);
     if (!p) return;
+    if (m.attachments.size) {
+      await this.forwardAttachments(m, p.name, thread);
+      if (!m.content.trim()) return;
+    }
     const targets = this.hub.humanMessage(p.name, m.content, thread);
     if (!targets.length) {
       await m.reply({ content: "No agents are connected to this project.", allowedMentions: { repliedUser: false } });
       return;
     }
     await m.react(ACK_REACTION).catch(() => {});
+  }
+
+  private async forwardAttachments(m: import("discord.js").Message, project: string, thread?: string): Promise<void> {
+    let delivered: string[] = [];
+    for (const att of m.attachments.values()) {
+      if (att.size > MAX_FILE_BYTES) {
+        await m.reply({ content: `${att.name} is over the ${MAX_FILE_BYTES / 1048576} MB limit.`, allowedMentions: { repliedUser: false } });
+        continue;
+      }
+      const res = await fetch(att.url);
+      if (!res.ok) continue;
+      delivered = this.hub.sendFile(project, m.content, att.name, Buffer.from(await res.arrayBuffer()), thread);
+    }
+    if (delivered.length) await m.react(ACK_REACTION).catch(() => {});
+    else await m.reply({ content: "No agents are connected to this project.", allowedMentions: { repliedUser: false } });
   }
 
   // Slash commands
