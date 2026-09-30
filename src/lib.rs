@@ -1,17 +1,25 @@
 //! claudeCord: run coding agents on any machine and manage them from a chat.
 //!
-//! This is the Rust port. The TypeScript version it replaces is tagged `ts-reference-v1`, and its behaviour is
-//! captured as golden vectors in `testdata/conformance`, which `tests/conformance.rs` checks this code against.
+//! The expected behaviour of the wire format, secret scrubbing, terminal reading and rate limits is fixed as golden vectors in
+//! `testdata/conformance`, which `tests/conformance.rs` checks this code against.
 
-pub mod adapters;
-pub mod codes;
-pub mod env;
-pub mod limits;
+pub mod agents;
+pub mod cli;
+pub mod device;
+pub mod discord;
+pub mod export;
+pub mod health;
+pub mod hub;
 pub mod metrics;
-pub mod perms;
 pub mod protocol;
-pub mod redact;
-pub mod text;
+pub mod security;
+pub mod server;
+pub mod store;
+
+// Short paths kept so callers and the conformance tests can say `claudecord::redact` instead of the folder path.
+pub use agents::{adapters, text};
+pub use discord::perms;
+pub use security::{codes, env, limits, redact};
 
 /// Length the way JavaScript counts it, in UTF-16 code units. The wire limits were defined that way, so they are
 /// checked that way, or a message with emoji would pass here and fail there.
@@ -29,4 +37,13 @@ pub fn jsslice(s: &str, n: usize) -> &str {
         }
     }
     s
+}
+
+/// Milliseconds since the Unix epoch. The one place the program reads the clock, so everything else can take the time as
+/// an argument and be tested with made-up times.
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }

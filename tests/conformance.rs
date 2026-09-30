@@ -1,6 +1,6 @@
-//! Checks the Rust code against golden vectors written by the TypeScript implementation it replaces
-//! (`pnpm exec tsx scripts/export-conformance.ts`). The expected values are what the TypeScript code produced,
-//! so a pass means the two behave the same on every input in the files.
+//! Checks the code against golden vectors in `testdata/conformance`: for each case, the exact output the program must give for a
+//! given input (frames, redaction, terminal screens, rate limits, metrics and more). A change that alters any of them is a change to
+//! the wire format or to a safety rule, and needs the vector updated on purpose.
 
 use claudecord::adapters::{LaunchCtx, Policy, detect_limit, parse_menu};
 use claudecord::codes::{format_code, normalize_code};
