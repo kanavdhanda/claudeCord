@@ -1,0 +1,237 @@
+//! A stand-in Discord for tests and for `claudecord selftest`: the small part of Discord's REST API and live gateway that the
+//! bridge uses, kept in memory. It records everything the bridge asks it to do (in `Log`) and lets a test inject gateway events.
+//! It is not Discord and checks nothing about permissions, rate limits or message formats beyond what the bridge needs.
+
+use axum::{
+    Json, Router,
+    body::Bytes,
+    extract::{
+        Path, Query, State,
+        ws::{Message as WsMsg, WebSocket, WebSocketUpgrade},
+    },
+    http::HeaderMap,
+    response::IntoResponse,
+    routing::{any, get, post, put},
+};
+use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use tokio::sync::broadcast;
+
+/// Everything the stand-in Discord has been asked to do.
+#[derive(Default)]
+pub struct Log {
+    pub next: u64,
+    pub channels: Vec<Value>,
+    pub webhooks: HashMap<String, String>, // webhook id -> channel id
+    pub posts: Vec<Value>, // webhook posts: {username, content, thread_id, channel, file}
+    pub messages: Vec<Value>, // bot messages: {channel, content, components, id}
+    pub edits: Vec<Value>,
+    pub reactions: Vec<Value>,
+    pub responses: Vec<Value>,
+    pub commands: Option<Value>,
+    pub gateway_connects: u32,
+    pub identifies: u32,
+    pub resumes: u32,
+}
+
+#[derive(Clone)]
+pub struct Fake {
+    pub log: Arc<Mutex<Log>>,
+    pub events: broadcast::Sender<String>,
+    pub addr: Arc<Mutex<String>>,
+    pub kick: broadcast::Sender<()>,
+}
+
+impl Fake {
+    fn id(&self) -> String {
+        let mut l = self.log.lock().unwrap();
+        l.next += 1;
+        (1000 + l.next).to_string()
+    }
+}
+
+pub async fn start_fake() -> (Fake, String) {
+    let (events, _) = broadcast::channel(64);
+    let (kick, _) = broadcast::channel(4);
+    let fake = Fake {
+        log: Arc::default(),
+        events,
+        addr: Arc::default(),
+        kick,
+    };
+    async fn me() -> Json<Value> {
+        Json(json!({"id": "app1", "owner": {"id": "1"}}))
+    }
+    async fn gw(State(f): State<Fake>) -> Json<Value> {
+        Json(json!({"url": format!("ws://{}/gateway", f.addr.lock().unwrap())}))
+    }
+    async fn list(State(f): State<Fake>) -> Json<Value> {
+        Json(Value::Array(f.log.lock().unwrap().channels.clone()))
+    }
+    async fn mk_channel(State(f): State<Fake>, Json(b): Json<Value>) -> Json<Value> {
+        let id = f.id();
+        let c = json!({"id": id, "name": b["name"], "type": 0});
+        f.log.lock().unwrap().channels.push(c.clone());
+        Json(c)
+    }
+    async fn mk_hook(State(f): State<Fake>, Path(ch): Path<String>) -> Json<Value> {
+        let id = f.id();
+        f.log.lock().unwrap().webhooks.insert(id.clone(), ch);
+        Json(json!({"id": id, "token": "tok"}))
+    }
+    async fn hook_post(
+        State(f): State<Fake>,
+        Path((id, _tok)): Path<(String, String)>,
+        Query(q): Query<HashMap<String, String>>,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> Json<Value> {
+        let mid = f.id();
+        let multipart = headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|c| c.starts_with("multipart"));
+        let text = String::from_utf8_lossy(&body).to_string();
+        let (username, content, file) = if multipart {
+            let payload = text
+                .split("name=\"payload_json\"")
+                .nth(1)
+                .and_then(|r| r.split("\r\n\r\n").nth(1))
+                .and_then(|r| r.split("\r\n--").next())
+                .unwrap_or("{}");
+            let v: Value = serde_json::from_str(payload).unwrap_or(Value::Null);
+            let fname = text
+                .split("filename=\"")
+                .nth(1)
+                .and_then(|r| r.split('"').next())
+                .unwrap_or("")
+                .to_string();
+            (
+                v["username"].as_str().unwrap_or("").to_string(),
+                v["content"].as_str().unwrap_or("").to_string(),
+                Some(fname),
+            )
+        } else {
+            let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            (
+                v["username"].as_str().unwrap_or("").to_string(),
+                v["content"].as_str().unwrap_or("").to_string(),
+                None,
+            )
+        };
+        let mut l = f.log.lock().unwrap();
+        let channel = l.webhooks.get(&id).cloned().unwrap_or_default();
+        l.posts.push(json!({"username": username, "content": content, "thread_id": q.get("thread_id"), "channel": channel, "file": file, "id": mid}));
+        Json(json!({"id": mid}))
+    }
+    async fn mk_thread(State(f): State<Fake>, Json(b): Json<Value>) -> Json<Value> {
+        let id = f.id();
+        let _ = b;
+        Json(json!({"id": id}))
+    }
+    async fn send(
+        State(f): State<Fake>,
+        Path(ch): Path<String>,
+        Json(b): Json<Value>,
+    ) -> Json<Value> {
+        let id = f.id();
+        f.log.lock().unwrap().messages.push(json!({"channel": ch, "content": b["content"], "components": b["components"], "id": id}));
+        Json(json!({"id": id}))
+    }
+    async fn edit(
+        State(f): State<Fake>,
+        Path((ch, m)): Path<(String, String)>,
+        Json(b): Json<Value>,
+    ) -> Json<Value> {
+        f.log.lock().unwrap().edits.push(json!({"channel": ch, "message": m, "content": b["content"], "components": b["components"]}));
+        Json(json!({}))
+    }
+    async fn react(
+        State(f): State<Fake>,
+        Path((ch, m, e)): Path<(String, String, String)>,
+    ) -> Json<Value> {
+        f.log
+            .lock()
+            .unwrap()
+            .reactions
+            .push(json!({"channel": ch, "message": m, "emoji": e}));
+        Json(json!({}))
+    }
+    async fn respond(
+        State(f): State<Fake>,
+        Path((id, _t)): Path<(String, String)>,
+        Json(b): Json<Value>,
+    ) -> Json<Value> {
+        f.log
+            .lock()
+            .unwrap()
+            .responses
+            .push(json!({"interaction": id, "content": b["data"]["content"], "type": b["type"]}));
+        Json(json!({}))
+    }
+    async fn cmds(State(f): State<Fake>, Json(b): Json<Value>) -> Json<Value> {
+        f.log.lock().unwrap().commands = Some(b);
+        Json(json!([]))
+    }
+    async fn file() -> &'static str {
+        "attachment bytes"
+    }
+    async fn ws(State(f): State<Fake>, up: WebSocketUpgrade) -> impl IntoResponse {
+        up.on_upgrade(move |s| gateway(f, s))
+    }
+    async fn gateway(f: Fake, mut s: WebSocket) {
+        f.log.lock().unwrap().gateway_connects += 1;
+        let mut events = f.events.subscribe();
+        let mut kick = f.kick.subscribe();
+        let _ = s
+            .send(WsMsg::Text(
+                json!({"op": 10, "d": {"heartbeat_interval": 150}})
+                    .to_string()
+                    .into(),
+            ))
+            .await;
+        loop {
+            tokio::select! {
+                m = s.recv() => {
+                    let Some(Ok(WsMsg::Text(t))) = m else { return };
+                    let v: Value = serde_json::from_str(t.as_str()).unwrap();
+                    match v["op"].as_u64() {
+                        Some(2) => {
+                            f.log.lock().unwrap().identifies += 1;
+                            let _ = s.send(WsMsg::Text(json!({"op": 0, "s": 1, "t": "READY", "d": {"session_id": "sess", "resume_gateway_url": format!("ws://{}/gateway", f.addr.lock().unwrap())}}).to_string().into())).await;
+                        }
+                        Some(6) => f.log.lock().unwrap().resumes += 1,
+                        Some(1) => { let _ = s.send(WsMsg::Text(json!({"op": 11}).to_string().into())).await; }
+                        _ => {}
+                    }
+                }
+                e = events.recv() => { if let Ok(e) = e { let _ = s.send(WsMsg::Text(e.into())).await; } }
+                _ = kick.recv() => { return; }
+            }
+        }
+    }
+    let app = Router::new()
+        .route("/api/oauth2/applications/@me", get(me))
+        .route("/api/gateway/bot", get(gw))
+        .route("/api/guilds/g1/channels", get(list).post(mk_channel))
+        .route("/api/channels/{id}/webhooks", post(mk_hook))
+        .route("/api/webhooks/{id}/{tok}", post(hook_post))
+        .route("/api/channels/{id}/threads", post(mk_thread))
+        .route("/api/channels/{id}/messages", post(send))
+        .route("/api/channels/{c}/messages/{m}", any(edit))
+        .route(
+            "/api/channels/{c}/messages/{m}/reactions/{e}/@me",
+            put(react),
+        )
+        .route("/api/interactions/{id}/{t}/callback", post(respond))
+        .route("/api/applications/{a}/guilds/{g}/commands", put(cmds))
+        .route("/files/{name}", get(file))
+        .route("/gateway", get(ws))
+        .with_state(fake.clone());
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = l.local_addr().unwrap().to_string();
+    *fake.addr.lock().unwrap() = addr.clone();
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    (fake, addr)
+}
