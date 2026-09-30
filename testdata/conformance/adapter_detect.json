@@ -1,0 +1,525 @@
+[
+ {
+  "screen": "\n │ > Try \"fix the tests\"\n ? for shortcuts\n",
+  "claude": {
+   "busy": false,
+   "ready": true,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  },
+  "agy": {
+   "busy": false,
+   "ready": true,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  },
+  "codex": {
+   "busy": false,
+   "ready": true,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  }
+ },
+ {
+  "screen": "\n ✽ Thinking… (3s · esc to interrupt)\n ? for shortcuts\n",
+  "claude": {
+   "busy": true,
+   "ready": false,
+   "executing": true,
+   "prompt": null,
+   "limit": null
+  },
+  "agy": {
+   "busy": true,
+   "ready": false,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  },
+  "codex": {
+   "busy": true,
+   "ready": false,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  }
+ },
+ {
+  "screen": "\n Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don't ask again\n   3. No, and tell Claude what to do differently\n Esc to cancel\n",
+  "claude": {
+   "busy": false,
+   "ready": false,
+   "executing": false,
+   "prompt": {
+    "question": "Do you want to proceed?",
+    "options": [
+     "Yes",
+     "Yes, and don't ask again",
+     "No, and tell Claude what to do differently"
+    ],
+    "cursor": 0,
+    "signature": "Do you want to proceed?|Yes|Yes, and don't ask again|No, and tell Claude what to do differently"
+   },
+   "limit": null
+  },
+  "agy": {
+   "busy": true,
+   "ready": false,
+   "executing": false,
+   "prompt": {
+    "question": "Do you want to proceed?",
+    "options": [
+     "Yes",
+     "Yes, and don't ask again",
+     "No, and tell Claude what to do differently"
+    ],
+    "cursor": 0,
+    "signature": "Do you want to proceed?|Yes|Yes, and don't ask again|No, and tell Claude what to do differently"
+   },
+   "limit": null
+  },
+  "codex": {
+   "busy": false,
+   "ready": false,
+   "executing": false,
+   "prompt": {
+    "question": "Do you want to proceed?",
+    "options": [
+     "Yes",
+     "Yes, and don't ask again",
+     "No, and tell Claude what to do differently"
+    ],
+    "cursor": 0,
+    "signature": "Do you want to proceed?|Yes|Yes, and don't ask again|No, and tell Claude what to do differently"
+   },
+   "limit": null
+  }
+ },
+ {
+  "screen": "\n Do you trust the files in this folder?\n\n ❯ 1. Yes, proceed\n   2. No, exit\n\n Enter to confirm · Esc to cancel\n",
+  "claude": {
+   "busy": false,
+   "ready": false,
+   "executing": false,
+   "prompt": {
+    "question": "Do you trust the files in this folder?",
+    "options": [
+     "Yes, proceed",
+     "No, exit"
+    ],
+    "cursor": 0,
+    "signature": "Do you trust the files in this folder?|Yes, proceed|No, exit"
+   },
+   "limit": null
+  },
+  "agy": {
+   "busy": true,
+   "ready": false,
+   "executing": false,
+   "prompt": {
+    "question": "Do you trust the files in this folder?",
+    "options": [
+     "Yes, proceed",
+     "No, exit"
+    ],
+    "cursor": 0,
+    "signature": "Do you trust the files in this folder?|Yes, proceed|No, exit"
+   },
+   "limit": null
+  },
+  "codex": {
+   "busy": false,
+   "ready": false,
+   "executing": false,
+   "prompt": {
+    "question": "Do you trust the files in this folder?",
+    "options": [
+     "Yes, proceed",
+     "No, exit"
+    ],
+    "cursor": 0,
+    "signature": "Do you trust the files in this folder?|Yes, proceed|No, exit"
+   },
+   "limit": null
+  }
+ },
+ {
+  "screen": "",
+  "claude": {
+   "busy": false,
+   "ready": false,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  },
+  "agy": {
+   "busy": false,
+   "ready": true,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  },
+  "codex": {
+   "busy": false,
+   "ready": true,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  }
+ },
+ {
+  "screen": "booting...",
+  "claude": {
+   "busy": false,
+   "ready": false,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  },
+  "agy": {
+   "busy": false,
+   "ready": true,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  },
+  "codex": {
+   "busy": false,
+   "ready": true,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  }
+ },
+ {
+  "screen": "\n │ > Try \"fix the tests\"\n ? for shortcuts\n\n Session limit reached · resets 3pm\n",
+  "claude": {
+   "busy": false,
+   "ready": true,
+   "executing": false,
+   "prompt": null,
+   "limit": {
+    "kind": "session",
+    "resetsAt": "3pm"
+   }
+  },
+  "agy": {
+   "busy": false,
+   "ready": true,
+   "executing": false,
+   "prompt": null,
+   "limit": {
+    "kind": "session",
+    "resetsAt": "3pm"
+   }
+  },
+  "codex": {
+   "busy": false,
+   "ready": true,
+   "executing": false,
+   "prompt": null,
+   "limit": {
+    "kind": "session",
+    "resetsAt": "3pm"
+   }
+  }
+ },
+ {
+  "screen": "You've hit your weekly limit · resets Oct 9, 9am",
+  "claude": {
+   "busy": false,
+   "ready": false,
+   "executing": false,
+   "prompt": null,
+   "limit": {
+    "kind": "weekly",
+    "resetsAt": "Oct 9, 9am"
+   }
+  },
+  "agy": {
+   "busy": false,
+   "ready": true,
+   "executing": false,
+   "prompt": null,
+   "limit": {
+    "kind": "weekly",
+    "resetsAt": "Oct 9, 9am"
+   }
+  },
+  "codex": {
+   "busy": false,
+   "ready": true,
+   "executing": false,
+   "prompt": null,
+   "limit": {
+    "kind": "weekly",
+    "resetsAt": "Oct 9, 9am"
+   }
+  }
+ },
+ {
+  "screen": "\n rate limit exceeded, try again soon\n",
+  "claude": {
+   "busy": false,
+   "ready": false,
+   "executing": false,
+   "prompt": null,
+   "limit": {
+    "kind": "rate"
+   }
+  },
+  "agy": {
+   "busy": false,
+   "ready": true,
+   "executing": false,
+   "prompt": null,
+   "limit": {
+    "kind": "rate"
+   }
+  },
+  "codex": {
+   "busy": false,
+   "ready": true,
+   "executing": false,
+   "prompt": null,
+   "limit": {
+    "kind": "rate"
+   }
+  }
+ },
+ {
+  "screen": "session limit reached\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\n",
+  "claude": {
+   "busy": false,
+   "ready": false,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  },
+  "agy": {
+   "busy": false,
+   "ready": true,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  },
+  "codex": {
+   "busy": false,
+   "ready": true,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  }
+ },
+ {
+  "screen": "Plan:\n1. do a\n2. do b\n3. do c\n",
+  "claude": {
+   "busy": false,
+   "ready": false,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  },
+  "agy": {
+   "busy": false,
+   "ready": true,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  },
+  "codex": {
+   "busy": false,
+   "ready": true,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  }
+ },
+ {
+  "screen": "\n ready for input\n",
+  "claude": {
+   "busy": false,
+   "ready": false,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  },
+  "agy": {
+   "busy": false,
+   "ready": true,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  },
+  "codex": {
+   "busy": false,
+   "ready": true,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  }
+ },
+ {
+  "screen": "\n working on it (esc to cancel)\n",
+  "claude": {
+   "busy": false,
+   "ready": false,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  },
+  "agy": {
+   "busy": true,
+   "ready": false,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  },
+  "codex": {
+   "busy": true,
+   "ready": false,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  }
+ },
+ {
+  "screen": "\n > \n",
+  "claude": {
+   "busy": false,
+   "ready": false,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  },
+  "agy": {
+   "busy": false,
+   "ready": true,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  },
+  "codex": {
+   "busy": false,
+   "ready": true,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  }
+ },
+ {
+  "screen": "\n thinking (esc to interrupt)\n",
+  "claude": {
+   "busy": true,
+   "ready": false,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  },
+  "agy": {
+   "busy": true,
+   "ready": false,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  },
+  "codex": {
+   "busy": true,
+   "ready": false,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  }
+ },
+ {
+  "screen": "\n Run this command?\n ❯ 1. Run\n   2. Skip\n",
+  "claude": {
+   "busy": false,
+   "ready": true,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  },
+  "agy": {
+   "busy": false,
+   "ready": false,
+   "executing": false,
+   "prompt": {
+    "question": "Run this command?",
+    "options": [
+     "Run",
+     "Skip"
+    ],
+    "cursor": 0,
+    "signature": "Run this command?|Run|Skip"
+   },
+   "limit": null
+  },
+  "codex": {
+   "busy": false,
+   "ready": false,
+   "executing": false,
+   "prompt": {
+    "question": "Run this command?",
+    "options": [
+     "Run",
+     "Skip"
+    ],
+    "cursor": 0,
+    "signature": "Run this command?|Run|Skip"
+   },
+   "limit": null
+  }
+ },
+ {
+  "screen": " ✳ Running… (12s · esc to interrupt)\n ? for shortcuts\n",
+  "claude": {
+   "busy": true,
+   "ready": false,
+   "executing": true,
+   "prompt": null,
+   "limit": null
+  },
+  "agy": {
+   "busy": true,
+   "ready": false,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  },
+  "codex": {
+   "busy": true,
+   "ready": false,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  }
+ },
+ {
+  "screen": "\n ❯ \n ? for shortcuts\n",
+  "claude": {
+   "busy": false,
+   "ready": true,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  },
+  "agy": {
+   "busy": false,
+   "ready": true,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  },
+  "codex": {
+   "busy": false,
+   "ready": true,
+   "executing": false,
+   "prompt": null,
+   "limit": null
+  }
+ }
+]

@@ -1,0 +1,74 @@
+[
+ {
+  "input": "otter",
+  "valid": true
+ },
+ {
+  "input": "a",
+  "valid": true
+ },
+ {
+  "input": "a.b-c_d",
+  "valid": true
+ },
+ {
+  "input": "A1",
+  "valid": true
+ },
+ {
+  "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "valid": true
+ },
+ {
+  "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "valid": false
+ },
+ {
+  "input": "",
+  "valid": false
+ },
+ {
+  "input": "-rf",
+  "valid": false
+ },
+ {
+  "input": ".hidden",
+  "valid": false
+ },
+ {
+  "input": "_x",
+  "valid": false
+ },
+ {
+  "input": "has space",
+  "valid": false
+ },
+ {
+  "input": "../x",
+  "valid": false
+ },
+ {
+  "input": "a/b",
+  "valid": false
+ },
+ {
+  "input": "café",
+  "valid": false
+ },
+ {
+  "input": "a b",
+  "valid": false
+ },
+ {
+  "input": "tab\there",
+  "valid": false
+ },
+ {
+  "input": "new\nline",
+  "valid": false
+ },
+ {
+  "input": "0start",
+  "valid": true
+ }
+]

@@ -1,0 +1,158 @@
+[
+ {
+  "adapter": "claude",
+  "policy": "autonomous",
+  "model": "sonnet",
+  "rules": "R",
+  "mcp": true,
+  "argv": [
+   "claude",
+   "--model",
+   "sonnet",
+   "--dangerously-skip-permissions",
+   "--mcp-config",
+   "/m.json",
+   "--allowedTools",
+   "mcp__claudecord__say",
+   "mcp__claudecord__ask_human",
+   "mcp__claudecord__report",
+   "mcp__claudecord__send_file",
+   "mcp__claudecord__assign",
+   "mcp__claudecord__task_done",
+   "--append-system-prompt",
+   "R",
+   "-n",
+   "a"
+  ]
+ },
+ {
+  "adapter": "agy",
+  "policy": "autonomous",
+  "model": "gemini-3",
+  "argv": [
+   "agy",
+   "--model",
+   "gemini-3",
+   "--dangerously-skip-permissions"
+  ]
+ },
+ {
+  "adapter": "codex",
+  "policy": "autonomous",
+  "model": "gpt-5",
+  "argv": [
+   "codex",
+   "--no-alt-screen",
+   "-m",
+   "gpt-5",
+   "-s",
+   "workspace-write",
+   "-a",
+   "never"
+  ]
+ },
+ {
+  "adapter": "claude",
+  "policy": "plan",
+  "model": "sonnet",
+  "rules": "R",
+  "mcp": true,
+  "argv": [
+   "claude",
+   "--model",
+   "sonnet",
+   "--permission-mode",
+   "plan",
+   "--mcp-config",
+   "/m.json",
+   "--allowedTools",
+   "mcp__claudecord__say",
+   "mcp__claudecord__ask_human",
+   "mcp__claudecord__report",
+   "mcp__claudecord__send_file",
+   "mcp__claudecord__assign",
+   "mcp__claudecord__task_done",
+   "--append-system-prompt",
+   "R",
+   "-n",
+   "a"
+  ]
+ },
+ {
+  "adapter": "agy",
+  "policy": "plan",
+  "model": "gemini-3",
+  "argv": [
+   "agy",
+   "--model",
+   "gemini-3",
+   "--mode",
+   "plan"
+  ]
+ },
+ {
+  "adapter": "codex",
+  "policy": "plan",
+  "model": "gpt-5",
+  "argv": [
+   "codex",
+   "--no-alt-screen",
+   "-m",
+   "gpt-5",
+   "-s",
+   "read-only",
+   "-a",
+   "on-request"
+  ]
+ },
+ {
+  "adapter": "claude",
+  "policy": "ask",
+  "model": "sonnet",
+  "rules": "R",
+  "mcp": true,
+  "argv": [
+   "claude",
+   "--model",
+   "sonnet",
+   "--mcp-config",
+   "/m.json",
+   "--allowedTools",
+   "mcp__claudecord__say",
+   "mcp__claudecord__ask_human",
+   "mcp__claudecord__report",
+   "mcp__claudecord__send_file",
+   "mcp__claudecord__assign",
+   "mcp__claudecord__task_done",
+   "--append-system-prompt",
+   "R",
+   "-n",
+   "a"
+  ]
+ },
+ {
+  "adapter": "agy",
+  "policy": "ask",
+  "model": "gemini-3",
+  "argv": [
+   "agy",
+   "--model",
+   "gemini-3"
+  ]
+ },
+ {
+  "adapter": "codex",
+  "policy": "ask",
+  "model": "gpt-5",
+  "argv": [
+   "codex",
+   "--no-alt-screen",
+   "-m",
+   "gpt-5",
+   "-s",
+   "workspace-write",
+   "-a",
+   "on-request"
+  ]
+ }
+]

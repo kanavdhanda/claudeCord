@@ -1,0 +1,46 @@
+[
+ {
+  "input": "my project",
+  "output": "my-project"
+ },
+ {
+  "input": "../../etc",
+  "output": "etc"
+ },
+ {
+  "input": "  spaced  ",
+  "output": "spaced"
+ },
+ {
+  "input": "café app",
+  "output": "caf-app"
+ },
+ {
+  "input": "",
+  "output": "project"
+ },
+ {
+  "input": "!!!",
+  "output": "project"
+ },
+ {
+  "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "output": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+ },
+ {
+  "input": "keep.dots_and-dashes",
+  "output": "keep.dots_and-dashes"
+ },
+ {
+  "input": "My App.v2",
+  "output": "My-App.v2"
+ },
+ {
+  "input": "-lead",
+  "output": "lead"
+ },
+ {
+  "input": "trail--",
+  "output": "trail"
+ }
+]

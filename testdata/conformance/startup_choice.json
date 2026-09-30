@@ -1,0 +1,32 @@
+[
+ {
+  "screen": "\n Do you trust the files in this folder?\n\n ❯ 1. Yes, proceed\n   2. No, exit\n\n Enter to confirm · Esc to cancel\n",
+  "claude": 0,
+  "agy": 0,
+  "codex": 0,
+  "selectKeys": [
+   "Down",
+   "Enter"
+  ]
+ },
+ {
+  "screen": "\n Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don't ask again\n   3. No, and tell Claude what to do differently\n Esc to cancel\n",
+  "claude": null,
+  "agy": null,
+  "codex": null,
+  "selectKeys": [
+   "Down",
+   "Enter"
+  ]
+ },
+ {
+  "screen": "\n Bypass Permissions mode\n ❯ 1. No, exit\n   2. Yes, I accept\n",
+  "claude": 1,
+  "agy": null,
+  "codex": null,
+  "selectKeys": [
+   "Down",
+   "Enter"
+  ]
+ }
+]

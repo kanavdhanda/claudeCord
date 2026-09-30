@@ -1,0 +1,114 @@
+[
+ {
+  "input": ".env",
+  "sensitive": true
+ },
+ {
+  "input": ".env.production",
+  "sensitive": true
+ },
+ {
+  "input": ".env.local",
+  "sensitive": true
+ },
+ {
+  "input": "config/.env",
+  "sensitive": true
+ },
+ {
+  "input": "id_rsa",
+  "sensitive": true
+ },
+ {
+  "input": "id_ed25519",
+  "sensitive": true
+ },
+ {
+  "input": "deploy.pem",
+  "sensitive": true
+ },
+ {
+  "input": "server.key",
+  "sensitive": true
+ },
+ {
+  "input": "keystore.jks",
+  "sensitive": true
+ },
+ {
+  "input": ".npmrc",
+  "sensitive": true
+ },
+ {
+  "input": ".netrc",
+  "sensitive": true
+ },
+ {
+  "input": ".git-credentials",
+  "sensitive": true
+ },
+ {
+  "input": "credentials.json",
+  "sensitive": true
+ },
+ {
+  "input": "secrets.yaml",
+  "sensitive": true
+ },
+ {
+  "input": "terraform.tfvars",
+  "sensitive": true
+ },
+ {
+  "input": "terraform.tfstate",
+  "sensitive": true
+ },
+ {
+  "input": "service-account-prod.json",
+  "sensitive": true
+ },
+ {
+  "input": ".ssh/config",
+  "sensitive": true
+ },
+ {
+  "input": "home/.aws/credentials",
+  "sensitive": true
+ },
+ {
+  "input": "x/.gnupg/pubring.kbx",
+  "sensitive": true
+ },
+ {
+  "input": "src/index.ts",
+  "sensitive": false
+ },
+ {
+  "input": "README.md",
+  "sensitive": false
+ },
+ {
+  "input": "environment.md",
+  "sensitive": false
+ },
+ {
+  "input": "envelope.ts",
+  "sensitive": false
+ },
+ {
+  "input": "docs/keyboard.md",
+  "sensitive": false
+ },
+ {
+  "input": "notes.txt",
+  "sensitive": false
+ },
+ {
+  "input": ".claudecord/inbox/data.csv",
+  "sensitive": false
+ },
+ {
+  "input": "a\\.ssh\\config",
+  "sensitive": true
+ }
+]

@@ -1,0 +1,32 @@
+[
+ {
+  "raw": "not json",
+  "node": false,
+  "hub": false
+ },
+ {
+  "raw": "{}",
+  "node": false,
+  "hub": false
+ },
+ {
+  "raw": "[]",
+  "node": false,
+  "hub": false
+ },
+ {
+  "raw": "null",
+  "node": false,
+  "hub": false
+ },
+ {
+  "raw": "{\"t\":\"hello\"}",
+  "node": false,
+  "hub": false
+ },
+ {
+  "raw": "",
+  "node": false,
+  "hub": false
+ }
+]

@@ -1,0 +1,66 @@
+[
+ {
+  "adapter": "claude",
+  "env": {
+   "PATH": "/usr/bin",
+   "HOME": "/h",
+   "AWS_ACCESS_KEY_ID": "AKIAABCDEFGHIJKLMNOP",
+   "AWS_SECRET_ACCESS_KEY": "abc123",
+   "GITHUB_TOKEN": "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "MY_SERVICE_TOKEN": "something",
+   "DB_PASSWORD": "hunter2",
+   "STRIPE_API_KEY": "sk_live_xxx",
+   "DATABASE_URL": "postgres://u:p@h/db",
+   "NPM_CONFIG_USERCONFIG": "/x/.npmrc",
+   "INNOCENT_NAME": "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "EDITOR": "vim",
+   "ANTHROPIC_API_KEY": "sk-ant-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "OPENAI_API_KEY": "sk-yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+   "CLAUDECORD_AGENT_ID": "p/a",
+   "SSH_AUTH_SOCK": "/tmp/s",
+   "SSH_PASSWORD": "hunter2hunter2"
+  },
+  "unset": [
+   "AWS_ACCESS_KEY_ID",
+   "AWS_SECRET_ACCESS_KEY",
+   "DATABASE_URL",
+   "DB_PASSWORD",
+   "GITHUB_TOKEN",
+   "INNOCENT_NAME",
+   "MY_SERVICE_TOKEN",
+   "NPM_CONFIG_USERCONFIG",
+   "OPENAI_API_KEY",
+   "SSH_PASSWORD",
+   "STRIPE_API_KEY"
+  ]
+ },
+ {
+  "adapter": "codex",
+  "env": {
+   "OPENAI_API_KEY": "sk-yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+   "ANTHROPIC_API_KEY": "sk-ant-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "CODEX_HOME": "/x",
+   "SOME_TOKEN": "t"
+  },
+  "unset": [
+   "ANTHROPIC_API_KEY",
+   "SOME_TOKEN"
+  ]
+ },
+ {
+  "adapter": "agy",
+  "env": {
+   "GOOGLE_API_KEY": "AIzaBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+   "GEMINI_KEY": "k",
+   "AUTH_COOKIE": "c",
+   "SESSION_ID": "s",
+   "PRIVATE_THING": "p",
+   "HARMLESS": "ok"
+  },
+  "unset": [
+   "AUTH_COOKIE",
+   "PRIVATE_THING",
+   "SESSION_ID"
+  ]
+ }
+]

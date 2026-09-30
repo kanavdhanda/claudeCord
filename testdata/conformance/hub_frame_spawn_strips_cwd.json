@@ -1,0 +1,21 @@
+{
+ "input": {
+  "t": "spawn",
+  "agent": {
+   "agentId": "proj/otter",
+   "name": "otter",
+   "project": "proj",
+   "adapter": "claude"
+  },
+  "cwd": "/etc"
+ },
+ "output": {
+  "t": "spawn",
+  "agent": {
+   "agentId": "proj/otter",
+   "name": "otter",
+   "project": "proj",
+   "adapter": "claude"
+  }
+ }
+}

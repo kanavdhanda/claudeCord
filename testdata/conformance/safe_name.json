@@ -1,0 +1,36 @@
+[
+ {
+  "input": "../../etc/passwd",
+  "output": "passwd"
+ },
+ {
+  "input": ".bashrc",
+  "output": "_bashrc"
+ },
+ {
+  "input": "a:b*c.txt",
+  "output": "a_b_c.txt"
+ },
+ {
+  "input": "",
+  "output": "file"
+ },
+ {
+  "input": {
+   "$repeat": "x",
+   "$n": 200
+  },
+  "output": {
+   "$repeat": "x",
+   "$n": 120
+  }
+ },
+ {
+  "input": "normal.txt",
+  "output": "normal.txt"
+ },
+ {
+  "input": "a\u0000b",
+  "output": "a_b"
+ }
+]

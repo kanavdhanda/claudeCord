@@ -1,0 +1,130 @@
+[
+ {
+  "input": {
+   "t": "welcome",
+   "nodeId": "mac"
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "error",
+   "message": "x"
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "deliver",
+   "agentId": "p/a",
+   "from": "engineer",
+   "text": "hi"
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "deliver",
+   "agentId": "p/a",
+   "from": "engineer",
+   "text": "hi",
+   "thread": "t",
+   "msgId": "m1"
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "answer",
+   "agentId": "p/a",
+   "askId": "1",
+   "text": "yes"
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "spawn",
+   "agent": {
+    "agentId": "proj/otter",
+    "name": "otter",
+    "project": "proj",
+    "adapter": "claude"
+   }
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "spawn",
+   "agent": {
+    "agentId": "proj/bad name",
+    "name": "bad name",
+    "project": "proj",
+    "adapter": "claude"
+   }
+  },
+  "valid": false
+ },
+ {
+  "input": {
+   "t": "stop",
+   "agentId": "p/a"
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "killall"
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "killall",
+   "project": "p"
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "hold",
+   "on": true
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "hold",
+   "on": false,
+   "agentId": "p/a",
+   "project": "p"
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "hold"
+  },
+  "valid": false
+ },
+ {
+  "input": {
+   "t": "file.chunk",
+   "transferId": "t",
+   "agentId": "p/a",
+   "from": "x",
+   "name": "f",
+   "seq": 0,
+   "last": true,
+   "data": "AAAA"
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "nope"
+  },
+  "valid": false
+ }
+]

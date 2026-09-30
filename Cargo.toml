@@ -1,0 +1,17 @@
+[package]
+name = "claudecord"
+version = "0.2.0"
+edition = "2024"
+description = "Run Claude Code, agy and Codex agents on any machine as a Discord team"
+license = "MIT"
+repository = "https://github.com/kanavdhanda/claudeCord"
+
+[dependencies]
+base64 = "0.22"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+lto = "thin"
+strip = true

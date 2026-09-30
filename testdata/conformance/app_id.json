@@ -1,0 +1,34 @@
+[
+ {
+  "input": "MTIzNDU2Nzg5MDEyMzQ1Njc4.aaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "appId": "123456789012345678"
+ },
+ {
+  "input": "OTg3NjU0MzIxMDk4NzY1NDM.a.b",
+  "appId": "98765432109876543"
+ },
+ {
+  "input": "OTg3NjU0MzIxMDk4NzY1NDM=.a.b",
+  "appId": "98765432109876543"
+ },
+ {
+  "input": "",
+  "appId": null
+ },
+ {
+  "input": "nope",
+  "appId": null
+ },
+ {
+  "input": "a.b.c",
+  "appId": null
+ },
+ {
+  "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "appId": null
+ },
+ {
+  "input": "bm90IGRpZ2l0cyBhdCBhbGwhIQ==.a.b",
+  "appId": null
+ }
+]

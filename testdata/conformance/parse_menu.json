@@ -1,0 +1,99 @@
+[
+ {
+  "screen": "\n │ > Try \"fix the tests\"\n ? for shortcuts\n",
+  "menu": null
+ },
+ {
+  "screen": "\n ✽ Thinking… (3s · esc to interrupt)\n ? for shortcuts\n",
+  "menu": null
+ },
+ {
+  "screen": "\n Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don't ask again\n   3. No, and tell Claude what to do differently\n Esc to cancel\n",
+  "menu": {
+   "signature": "Do you want to proceed?|Yes|Yes, and don't ask again|No, and tell Claude what to do differently",
+   "question": "Do you want to proceed?",
+   "options": [
+    "Yes",
+    "Yes, and don't ask again",
+    "No, and tell Claude what to do differently"
+   ],
+   "cursor": 0
+  }
+ },
+ {
+  "screen": "\n Do you trust the files in this folder?\n\n ❯ 1. Yes, proceed\n   2. No, exit\n\n Enter to confirm · Esc to cancel\n",
+  "menu": {
+   "signature": "Do you trust the files in this folder?|Yes, proceed|No, exit",
+   "question": "Do you trust the files in this folder?",
+   "options": [
+    "Yes, proceed",
+    "No, exit"
+   ],
+   "cursor": 0
+  }
+ },
+ {
+  "screen": "",
+  "menu": null
+ },
+ {
+  "screen": "booting...",
+  "menu": null
+ },
+ {
+  "screen": "\n │ > Try \"fix the tests\"\n ? for shortcuts\n\n Session limit reached · resets 3pm\n",
+  "menu": null
+ },
+ {
+  "screen": "You've hit your weekly limit · resets Oct 9, 9am",
+  "menu": null
+ },
+ {
+  "screen": "\n rate limit exceeded, try again soon\n",
+  "menu": null
+ },
+ {
+  "screen": "session limit reached\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\nline\n",
+  "menu": null
+ },
+ {
+  "screen": "Plan:\n1. do a\n2. do b\n3. do c\n",
+  "menu": null
+ },
+ {
+  "screen": "\n ready for input\n",
+  "menu": null
+ },
+ {
+  "screen": "\n working on it (esc to cancel)\n",
+  "menu": null
+ },
+ {
+  "screen": "\n > \n",
+  "menu": null
+ },
+ {
+  "screen": "\n thinking (esc to interrupt)\n",
+  "menu": null
+ },
+ {
+  "screen": "\n Run this command?\n ❯ 1. Run\n   2. Skip\n",
+  "menu": {
+   "signature": "Run this command?|Run|Skip",
+   "question": "Run this command?",
+   "options": [
+    "Run",
+    "Skip"
+   ],
+   "cursor": 0
+  }
+ },
+ {
+  "screen": " ✳ Running… (12s · esc to interrupt)\n ? for shortcuts\n",
+  "menu": null
+ },
+ {
+  "screen": "\n ❯ \n ? for shortcuts\n",
+  "menu": null
+ }
+]
