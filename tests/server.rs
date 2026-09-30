@@ -1,0 +1,761 @@
+//! The hub over real sockets. These are the ways a connection can go wrong: a device that vanishes, one that stops
+//! reading, a second connection for the same device, a hub that restarts, many devices at once, abuse. Each test starts
+//! a real hub on a free port and talks to it with a real WebSocket client.
+
+use claudecord::hub::*;
+use claudecord::protocol::{AdapterId, AgentSpec, HubFrame, NodeFrame};
+use claudecord::server::{self, Config};
+use claudecord::store::Store;
+use futures_util::{SinkExt, StreamExt};
+use std::time::Duration;
+use tokio::net::TcpStream;
+use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
+
+type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+fn kd() -> Human {
+    Human {
+        id: "1".into(),
+        name: "kd".into(),
+    }
+}
+
+fn cfg() -> Config {
+    Config {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        ping_every: Duration::from_millis(80),
+        max_out_bytes: 1 << 20,
+        save_every: Duration::from_millis(10),
+        tick_every: Duration::from_millis(50),
+        ..Config::default()
+    }
+}
+
+fn tmp(name: &str) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!("cc-srv-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}
+
+/// Starts a hub with owner kd, and a token for each of the named devices.
+async fn boot(config: Config, db: &std::path::Path, nodes: &[&str]) -> (server::Hub, Vec<String>) {
+    let mut store = Store::open(db, None).unwrap();
+    let tokens = nodes
+        .iter()
+        .map(|n| store.create_token(n, 0).unwrap())
+        .collect();
+    let mut core = HubCore::default();
+    core.add_owner("1");
+    (server::start(config, core, store).await.unwrap(), tokens)
+}
+
+/// Starts a hub on an existing database, without making tokens.
+async fn reboot(config: Config, db: &std::path::Path) -> server::Hub {
+    server::start(config, HubCore::default(), Store::open(db, None).unwrap())
+        .await
+        .unwrap()
+}
+
+async fn connect(
+    hub: &server::Hub,
+    token: &str,
+) -> Result<Ws, tokio_tungstenite::tungstenite::Error> {
+    let mut req = format!("ws://{}/api/v1/node/connect", hub.addr)
+        .into_client_request()
+        .unwrap();
+    req.headers_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    connect_async(req).await.map(|(ws, _)| ws)
+}
+
+fn spec(name: &str) -> AgentSpec {
+    AgentSpec {
+        agent_id: format!("p/{name}"),
+        name: name.into(),
+        project: "p".into(),
+        adapter: AdapterId::Claude,
+        model: None,
+        role: None,
+    }
+}
+
+async fn register(ws: &mut Ws, name: &str) {
+    let f = NodeFrame::AgentRegister {
+        agent: spec(name),
+        cwd: "/x".into(),
+    };
+    ws.send(Message::Text(serde_json::to_string(&f).unwrap().into()))
+        .await
+        .unwrap();
+}
+
+/// Next text frame from the hub, or None on close or timeout.
+async fn next_frame(ws: &mut Ws, ms: u64) -> Option<HubFrame> {
+    loop {
+        match tokio::time::timeout(Duration::from_millis(ms), ws.next()).await {
+            Ok(Some(Ok(Message::Text(t)))) => return HubFrame::parse(t.as_str()),
+            Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => continue,
+            _ => return None,
+        }
+    }
+}
+
+async fn wait_for(what: &str, mut f: impl AsyncFnMut() -> bool) {
+    for _ in 0..200 {
+        if f().await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+async fn connected(hub: &server::Hub, node: &'static str) -> bool {
+    hub.call(move |c, _| (c.is_connected(node), vec![]))
+        .await
+        .unwrap_or(false)
+}
+
+#[tokio::test]
+async fn a_bad_token_is_refused_and_a_good_one_is_welcomed() {
+    let dir = tmp("auth");
+    let (hub, tokens) = boot(cfg(), &dir.join("t.db"), &["mac"]).await;
+    assert!(connect(&hub, "wrong").await.is_err());
+    let mut ws = connect(&hub, &tokens[0]).await.unwrap();
+    assert!(
+        matches!(next_frame(&mut ws, 1000).await, Some(HubFrame::Welcome { node_id }) if node_id == "mac")
+    );
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn repeated_bad_tokens_get_an_address_blocked() {
+    let dir = tmp("block");
+    let (hub, tokens) = boot(cfg(), &dir.join("t.db"), &["mac"]).await;
+    for _ in 0..10 {
+        assert!(connect(&hub, "wrong").await.is_err());
+    }
+    assert!(
+        connect(&hub, &tokens[0]).await.is_err(),
+        "even a good token is refused while blocked"
+    );
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_message_reaches_the_device_and_acceptance_comes_back() {
+    let dir = tmp("flow");
+    let (hub, tokens) = boot(cfg(), &dir.join("t.db"), &["mac"]).await;
+    let mut chat = hub.chat();
+    let mut ws = connect(&hub, &tokens[0]).await.unwrap();
+    register(&mut ws, "otter").await;
+    wait_for("agent registered", async || {
+        hub.call(|c, _| (c.agent("p/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    hub.call(|c, now| {
+        let r = c
+            .human_message(
+                &kd(),
+                "p",
+                "hello",
+                &MessageOpts {
+                    reference: Some("c:1"),
+                    ..Default::default()
+                },
+                now,
+            )
+            .unwrap();
+        ((), r.1)
+    })
+    .await;
+    let mut got = None;
+    while let Some(f) = next_frame(&mut ws, 1000).await {
+        if let HubFrame::Deliver { text, msg_id, .. } = f
+            && text == "hello"
+        {
+            got = msg_id;
+            break;
+        }
+    }
+    let id = got.expect("the message arrived with an id");
+    let f = NodeFrame::AgentAccepted {
+        agent_id: "p/otter".into(),
+        msg_ids: vec![id],
+    };
+    ws.send(Message::Text(serde_json::to_string(&f).unwrap().into()))
+        .await
+        .unwrap();
+    // The chat side is told to mark the original message as accepted.
+    let confirmed = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Ok(Chat::Confirm { reference, .. }) = chat.recv().await
+                && reference == "c:1"
+            {
+                return true;
+            }
+        }
+    })
+    .await;
+    assert_eq!(confirmed, Ok(true));
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_device_that_goes_silent_is_dropped() {
+    let dir = tmp("silent");
+    let (hub, tokens) = boot(cfg(), &dir.join("t.db"), &["mac"]).await;
+    let ws = connect(&hub, &tokens[0]).await.unwrap();
+    wait_for("connected", async || connected(&hub, "mac").await).await;
+    // Hold the socket open but never read it, so pings are never answered.
+    let start = std::time::Instant::now();
+    wait_for("dropped", async || !connected(&hub, "mac").await).await;
+    assert!(
+        start.elapsed() < Duration::from_millis(1500),
+        "dropped within a few ping intervals, took {:?}",
+        start.elapsed()
+    );
+    drop(ws);
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_healthy_device_that_answers_pings_is_kept() {
+    let dir = tmp("healthy");
+    let (hub, tokens) = boot(cfg(), &dir.join("t.db"), &["mac"]).await;
+    let mut ws = connect(&hub, &tokens[0]).await.unwrap();
+    // Reading answers the pings automatically.
+    let _ = next_frame(&mut ws, 800).await;
+    assert!(connected(&hub, "mac").await);
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_device_that_stops_reading_is_cut_off_instead_of_filling_the_hub() {
+    let dir = tmp("slow");
+    let (hub, tokens) = boot(
+        Config {
+            ping_every: Duration::from_secs(60),
+            ..cfg()
+        },
+        &dir.join("t.db"),
+        &["mac"],
+    )
+    .await;
+    let mut ws = connect(&hub, &tokens[0]).await.unwrap();
+    register(&mut ws, "otter").await;
+    wait_for("agent registered", async || {
+        hub.call(|c, _| (c.agent("p/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    // Never read again. Push far more than the backlog cap.
+    for i in 0..8 {
+        hub.call(move |c, _| {
+            let (_, fx) = c
+                .send_file(
+                    &kd(),
+                    "p",
+                    "@otter",
+                    "big.bin",
+                    &vec![i as u8; 3 << 20],
+                    None,
+                    &format!("t{i}"),
+                )
+                .unwrap();
+            ((), fx)
+        })
+        .await;
+    }
+    wait_for("dropped", async || !connected(&hub, "mac").await).await;
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_second_connection_replaces_the_first() {
+    let dir = tmp("replace");
+    let (hub, tokens) = boot(cfg(), &dir.join("t.db"), &["mac"]).await;
+    let mut first = connect(&hub, &tokens[0]).await.unwrap();
+    let _ = next_frame(&mut first, 500).await;
+    let mut second = connect(&hub, &tokens[0]).await.unwrap();
+    let mut told = false;
+    while let Some(f) = next_frame(&mut first, 1000).await {
+        if matches!(f, HubFrame::Error { message } if message.contains("replaced")) {
+            told = true;
+        }
+    }
+    assert!(told, "the first connection is told why");
+    assert!(matches!(
+        next_frame(&mut second, 500).await,
+        Some(HubFrame::Welcome { .. })
+    ));
+    assert!(
+        connected(&hub, "mac").await,
+        "the first one closing does not evict the second"
+    );
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn messages_wait_while_a_device_is_away_and_arrive_when_it_returns() {
+    let dir = tmp("away");
+    let (hub, tokens) = boot(cfg(), &dir.join("t.db"), &["mac"]).await;
+    let mut ws = connect(&hub, &tokens[0]).await.unwrap();
+    register(&mut ws, "otter").await;
+    wait_for("registered", async || {
+        hub.call(|c, _| (c.agent("p/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    ws.close(None).await.unwrap();
+    wait_for("gone", async || !connected(&hub, "mac").await).await;
+    hub.call(|c, now| {
+        let r = c
+            .human_message(
+                &kd(),
+                "p",
+                "while you were out",
+                &MessageOpts::default(),
+                now,
+            )
+            .unwrap();
+        ((), r.1)
+    })
+    .await;
+    let mut ws = connect(&hub, &tokens[0]).await.unwrap();
+    register(&mut ws, "otter").await;
+    let mut got = false;
+    while let Some(f) = next_frame(&mut ws, 1000).await {
+        if matches!(f, HubFrame::Deliver { text, .. } if text == "while you were out") {
+            got = true;
+            break;
+        }
+    }
+    assert!(got);
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_restarted_hub_still_has_the_waiting_message_and_the_token() {
+    let dir = tmp("restart");
+    let db = dir.join("t.db");
+    let (hub, tokens) = boot(cfg(), &db, &["mac"]).await;
+    let mut ws = connect(&hub, &tokens[0]).await.unwrap();
+    register(&mut ws, "otter").await;
+    wait_for("registered", async || {
+        hub.call(|c, _| (c.agent("p/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    ws.close(None).await.unwrap();
+    wait_for("gone", async || !connected(&hub, "mac").await).await;
+    hub.call(|c, now| {
+        let r = c
+            .human_message(
+                &kd(),
+                "p",
+                "survives a restart",
+                &MessageOpts::default(),
+                now,
+            )
+            .unwrap();
+        ((), r.1)
+    })
+    .await;
+    hub.shutdown().await;
+    let hub = reboot(cfg(), &db).await;
+    let mut ws = connect(&hub, &tokens[0])
+        .await
+        .expect("the token still works");
+    register(&mut ws, "otter").await;
+    let mut got = false;
+    while let Some(f) = next_frame(&mut ws, 1000).await {
+        if matches!(f, HubFrame::Deliver { text, .. } if text == "survives a restart") {
+            got = true;
+            break;
+        }
+    }
+    assert!(got);
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn shutting_down_tells_devices_so_they_can_reconnect_at_once() {
+    let dir = tmp("down");
+    let (hub, tokens) = boot(cfg(), &dir.join("t.db"), &["mac"]).await;
+    let mut ws = connect(&hub, &tokens[0]).await.unwrap();
+    let _ = next_frame(&mut ws, 500).await;
+    hub.shutdown().await;
+    let mut code = None;
+    while let Some(Ok(m)) = ws.next().await {
+        if let Message::Close(Some(f)) = m {
+            code = Some(u16::from(f.code));
+            break;
+        }
+    }
+    assert_eq!(code, Some(1001));
+}
+
+#[tokio::test]
+async fn bad_frames_are_refused_without_hurting_the_connection_and_huge_ones_close_it() {
+    let dir = tmp("abuse");
+    let (hub, tokens) = boot(
+        Config {
+            max_frame: 64 * 1024,
+            ..cfg()
+        },
+        &dir.join("t.db"),
+        &["mac"],
+    )
+    .await;
+    let mut ws = connect(&hub, &tokens[0]).await.unwrap();
+    let _ = next_frame(&mut ws, 500).await;
+    ws.send(Message::Text("{\"t\":\"nonsense\"}".into()))
+        .await
+        .unwrap();
+    assert!(
+        matches!(next_frame(&mut ws, 1000).await, Some(HubFrame::Error { message }) if message == "bad frame")
+    );
+    register(&mut ws, "otter").await;
+    wait_for("still works", async || {
+        hub.call(|c, _| (c.agent("p/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    ws.send(Message::Text("x".repeat(200_000).into()))
+        .await
+        .ok();
+    wait_for("closed for size", async || !connected(&hub, "mac").await).await;
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_flood_of_frames_is_cut_off_by_the_rate_limit() {
+    let dir = tmp("flood");
+    let (hub, tokens) = boot(
+        Config {
+            ping_every: Duration::from_secs(60),
+            ..cfg()
+        },
+        &dir.join("t.db"),
+        &["mac"],
+    )
+    .await;
+    let mut ws = connect(&hub, &tokens[0]).await.unwrap();
+    let hello = serde_json::to_string(&NodeFrame::Hello {
+        node_name: "mac".into(),
+        version: "t".into(),
+    })
+    .unwrap();
+    for _ in 0..3000 {
+        if ws.send(Message::Text(hello.clone().into())).await.is_err() {
+            break;
+        }
+    }
+    wait_for("dropped for flooding", async || {
+        !connected(&hub, "mac").await
+    })
+    .await;
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn many_devices_can_connect_at_once_and_all_leave_cleanly() {
+    let dir = tmp("many");
+    let names: Vec<String> = (0..150).map(|i| format!("n{i}")).collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let (hub, tokens) = boot(cfg(), &dir.join("t.db"), &refs).await;
+    let mut sockets = Vec::new();
+    for t in &tokens {
+        sockets.push(connect(&hub, t).await.unwrap());
+    }
+    let n = hub
+        .call(|c, _| (c.connected_nodes(), vec![]))
+        .await
+        .unwrap();
+    assert_eq!(n, 150);
+    for mut s in sockets {
+        s.close(None).await.ok();
+    }
+    wait_for("all gone", async || {
+        hub.call(|c, _| (c.connected_nodes(), vec![]))
+            .await
+            .unwrap()
+            == 0
+    })
+    .await;
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_bug_in_one_handler_does_not_take_the_hub_down() {
+    let dir = tmp("panic");
+    let (hub, tokens) = boot(cfg(), &dir.join("t.db"), &["mac"]).await;
+    let mut ws = connect(&hub, &tokens[0]).await.unwrap();
+    register(&mut ws, "otter").await;
+    wait_for("registered", async || {
+        hub.call(|c, _| (c.agent("p/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    // Give the periodic save time to record the agent, then make a handler blow up.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let r: Option<()> = hub
+        .call(|_, _| -> ((), Vec<Effect>) { panic!("simulated bug") })
+        .await;
+    assert!(
+        r.is_none(),
+        "the failed call reports failure instead of hanging"
+    );
+    // The hub is still alive, still knows the agent (restored from the save), and the device is still connected.
+    assert!(connected(&hub, "mac").await, "the connection survived");
+    wait_for("agent still known", async || {
+        hub.call(|c, _| (c.agent("p/otter").is_some(), vec![]))
+            .await
+            .unwrap_or(false)
+    })
+    .await;
+    hub.call(|c, now| {
+        let r = c
+            .human_message(&kd(), "p", "still working?", &MessageOpts::default(), now)
+            .unwrap();
+        ((), r.1)
+    })
+    .await;
+    let got = tokio::time::timeout(Duration::from_secs(3), async {
+        while let Some(f) = next_frame(&mut ws, 1000).await {
+            if matches!(f, HubFrame::Deliver { text, .. } if text == "still working?") {
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert_eq!(got, Ok(true), "messages still flow after the recovery");
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn old_history_is_moved_out_of_the_database_by_the_hub_on_its_own() {
+    let dir = tmp("rollover");
+    let db = dir.join("t.db");
+    let seg = dir.join("history");
+    let store = Store::open(&db, Some(&seg)).unwrap();
+    let mut core = HubCore::default();
+    core.add_owner("1");
+    let hub = server::start(
+        Config {
+            rollover_every: Some(Duration::from_millis(60)),
+            hot_window: Duration::from_millis(1),
+            ..cfg()
+        },
+        core,
+        store,
+    )
+    .await
+    .unwrap();
+    for i in 0..5 {
+        hub.call(move |c, now| {
+            let r = c
+                .human_message(
+                    &kd(),
+                    "p",
+                    &format!("line {i}"),
+                    &MessageOpts::default(),
+                    now,
+                )
+                .unwrap();
+            ((), r.1)
+        })
+        .await;
+    }
+    wait_for("history rolled into a compressed file", async || {
+        std::fs::read_dir(&seg).is_ok_and(|mut d| {
+            d.any(|e| e.is_ok_and(|e| e.file_name().to_string_lossy().ends_with(".jsonl.gz")))
+        })
+    })
+    .await;
+    let reader = Store::open(&db, Some(&seg)).unwrap();
+    wait_for("the database kept none of it", async || {
+        reader.hot_rows().unwrap() == 0
+    })
+    .await;
+    let seg_info = reader.segments("p").unwrap();
+    let back: usize = seg_info
+        .iter()
+        .map(|s| reader.read_segment(&s.file).unwrap().len())
+        .sum();
+    assert_eq!(
+        back, 5,
+        "all five lines are in the compressed files, none lost"
+    );
+    // The hub keeps working and keeps storing after a rollover.
+    hub.call(|c, now| {
+        let r = c
+            .human_message(&kd(), "p", "after", &MessageOpts::default(), now)
+            .unwrap();
+        ((), r.1)
+    })
+    .await;
+    hub.shutdown().await;
+}
+
+// The dashboard
+
+async fn get(
+    hub: &server::Hub,
+    path: &str,
+    token: Option<&str>,
+) -> (u16, reqwest::header::HeaderMap, String) {
+    let mut req = reqwest::Client::new().get(format!("http://{}{path}", hub.addr));
+    if let Some(t) = token {
+        req = req.header("authorization", format!("Bearer {t}"));
+    }
+    let r = req.send().await.unwrap();
+    (
+        r.status().as_u16(),
+        r.headers().clone(),
+        r.text().await.unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn the_dashboard_page_is_served_with_a_strict_policy_and_holds_no_data() {
+    let dir = tmp("dash-page");
+    let (hub, _) = boot(cfg(), &dir.join("t.db"), &["mac"]).await;
+    let (code, headers, body) = get(&hub, "/", None).await;
+    assert_eq!(code, 200);
+    assert!(body.contains("claudeCord") && !body.contains("mac"));
+    let csp = headers["content-security-policy"].to_str().unwrap();
+    assert!(
+        csp.contains("script-src 'self'")
+            && csp.contains("default-src 'none'")
+            && csp.contains("frame-ancestors 'none'"),
+        "{csp}"
+    );
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+    let (code, _, js) = get(&hub, "/app.js", None).await;
+    assert_eq!(code, 200);
+    assert!(
+        !js.contains("innerHTML") && !js.contains("eval("),
+        "everything is drawn as text"
+    );
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn only_a_dashboard_token_opens_the_data_and_it_never_connects_a_machine() {
+    let dir = tmp("dash-auth");
+    let db = dir.join("t.db");
+    let mut store = Store::open(&db, None).unwrap();
+    let machine = store.create_token("mac", 0).unwrap();
+    let web = store.create_token("web:kd", 0).unwrap();
+    let mut core = HubCore::default();
+    core.add_owner("1");
+    let hub = server::start(cfg(), core, store).await.unwrap();
+    assert_eq!(get(&hub, "/api/v1/state", None).await.0, 401, "no token");
+    assert_eq!(
+        get(&hub, "/api/v1/state", Some(&machine)).await.0,
+        401,
+        "a machine's token does not open the dashboard"
+    );
+    let (code, headers, body) = get(&hub, "/api/v1/state", Some(&web)).await;
+    assert_eq!(code, 200, "{body}");
+    assert_eq!(headers["cache-control"], "no-store");
+    assert!(
+        connect(&hub, &web).await.is_err(),
+        "a dashboard token does not connect a machine"
+    );
+    assert!(connect(&hub, &machine).await.is_ok());
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_dashboard_shows_machines_agents_waiting_questions_tasks_and_the_conversation() {
+    let dir = tmp("dash-data");
+    let db = dir.join("t.db");
+    let mut store = Store::open(&db, None).unwrap();
+    let machine = store.create_token("mac", 0).unwrap();
+    let web = store.create_token("web:kd", 0).unwrap();
+    let mut core = HubCore::default();
+    core.add_owner("1");
+    let hub = server::start(cfg(), core, store).await.unwrap();
+    let mut ws = connect(&hub, &machine).await.unwrap();
+    register(&mut ws, "otter").await;
+    wait_for("registered", async || {
+        hub.call(|c, _| (c.agent("p/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    let f = NodeFrame::AgentAsk {
+        agent_id: "p/otter".into(),
+        ask_id: "a1".into(),
+        question: "which db?".into(),
+        options: None,
+        thread: None,
+    };
+    ws.send(Message::Text(serde_json::to_string(&f).unwrap().into()))
+        .await
+        .unwrap();
+    hub.call(|c, now| {
+        let r = c
+            .human_message(
+                &kd(),
+                "p",
+                "<script>alert(1)</script> hello",
+                &MessageOpts::default(),
+                now,
+            )
+            .unwrap();
+        ((), r.1)
+    })
+    .await;
+    wait_for("the question shows", async || {
+        get(&hub, "/api/v1/state", Some(&web))
+            .await
+            .2
+            .contains("which db?")
+    })
+    .await;
+    let (_, _, body) = get(&hub, "/api/v1/state", Some(&web)).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["devices"][0]["node"], "mac");
+    assert_eq!(v["devices"][0]["connected"], true);
+    assert_eq!(v["projects"]["p"]["agents"][0]["name"], "otter");
+    assert_eq!(v["projects"]["p"]["agents"][0]["lead"], true);
+    assert_eq!(v["projects"]["p"]["asks"][0]["id"], "Q1");
+    wait_for("history rows visible", async || {
+        get(&hub, "/api/v1/history?project=p&latest=1", Some(&web))
+            .await
+            .2
+            .contains("hello")
+    })
+    .await;
+    let (code, _, hist) = get(
+        &hub,
+        "/api/v1/history?project=p&latest=1&limit=10",
+        Some(&web),
+    )
+    .await;
+    assert_eq!(code, 200);
+    assert!(
+        hist.contains("alert(1)"),
+        "the text is sent as it is; the page draws it as text, never as HTML"
+    );
+    assert_eq!(
+        get(&hub, "/api/v1/history", Some(&web)).await.0,
+        400,
+        "a project is required"
+    );
+    hub.shutdown().await;
+}
