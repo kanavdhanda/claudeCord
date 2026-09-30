@@ -1,18 +1,20 @@
-# Hub image. Not built on the development machine (no Docker there), so verify before relying on it.
+# The hub as a small static image. Not built on the development machine (no Docker there), so build it once and run
+# `claudecord selftest` inside it before relying on it.
 #
-# The hub reads its configuration from a private file, never from environment variables. Create it once with
-# `claudecord-hub setup` on any machine, then mount it into the container (for example as a Docker or Fly secret
-# file) and point --config at it. The file must be mode 0600.
-FROM node:22-slim AS build
-WORKDIR /app
-RUN corepack enable
-COPY package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.base.json tsconfig.json ./
-COPY packages ./packages
-RUN pnpm install --frozen-lockfile && pnpm --filter @claudecord/protocol --filter @claudecord/hub build
+# Secrets (the Discord token, bucket keys) live in files under the data folder, never in environment variables. Mount a volume
+# at /data, set them up once with `claudecord discord set --data /data ...` and `claudecord storage ... --data /data`, and put a
+# TLS proxy in front of port 8787.
+FROM rust:alpine AS build
+RUN apk add --no-cache musl-dev
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+COPY examples ./examples
+RUN cargo build --release --bin claudecord
 
-FROM node:22-slim
-WORKDIR /app
-COPY --from=build /app /app
-USER node
+FROM scratch
+COPY --from=build /src/target/release/claudecord /claudecord
 EXPOSE 8787
-CMD ["node", "packages/hub/dist/index.js", "run", "--config", "/run/secrets/hub.json"]
+VOLUME /data
+ENTRYPOINT ["/claudecord"]
+CMD ["hub", "--data", "/data", "--bind", "0.0.0.0:8787", "--allow-plain"]

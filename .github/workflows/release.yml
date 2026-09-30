@@ -1,41 +1,29 @@
 name: release
 
-# Merging a pull request that has a changeset opens a "Version packages" pull request. Merging that one publishes to
-# npm with provenance. Needs an NPM_TOKEN secret (an automation token), and "Allow GitHub Actions to create and
-# approve pull requests" turned on in the repository settings.
-
+# Builds the program for each platform when a version tag is pushed, and attaches the files to a draft release.
 on:
   push:
-    branches: [main]
-
-concurrency: ${{ github.workflow }}-${{ github.ref }}
-
-permissions:
-  contents: write
-  pull-requests: write
-  id-token: write
+    tags: ["v*"]
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+  build:
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, name: linux-x64 }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, name: linux-arm64 }
+          - { os: macos-latest, target: aarch64-apple-darwin, name: macos-arm64 }
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          node-version: 24
-          cache: pnpm
-          registry-url: https://registry.npmjs.org
-      - run: pnpm install --frozen-lockfile
-      - uses: changesets/action@v1
+          targets: ${{ matrix.target }}
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+        if: contains(matrix.target, 'musl')
+      - run: cargo build --release --target ${{ matrix.target }} --bin claudecord
+      - run: cp target/${{ matrix.target }}/release/claudecord claudecord-${{ matrix.name }}
+      - uses: softprops/action-gh-release@v2
         with:
-          version: pnpm version
-          publish: pnpm release
-          commit: "chore: version packages"
-          title: "chore: version packages"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_CONFIG_PROVENANCE: "true"
+          draft: true
+          files: claudecord-${{ matrix.name }}
