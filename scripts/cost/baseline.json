@@ -1,0 +1,49 @@
+{
+  "sonnet": {
+    "header_tokens": 8,
+    "brief_tokens": 114,
+    "burst_ratio": 5.04,
+    "five_turns_input": 52201,
+    "one_turn_input": 10355,
+    "lead_brief_chars": 94,
+    "rules_chars": 201
+  },
+  "team:haiku": {
+    "naive_broadcast": {
+      "turns": 32,
+      "in": 686464,
+      "out": 15627
+    },
+    "addressed": {
+      "turns": 14,
+      "in": 241227,
+      "out": 4187
+    },
+    "claudecord": {
+      "turns": 9,
+      "in": 151403,
+      "out": 3371
+    },
+    "claudecord_vs_naive": 0.221,
+    "claudecord_vs_addressed": 0.628
+  },
+  "team:sonnet": {
+    "naive_broadcast": {
+      "turns": 32,
+      "in": 343242,
+      "out": 399
+    },
+    "addressed": {
+      "turns": 14,
+      "in": 145510,
+      "out": 225
+    },
+    "claudecord": {
+      "turns": 9,
+      "in": 97393,
+      "out": 367
+    },
+    "claudecord_vs_naive": 0.284,
+    "claudecord_vs_addressed": 0.669
+  }
+}

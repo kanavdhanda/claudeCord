@@ -1,0 +1,40 @@
+name: rust
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: python3 scripts/codemap.py --check
+      # Health checks last: every feature alive, then the shipped binary used the way a person would.
+      - run: cargo run -q -- selftest
+      - run: scripts/smoke.sh
+  # The cost benchmarks spend real tokens, so they run only when asked, never on every change.
+  cost:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: npm install -g @anthropic-ai/claude-code
+      - run: python3 scripts/cost/benchmark.py --model sonnet --check
+      - run: python3 scripts/cost/team_benchmark.py --model sonnet --check
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
