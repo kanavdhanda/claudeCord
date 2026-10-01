@@ -68,6 +68,12 @@ impl Guard {
         }
     }
 
+    /// Records that a person did something in the terminal (a key, a mouse click) at `at`, without knowing what. Used where the
+    /// keys themselves cannot be seen (tmux only says when a client was last active), so a half-typed line cannot be known.
+    pub fn on_activity(&mut self, at: i64) {
+        self.last_input = Some(self.last_input.map_or(at, |t| t.max(at)));
+    }
+
     /// Records that the agent printed something.
     pub fn on_output(&mut self, now: i64) {
         self.last_output = now;

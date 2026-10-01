@@ -5,11 +5,12 @@
 //! It is one loop. Everything that can happen (a frame from the hub, a request from the command line, a timer) is handled
 //! one at a time by `State`, so there is nothing to lock. The only other threads are the ones that read each terminal.
 
-use super::agent::AgentProc;
 use super::config::Config;
 use super::inject::key_bytes;
-use super::ipc::{Req, Resp, socket_path};
+use super::ipc::{Envelope, Req, Resp, UpOpts, socket_path};
 use super::link::{self, Link, LinkEvent, LinkOpts};
+use super::logs::AgentLog;
+use super::terminal::{Backend, Spawn, Terminal};
 use crate::agents::adapters::{LaunchCtx, Policy, ScreenState};
 use crate::agents::text::{Delivery, format_deliveries, project_slug, safe_name};
 use crate::protocol::{
@@ -18,12 +19,13 @@ use crate::protocol::{
 };
 use crate::security::env::secret_env_names;
 use base64::Engine;
+use interprocess::local_socket::tokio::{RecvHalf, SendHalf, Stream as LocalStream};
+use interprocess::local_socket::traits::tokio::{Listener as _, Stream as _};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot};
 
 /// The short standing instruction added to every agent: the verbs it has and the one rule about replies.
@@ -45,6 +47,10 @@ pub struct Options {
     pub max_agents: usize,
     /// What kind of machine this is (`gpu`, `h100`...), told to the hub so a request can ask for it.
     pub labels: Vec<String>,
+    /// How agents' terminals are provided: tmux where it is installed, otherwise the built-in terminal.
+    pub backend: Backend,
+    /// Answer start-up dialogs (such as "trust this folder") on its own. Off by default: a person decides.
+    pub auto_startup: bool,
 }
 
 impl Default for Options {
@@ -59,6 +65,8 @@ impl Default for Options {
                 super::inject::QUIET_OUTPUT_MS,
             ),
             extra_path: Vec::new(),
+            backend: Backend::from_env(),
+            auto_startup: false,
             max_agents: std::env::var("CLAUDECORD_MAX_AGENTS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -126,19 +134,23 @@ struct Launch {
     cols: u16,
 }
 
-/// An agent that dies is started again, up to this many times in this long. Past that it is left stopped, because an
-/// agent that dies at once every time will not be fixed by trying faster.
-const MAX_RESTARTS: usize = 3;
+/// Restarts (when asked for with `--restart N`) are counted over this long. Past the count the agent is left stopped, because
+/// an agent that dies at once every time will not be fixed by trying faster.
 const RESTART_WINDOW_MS: i64 = 10 * 60_000;
 
 struct Agent {
+    /// The secret this agent's own commands must carry, so no other agent can speak for it.
+    key: String,
+    log: AgentLog,
+    /// How many times it may be started again if its program ends (zero unless asked for).
+    restart_budget: usize,
     /// The folder the agent was asked to start in. Its own folder differs when it was given a worktree.
     origin: PathBuf,
     launch: Launch,
     restarts: VecDeque<i64>,
     spec: AgentSpec,
     cwd: PathBuf,
-    proc: Arc<AgentProc>,
+    proc: Terminal,
     queue: Vec<Delivery>,
     /// Text to type exactly as given (harness commands), oldest first. Sent one at a time, before ordinary messages.
     raw: VecDeque<String>,
@@ -153,7 +165,7 @@ struct Agent {
 }
 
 /// A request from the command line, with where to send the answer.
-type Call = (Req, oneshot::Sender<Resp>);
+type Call = (Envelope, oneshot::Sender<Resp>);
 
 struct State {
     dir: PathBuf,
@@ -173,8 +185,7 @@ struct State {
 pub async fn run(cfg: Config, dir: PathBuf, opts: Options) -> std::io::Result<()> {
     std::fs::create_dir_all(&dir)?;
     let sock = socket_path(&dir);
-    let _ = std::fs::remove_file(&sock);
-    let listener = UnixListener::bind(&sock)?;
+    let listener = super::ipc::listen(&dir)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -192,7 +203,7 @@ pub async fn run(cfg: Config, dir: PathBuf, opts: Options) -> std::io::Result<()
     let attach_calls = call_tx.clone();
     tokio::spawn(async move {
         loop {
-            let Ok((stream, _)) = listener.accept().await else {
+            let Ok(stream) = listener.accept().await else {
                 break;
             };
             tokio::spawn(serve(stream, call_tx.clone(), attach_calls.clone()));
@@ -222,8 +233,8 @@ pub async fn run(cfg: Config, dir: PathBuf, opts: Options) -> std::io::Result<()
                 Some(LinkEvent::Frame(f)) => st.on_frame(f).await,
             },
             call = calls.recv() => {
-                let Some((req, reply)) = call else { break };
-                let resp = st.handle(req).await;
+                let Some((env, reply)) = call else { break };
+                let resp = st.handle(env.req, env.key.as_deref()).await;
                 let _ = reply.send(resp);
             }
             _ = tick.tick() => st.on_tick(crate::now_ms()).await,
@@ -241,26 +252,29 @@ pub async fn run(cfg: Config, dir: PathBuf, opts: Options) -> std::io::Result<()
 
 /// One local connection: reads a request line, asks the main loop, writes the answer. An attach request turns the
 /// connection into a live terminal view instead.
-async fn serve(stream: UnixStream, calls: mpsc::Sender<Call>, attach: mpsc::Sender<Call>) {
-    let (rd, mut wr) = stream.into_split();
+async fn serve(stream: LocalStream, calls: mpsc::Sender<Call>, attach: mpsc::Sender<Call>) {
+    let (rd, mut wr) = stream.split();
     let mut rd = BufReader::new(rd);
     let mut line = String::new();
     if rd.read_line(&mut line).await.unwrap_or(0) == 0 {
         return;
     }
-    let Ok(req) = serde_json::from_str::<Req>(&line) else {
+    let Ok(env) = serde_json::from_str::<Envelope>(&line) else {
         let _ = wr
             .write_all(b"{\"ok\":false,\"msg\":\"bad request\"}\n")
             .await;
         return;
     };
-    if let Req::Attach { agent } = &req {
+    if let Req::Attach { agent } = &env.req {
         // Ask for the terminal by sending the attach request on; the answer carries nothing, the proc comes via a side map.
         let (tx, rx) = oneshot::channel();
         let _ = attach
             .send((
-                Req::Attach {
-                    agent: agent.clone(),
+                Envelope {
+                    key: None,
+                    req: Req::Attach {
+                        agent: agent.clone(),
+                    },
                 },
                 tx,
             ))
@@ -277,7 +291,7 @@ async fn serve(stream: UnixStream, calls: mpsc::Sender<Call>, attach: mpsc::Send
         return;
     }
     let (tx, rx) = oneshot::channel();
-    if calls.send((req, tx)).await.is_err() {
+    if calls.send((env, tx)).await.is_err() {
         return;
     }
     let resp = rx.await.unwrap_or_else(|_| Resp::err("daemon stopped"));
@@ -287,21 +301,18 @@ async fn serve(stream: UnixStream, calls: mpsc::Sender<Call>, attach: mpsc::Send
 }
 
 /// Terminals handed from the main loop to an attach connection. Keyed by agent id, taken once.
-static ATTACH: std::sync::LazyLock<std::sync::Mutex<HashMap<String, Arc<AgentProc>>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+static ATTACH: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, Arc<super::pty::PtyTerminal>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 /// Takes the terminal the main loop set aside for this attach.
-fn take_proc(agent: &str) -> Option<Arc<AgentProc>> {
+fn take_proc(agent: &str) -> Option<Arc<super::pty::PtyTerminal>> {
     ATTACH.lock().expect("lock").remove(agent)
 }
 
 /// Connects a window to a terminal. Screen contents are sent first so the window shows where the agent is, then output
 /// streams out. Input comes in as small frames: type 0 is keys, type 1 is a window size (rows, cols).
-async fn bridge(
-    proc: Arc<AgentProc>,
-    mut rd: BufReader<tokio::net::unix::OwnedReadHalf>,
-    mut wr: tokio::net::unix::OwnedWriteHalf,
-) {
+async fn bridge(proc: Arc<super::pty::PtyTerminal>, mut rd: BufReader<RecvHalf>, mut wr: SendHalf) {
     let mut out = proc.output.subscribe();
     let _ = wr.write_all(&proc.redraw_bytes()).await;
     let p2 = proc.clone();
@@ -451,6 +462,7 @@ impl State {
                             "ask".into(),
                             30,
                             100,
+                            UpOpts::default(),
                         )
                         .await;
                 }
@@ -527,6 +539,15 @@ impl State {
         } else {
             d.prompt.options.len().saturating_sub(1) as i64
         };
+        a.log.event(
+            crate::now_ms(),
+            "decision",
+            &format!(
+                "{} for: {}",
+                if allow { "allowed" } else { "denied" },
+                d.prompt.question
+            ),
+        );
         for k in a.spec.adapter.select_keys(&d.prompt, index) {
             let _ = a.proc.type_input(&key_bytes(&k), crate::now_ms());
         }
@@ -557,15 +578,28 @@ impl State {
         {
             a.restarts.pop_front();
         }
-        if a.restarts.len() >= MAX_RESTARTS {
+        if a.restarts.len() >= a.restart_budget {
+            a.log.event(now, "ended", "the agent's program ended");
             self.stop(id).await;
             return;
         }
         let l = a.launch.clone();
         let guard = super::inject::Guard::with_times(now, self.opts.quiet.0, self.opts.quiet.1);
-        match AgentProc::spawn(&l.argv, &a.cwd, &l.secrets, &l.env, l.rows, l.cols, guard) {
+        let spawn = Spawn {
+            name: id,
+            argv: &l.argv,
+            cwd: a.cwd.clone(),
+            remove_env: &l.secrets,
+            add_env: &l.env,
+            rows: l.rows,
+            cols: l.cols,
+        };
+        match Terminal::spawn(&self.opts.backend, &spawn, guard) {
             Ok(p) => {
-                a.proc = Arc::new(p);
+                watch_terminal(&p, &a.log);
+                a.log
+                    .event(now, "restarted", "the agent's program was started again");
+                a.proc = p;
                 a.restarts.push_back(now);
                 a.status = AgentStatus::Starting;
                 a.inflight = None;
@@ -594,6 +628,7 @@ impl State {
     async fn on_tick(&mut self, now: i64) {
         let ids: Vec<String> = self.agents.keys().cloned().collect();
         for id in ids {
+            self.agents[&id].proc.observe(now);
             if self.agents[&id].proc.has_exited() {
                 self.revive_or_stop(&id, now).await;
                 continue;
@@ -607,8 +642,9 @@ impl State {
             {
                 let a = self.agents.get_mut(&id).expect("listed above");
                 if let Some(p) = &state.prompt {
-                    // Start-up dialogs such as "trust this folder" are answered by the device itself.
-                    if let Some(i) = adapter.startup_choice(p) {
+                    // Start-up dialogs such as "trust this folder" are only answered by the device if it was told to; by
+                    // default they go to a person like any other prompt.
+                    if let Some(i) = adapter.startup_choice(p).filter(|_| self.opts.auto_startup) {
                         if a.shown_prompt.as_deref() != Some(&p.signature) && i >= 0 {
                             a.shown_prompt = Some(p.signature.clone());
                             for k in adapter.select_keys(p, i) {
@@ -643,6 +679,7 @@ impl State {
                 }
                 let status = status_of(&state);
                 if status != a.status {
+                    a.log.event(now, "status", &format!("{status:?}"));
                     a.status = status;
                     out.push(NodeFrame::AgentStatus {
                         agent_id: id.clone(),
@@ -668,6 +705,7 @@ impl State {
                     && let Some(text) = a.raw.front().cloned()
                     && a.proc.inject(&text, now).is_ok()
                 {
+                    a.log.event(now, "raw", &text);
                     a.raw.pop_front();
                 }
                 // Paste what is waiting, as one input, when it is safe.
@@ -680,6 +718,7 @@ impl State {
                     let text = format_deliveries(&a.queue);
                     let before = a.proc.screen_hash();
                     if a.proc.inject(&text, now).is_ok() {
+                        a.log.event(now, "delivered", &text);
                         let ids: Vec<String> = a.queue.drain(..).filter_map(|d| d.msg_id).collect();
                         a.inflight = Some(Inflight {
                             ids,
@@ -696,6 +735,7 @@ impl State {
                     {
                         let f = a.inflight.take().expect("checked above");
                         if !f.ids.is_empty() {
+                            a.log.event(now, "accepted", &f.ids.join(","));
                             out.push(NodeFrame::AgentAccepted {
                                 agent_id: id.clone(),
                                 msg_ids: f.ids,
@@ -711,10 +751,41 @@ impl State {
     }
 
     /// One request from the command line or an agent's shell.
-    async fn handle(&mut self, req: Req) -> Resp {
+    async fn handle(&mut self, req: Req, key: Option<&str>) -> Resp {
         // Someone or something is using this machine, so if the hub connection is resting, bring it back now.
         self.link.nudge();
+        // An agent's own commands must carry that agent's secret key, so no agent can speak, ask or finish work for another.
+        if let Some((agent, kind, text)) = describe(&req) {
+            let Some(a) = self.agents.get(agent) else {
+                return Resp::err("no such agent here");
+            };
+            if key != Some(a.key.as_str()) {
+                return Resp::err(
+                    "agent commands must be run by the agent itself (its key was missing or wrong)",
+                );
+            }
+            a.log.event(crate::now_ms(), kind, &text);
+        }
         match req {
+            Req::Logs {
+                agent,
+                lines,
+                terminal,
+            } => match self.agents.get(&agent) {
+                Some(a) => {
+                    let rows = if terminal {
+                        a.log.tail_terminal(lines)
+                    } else {
+                        a.log.tail_events(lines)
+                    };
+                    Resp {
+                        ok: true,
+                        msg: format!("{} line(s)", rows.len()),
+                        data: Some(serde_json::json!({ "lines": rows })),
+                    }
+                }
+                None => Resp::err("no such agent here"),
+            },
             Req::Ping => Resp::ok("pong"),
             Req::Shutdown => {
                 self.quit = true;
@@ -738,9 +809,12 @@ impl State {
                 policy,
                 rows,
                 cols,
+                opts,
             } => {
-                self.up_agent(project, name, adapter, model, role, cwd, policy, rows, cols)
-                    .await
+                self.up_agent(
+                    project, name, adapter, model, role, cwd, policy, rows, cols, opts,
+                )
+                .await
             }
             Req::Stop { agent } => {
                 if self.agents.contains_key(&agent) {
@@ -751,10 +825,19 @@ impl State {
                 }
             }
             Req::Attach { agent } => match self.agents.get(&agent) {
-                Some(a) => {
-                    ATTACH.lock().expect("lock").insert(agent, a.proc.clone());
-                    Resp::ok("attached")
-                }
+                Some(a) => match (a.proc.attach_command(), a.proc.pty()) {
+                    // tmux: the command line runs `tmux attach` itself.
+                    (Some(cmd), _) => Resp {
+                        ok: true,
+                        msg: "attach with tmux".into(),
+                        data: Some(serde_json::json!({"exec": cmd})),
+                    },
+                    (None, Some(pty)) => {
+                        ATTACH.lock().expect("lock").insert(agent, pty);
+                        Resp::ok("attached")
+                    }
+                    _ => Resp::err("this agent has no terminal to attach to"),
+                },
                 None => Resp::err("no such agent here"),
             },
             Req::Say {
@@ -959,12 +1042,22 @@ impl State {
         Resp::ok(format!("sent {name} ({} KB)", data.len().div_ceil(1024)))
     }
 
-    /// Where an agent should work. Normally the folder it was asked for. If another agent here already uses that folder
-    /// and it is a git repository, a separate worktree on its own branch, so two agents never edit the same files.
-    fn isolate(&self, origin: &std::path::Path, project: &str, name: &str) -> String {
+    /// Where an agent should work. Normally the folder it was asked for. If another agent here already works in that folder, two
+    /// agents would see and change each other's files, so this is refused unless the person asked (`worktree`) for a separate git
+    /// worktree on its own branch, which is then made.
+    fn isolate(
+        &self,
+        origin: &std::path::Path,
+        project: &str,
+        name: &str,
+        worktree: bool,
+    ) -> Result<String, String> {
         let shared = self.agents.values().any(|a| a.origin == origin);
         if !shared {
-            return origin.to_string_lossy().into_owned();
+            return Ok(origin.to_string_lossy().into_owned());
+        }
+        if !worktree {
+            return Err("another agent already works in this folder, and two agents must not share one. Start this one in a different folder, or add --worktree to give it its own git worktree".into());
         }
         let git = |args: &[&str]| {
             std::process::Command::new("git")
@@ -974,7 +1067,7 @@ impl State {
                 .output()
         };
         if !git(&["rev-parse", "--is-inside-work-tree"]).is_ok_and(|o| o.status.success()) {
-            return origin.to_string_lossy().into_owned();
+            return Err("--worktree needs a git repository, and this folder is not one".into());
         }
         let root = origin.join(".claudecord");
         let _ = std::fs::create_dir_all(&root);
@@ -985,12 +1078,17 @@ impl State {
                 .join(format!("{}-{}", safe_name(project), safe_name(name)));
         let branch = format!("cc/{}-{}", safe_name(project), safe_name(name));
         match git(&["worktree", "add", "-b", &branch, &tree.to_string_lossy()]) {
-            Ok(o) if o.status.success() => tree.to_string_lossy().into_owned(),
-            _ => origin.to_string_lossy().into_owned(),
+            Ok(o) if o.status.success() => Ok(tree.to_string_lossy().into_owned()),
+            Ok(o) => Err(format!(
+                "git could not make the worktree: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            )),
+            Err(e) => Err(format!("could not run git: {e}")),
         }
     }
 
-    /// Starts an agent in a folder and registers it with the hub. A fresh session also asks for a handoff to carry on from.
+    /// Starts an agent in a folder and registers it with the hub. Nothing else happens by itself: no handoff is asked for, no start-up
+    /// dialog is answered, no restart is made, unless the person said so in the options.
     #[allow(clippy::too_many_arguments)]
     async fn up_agent(
         &mut self,
@@ -1003,6 +1101,7 @@ impl State {
         policy: String,
         rows: u16,
         cols: u16,
+        opts: UpOpts,
     ) -> Resp {
         let adapter = match adapter.as_str() {
             "claude" => AdapterId::Claude,
@@ -1042,21 +1141,28 @@ impl State {
             self.dir.join("projects.json"),
             serde_json::to_string(&self.folders).expect("plain data"),
         );
-        // A second agent in the same folder would trample the first one's files, so it gets its own git worktree.
-        let cwd = self.isolate(&origin, &project, &name);
+        // Two agents in one folder would trample each other's files and see each other's work. That is refused unless the
+        // person asked for a separate git worktree for this one.
+        let cwd = match self.isolate(&origin, &project, &name, opts.worktree) {
+            Ok(c) => c,
+            Err(e) => return Resp::err(e),
+        };
         let agent_id = format!("{project}/{name}");
         let pol = match policy.as_str() {
             "plan" => Policy::Plan,
             "ask" => Policy::Ask,
             _ => Policy::Autonomous,
         };
-        let argv = adapter.argv(&LaunchCtx {
-            name: &name,
-            model: model.as_deref(),
-            policy: pol,
-            rules: RULES,
-            mcp_config: None,
-        });
+        let argv = match opts.command.clone().filter(|c| !c.is_empty()) {
+            Some(c) => c,
+            None => adapter.argv(&LaunchCtx {
+                name: &name,
+                model: model.as_deref(),
+                policy: pol,
+                rules: RULES,
+                mcp_config: None,
+            }),
+        };
         let secrets = secret_env_names(
             std::env::vars()
                 .collect::<Vec<_>>()
@@ -1066,38 +1172,53 @@ impl State {
         );
         let exe_dir = std::env::current_exe()
             .ok()
-            .and_then(|p| p.parent().map(|p| p.to_string_lossy().into_owned()))
+            .and_then(|p| p.parent().map(PathBuf::from));
+        // The folders searched for programs: the ones asked for, claudeCord's own folder, then the usual path. Joined the
+        // way this system joins them (a colon, or a semicolon on Windows).
+        let mut path_dirs: Vec<PathBuf> = self.opts.extra_path.clone();
+        path_dirs.extend(exe_dir);
+        path_dirs.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        let path = std::env::join_paths(path_dirs)
+            .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let first: String = self
-            .opts
-            .extra_path
-            .iter()
-            .map(|p| format!("{}:", p.display()))
-            .collect();
-        let path = format!(
-            "{first}{exe_dir}:{}",
-            std::env::var("PATH").unwrap_or_default()
-        );
+        // The secret this agent's own commands carry. Only this agent's environment holds it.
+        let mut key_bytes = [0u8; 16];
+        let _ = getrandom::fill(&mut key_bytes);
+        let key: String = key_bytes.iter().map(|b| format!("{b:02x}")).collect();
         let env = vec![
             ("CLAUDECORD_AGENT".to_string(), agent_id.clone()),
+            ("CLAUDECORD_AGENT_KEY".to_string(), key.clone()),
             (
                 "CLAUDECORD_HOME".to_string(),
                 self.dir.to_string_lossy().into_owned(),
             ),
             ("PATH".to_string(), path),
         ];
-        let proc = match AgentProc::spawn(
-            &argv,
-            std::path::Path::new(&cwd),
-            &secrets,
-            &env,
-            rows.max(5),
-            cols.max(20),
-            super::inject::Guard::with_times(crate::now_ms(), self.opts.quiet.0, self.opts.quiet.1),
-        ) {
-            Ok(p) => Arc::new(p),
+        let spawn = Spawn {
+            name: &agent_id,
+            argv: &argv,
+            cwd: PathBuf::from(&cwd),
+            remove_env: &secrets,
+            add_env: &env,
+            rows: rows.max(5),
+            cols: cols.max(20),
+        };
+        let guard =
+            super::inject::Guard::with_times(crate::now_ms(), self.opts.quiet.0, self.opts.quiet.1);
+        let proc = match Terminal::spawn(&self.opts.backend, &spawn, guard) {
+            Ok(p) => p,
             Err(e) => return Resp::err(format!("could not start {}: {e}", argv[0])),
         };
+        let log = AgentLog::new(&self.dir, &agent_id);
+        log.prepare();
+        watch_terminal(&proc, &log);
+        log.event(
+            crate::now_ms(),
+            "started",
+            &format!("{} in {cwd}", argv.join(" ")),
+        );
         let spec = AgentSpec {
             agent_id: agent_id.clone(),
             name,
@@ -1109,6 +1230,9 @@ impl State {
         self.agents.insert(
             agent_id.clone(),
             Agent {
+                key: key.clone(),
+                log,
+                restart_budget: opts.restart as usize,
                 launch: Launch {
                     argv,
                     secrets,
@@ -1136,13 +1260,72 @@ impl State {
         self.link
             .send(NodeFrame::AgentRegister { agent: spec, cwd })
             .await;
-        self.link
-            .send(NodeFrame::AgentPickup {
-                agent_id: agent_id.clone(),
-            })
-            .await;
-        Resp::ok(agent_id)
+        // A saved handoff is only asked for when the person said so. Otherwise the agent starts clean.
+        if opts.pickup {
+            self.link
+                .send(NodeFrame::AgentPickup {
+                    agent_id: agent_id.clone(),
+                })
+                .await;
+        }
+        Resp {
+            ok: true,
+            msg: agent_id,
+            data: Some(serde_json::json!({ "key": key })),
+        }
     }
+}
+
+/// Starts writing what an agent's terminal shows into its log: tmux copies it out itself, the built-in terminal is listened to.
+fn watch_terminal(proc: &Terminal, log: &AgentLog) {
+    match proc {
+        Terminal::Tmux(t) => t.pipe_to(&log.terminal_path()),
+        Terminal::Pty(p) => {
+            let mut rx = p.output.subscribe();
+            let log = log.clone();
+            tokio::spawn(async move {
+                while let Ok(bytes) = rx.recv().await {
+                    log.terminal(&bytes);
+                }
+            });
+        }
+    }
+}
+
+/// For an agent's own commands: which agent is speaking, what to call it in the log, and what to write there. None for
+/// commands a person runs.
+fn describe(req: &Req) -> Option<(&str, &'static str, String)> {
+    Some(match req {
+        Req::Say { agent, text, .. } => (agent, "say", text.clone()),
+        Req::Ask {
+            agent, question, ..
+        } => (agent, "ask", question.clone()),
+        Req::Assign {
+            agent, to, task, ..
+        } => (agent, "assign", format!("{to}: {task}")),
+        Req::Done {
+            agent,
+            task,
+            summary,
+        } => (agent, "done", format!("{task}: {summary}")),
+        Req::Report {
+            agent,
+            title,
+            summary,
+            ..
+        } => (agent, "report", format!("{title}: {summary}")),
+        Req::Dump { agent, text } => (agent, "dump", text.clone()),
+        Req::Pickup { agent } => (agent, "pickup", "asked for a handoff".into()),
+        Req::Answer { agent, ask, text } => (agent, "answer", format!("{ask}: {text}")),
+        Req::Usage { agent, kind, pct } => (agent, "usage", format!("{kind} {pct}%")),
+        Req::Permission {
+            agent,
+            kind,
+            action,
+        } => (agent, "permission", format!("{kind}: {action}")),
+        Req::Send { agent, path, .. } => (agent, "send", path.clone()),
+        _ => return None,
+    })
 }
 
 /// What a screen reading means for the status shown to people.

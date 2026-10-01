@@ -89,8 +89,13 @@ pub fn features() -> Vec<Feature> {
         },
         Feature {
             name: "terminals and safe pasting",
-            covers: &["device/agent", "device/inject"],
+            covers: &["device/pty", "device/inject", "device/terminal"],
             probe: terminals,
+        },
+        Feature {
+            name: "tmux sessions: start, paste, read, log, stop",
+            covers: &["device/tmux", "device/logs"],
+            probe: tmux_probe,
         },
         Feature {
             name: "daemon: message in, agent speaks, ask, file",
@@ -294,7 +299,12 @@ fn doctor_probe() -> Probe {
 
 fn terminals() -> Probe {
     boxed(async {
-        let a = crate::device::agent::AgentProc::spawn(
+        if cfg!(windows) {
+            return Ok(
+                "needs a Unix shell for its stand-in program, so it runs on Linux and macOS".into(),
+            );
+        }
+        let a = crate::device::pty::PtyTerminal::spawn(
             &["cat".into()],
             Path::new("/tmp"),
             &[],
@@ -324,13 +334,59 @@ fn terminals() -> Probe {
     })
 }
 
+/// A real tmux session: started, pasted into, read, copied to a log and stopped. Passes with a note where tmux is not installed.
+fn tmux_probe() -> Probe {
+    boxed(async {
+        use crate::device::tmux::{TmuxTerminal, stop_server};
+        if !TmuxTerminal::available() {
+            return Ok("tmux is not installed here, so the built-in terminal is used".into());
+        }
+        let socket = format!("cc-probe-{}", std::process::id());
+        let log = crate::device::logs::AgentLog::new(&scratch("tmux-log"), "probe/otter");
+        log.prepare();
+        let t = TmuxTerminal::spawn(
+            &socket,
+            "probe-otter",
+            &["cat".into()],
+            Path::new("/tmp"),
+            &[],
+            &[],
+            24,
+            80,
+            Guard::with_times(0, 100, 100),
+        )
+        .map_err(|e| e.to_string())?;
+        t.pipe_to(&log.terminal_path());
+        let now = crate::now_ms() + 10_000;
+        let pasted = t.inject("hello tmux", now).is_ok();
+        let seen = eventually(async || {
+            t.observe(crate::now_ms() + 100_000);
+            t.screen_text().contains("hello tmux")
+        })
+        .await;
+        let logged =
+            eventually(async || log.tail_terminal(10).join(" ").contains("hello tmux")).await;
+        t.kill();
+        stop_server(&socket);
+        ensure!(pasted, "an idle tmux session refused a paste");
+        ensure!(seen, "the pasted text never showed on the tmux screen");
+        ensure!(logged, "tmux did not copy the screen into the log");
+        Ok("pasted into a real tmux session, read it back, logged it, stopped it".into())
+    })
+}
+
 /// Starts a hub and a daemon whose agent program is a stand-in script. Returns the hub, the daemon's folder and the
 /// project folder.
-async fn rig(name: &str, script: &str) -> Result<(server::Hub, PathBuf, PathBuf), String> {
+async fn rig(
+    name: &str,
+    script: &str,
+    restart: u32,
+) -> Result<(server::Hub, PathBuf, PathBuf, String), String> {
     let root = scratch(name);
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).map_err(|e| e.to_string())?;
     std::fs::write(bin.join("claude"), script).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755))
@@ -351,6 +407,8 @@ async fn rig(name: &str, script: &str) -> Result<(server::Hub, PathBuf, PathBuf)
         extra_path: vec![bin],
         max_agents: 8,
         labels: vec![],
+        backend: crate::device::terminal::Backend::Pty,
+        auto_startup: false,
     };
     let d = dir.clone();
     tokio::spawn(async move {
@@ -371,12 +429,22 @@ async fn rig(name: &str, script: &str) -> Result<(server::Hub, PathBuf, PathBuf)
             policy: "autonomous".into(),
             rows: 24,
             cols: 80,
+            opts: crate::device::ipc::UpOpts {
+                restart,
+                ..Default::default()
+            },
         },
     )
     .await
     .map_err(|e| e.to_string())?;
     ensure!(r.ok, "could not start the stand-in agent: {}", r.msg);
-    Ok((hub, dir, project))
+    let key = r
+        .data
+        .as_ref()
+        .and_then(|d| d["key"].as_str())
+        .unwrap_or_default()
+        .to_string();
+    Ok((hub, dir, project, key))
 }
 
 /// Waits for the daemon's socket to answer.
@@ -390,7 +458,12 @@ async fn ensure_up(dir: &Path) -> Result<(), String> {
 
 fn daemon_flow() -> Probe {
     boxed(async {
-        let (hub, dir, project) = rig("daemon", NORMAL).await?;
+        if cfg!(windows) {
+            return Ok(
+                "needs a Unix shell for its stand-in program, so it runs on Linux and macOS".into(),
+            );
+        }
+        let (hub, dir, project, key) = rig("daemon", NORMAL, 0).await?;
         let mut chat = hub.chat();
         ensure!(
             eventually(async || hub
@@ -436,8 +509,9 @@ fn daemon_flow() -> Probe {
             confirmed == Ok(true),
             "the message was never confirmed as accepted"
         );
-        let r = ipc::call(
+        let r = ipc::call_as(
             &dir,
+            Some(&key),
             &Req::Say {
                 agent: "demo/otter".into(),
                 text: "done it".into(),
@@ -460,8 +534,9 @@ fn daemon_flow() -> Probe {
             spoke == Ok(true),
             "what the agent said never reached the chat"
         );
-        let r = ipc::call(
+        let r = ipc::call_as(
             &dir,
+            Some(&key),
             &Req::Ask {
                 agent: "demo/otter".into(),
                 question: "which db?".into(),
@@ -521,7 +596,12 @@ fn daemon_flow() -> Probe {
 
 fn restart() -> Probe {
     boxed(async {
-        let (hub, dir, project) = rig("restart", DIES_ONCE).await?;
+        if cfg!(windows) {
+            return Ok(
+                "needs a Unix shell for its stand-in program, so it runs on Linux and macOS".into(),
+            );
+        }
+        let (hub, dir, project, _key) = rig("restart", DIES_ONCE, 3).await?;
         ensure!(
             eventually(async || std::fs::read_to_string(project.join("starts.log"))
                 .is_ok_and(|s| s.lines().count() >= 2))
@@ -559,7 +639,9 @@ fn command_line() -> Probe {
         use clap::Parser;
         for args in [
             vec!["claudecord", "hub"],
-            vec!["claudecord", "up", "--detach"],
+            vec!["claudecord", "start", "--detach"],
+            vec!["claudecord", "logs", "otter"],
+            vec!["claudecord", "handoff", "otter"],
             vec!["claudecord", "say", "hi"],
             vec!["claudecord", "done", "T1", "ok"],
             vec!["claudecord", "doctor"],

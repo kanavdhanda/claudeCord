@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
 /// A running agent.
-pub struct AgentProc {
+pub struct PtyTerminal {
     master: Mutex<Box<dyn MasterPty + Send>>,
     writer: Mutex<Box<dyn Write + Send>>,
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
@@ -23,7 +23,7 @@ pub struct AgentProc {
     pub output: broadcast::Sender<Vec<u8>>,
 }
 
-impl AgentProc {
+impl PtyTerminal {
     /// Starts `argv` in `cwd` inside a new terminal of the given size. Variables named in `remove_env` are taken out of
     /// the agent's environment (secrets), and `add_env` are set. The guard decides when pasting is safe.
     pub fn spawn(

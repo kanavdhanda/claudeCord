@@ -40,8 +40,24 @@ pub enum Cmd {
     Daemon,
     /// Save which hub this machine talks to.
     Login(machine::LoginArgs),
-    /// Start an agent in the current folder and open its terminal.
-    Up(machine::UpArgs),
+    /// Start an agent in the current folder and open its terminal (starting the daemon if needed, and saying so).
+    Start(machine::StartArgs),
+    /// Show the tail of an agent's log: what it was sent and did, or what its terminal showed.
+    Logs {
+        agent: String,
+        #[arg(long, default_value_t = 40)]
+        lines: usize,
+        /// Show what its terminal showed instead.
+        #[arg(long)]
+        terminal: bool,
+    },
+    /// Write a note for carrying an agent's work on: what happened lately and what its terminal last showed.
+    Handoff {
+        agent: String,
+        /// Write to this file instead of printing.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
     /// List the agents on this machine.
     Ls,
     /// Open an agent's terminal.
@@ -99,7 +115,13 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         Cmd::Export(a) => export::run(a),
         Cmd::Daemon => machine::run_daemon().await,
         Cmd::Login(a) => machine::login(a),
-        Cmd::Up(a) => machine::up(a).await,
+        Cmd::Start(a) => machine::start(a).await,
+        Cmd::Logs {
+            agent,
+            lines,
+            terminal,
+        } => machine::logs(&agent, lines, terminal).await,
+        Cmd::Handoff { agent, out } => machine::handoff(&agent, out).await,
         Cmd::Ls => machine::ls().await,
         Cmd::Attach { agent } => machine::attach(&agent).await,
         Cmd::Stop { agent } => machine::stop(&agent).await,
