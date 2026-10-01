@@ -18,10 +18,11 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 |---|---|
 | `src/cli/discord.rs` | `claudecord discord`: connect the hub to your Discord server. |
 | `src/cli/export.rs` | `claudecord export`: writes the conversation history as an Obsidian vault. |
-| `src/cli/hub.rs` | The server commands: `claudecord hub` runs the central hub, `claudecord token` makes a token for a machine. |
+| `src/cli/hub.rs` | The server commands: `claudecord hub` runs the central hub, `claudecord token` makes a token for a machine, and `claudecord load-tokens` makes many at once into a private file for the k6 load test. |
 | `src/cli/machine.rs` | Commands for a machine that runs agents: save the hub address, run the daemon, start an agent in the current folder, open an agent's terminal, list, stop, and check connectivity. |
 | `src/cli/mod.rs` | The command line: what each command is, and where it is handled. |
 | `src/cli/storage.rs` | `claudecord storage`: where old history files go. |
+| `src/cli/uptime.rs` | `claudecord uptime` shows how much of the time each part was working; `claudecord probe` checks a hub from the outside (run it on a different machine) and keeps its own record of what it saw. |
 | `src/cli/verbs.rs` | The commands an agent runs in its own shell. |
 
 ## src/device
@@ -114,6 +115,8 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | File | What it is |
 |---|---|
 | `src/server/actor.rs` | The actor: the one task that owns the hub core and the store. |
+| `src/server/health.rs` | What a prober, a load balancer and the dashboard ask the hub about its own health. |
+| `src/server/login.rs` | "Sign in with Discord" for the dashboard, the standard OAuth2 code flow. |
 | `src/server/mod.rs` | The hub as a running server: one small web server that accepts devices over WebSocket, feeds what they send to the hub core, and carries out what the core asks for. |
 | `src/server/session.rs` | One device's WebSocket, from upgrade to close. |
 | `src/server/web.rs` | The dashboard: a read-only web page that shows machines, agents, what is waiting on a person, tasks and the conversation, served by the hub itself (no separate program, nothing to install). |
@@ -124,6 +127,13 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 |---|---|
 | `src/store/bucket.rs` | A client for an S3-compatible bucket, used to keep old history files (and later backups) off the server's own disk. |
 | `src/store/mod.rs` | Durable storage for one tenant: a single SQLite file holding the core's saved state and the conversation history, plus compressed files for history old enough to leave the database. |
+| `src/store/uptime.rs` | The uptime log: for each component, when its state changed. |
+
+## src/uptime
+
+| File | What it is |
+|---|---|
+| `src/uptime/mod.rs` | Uptime: how much of the time each part of claudeCord was working, measured the way production services do it. |
 
 ## src (crate root)
 
@@ -151,6 +161,8 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | `tests/server.rs` | The hub over real sockets. |
 | `tests/store.rs` | Storage tests: history, saving and restoring the core, crash safety, and rolling old history into compressed files. |
 | `tests/token_budget.rs` | Token budget, measured on a scripted chat. |
+| `tests/uptime.rs` | Uptime: the arithmetic, the log, crash recovery, the debounce a prober uses, and the hub's own endpoints. |
+| `tests/web_login.rs` | "Sign in with Discord" for the dashboard, against a stand-in Discord OAuth server and a real hub: the redirect, the state check, who may sign in, who sees which project, signing out, and that tokens still work and no-credentials is not a failure. |
 
 ## examples
 
@@ -168,4 +180,6 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | `scripts/cost/coalescing.py` | Spends real tokens: runs Claude Code (tools off) about a dozen times. |
 | `scripts/cost/overhead.py` | Spends real tokens: runs Claude Code (haiku, tools off) a few dozen times. |
 | `scripts/cost/team_benchmark.py` | Spends real tokens (about 100 short Claude Code calls per model). |
+| `scripts/load/profile.sh` | Runs the k6 load test against a hub limited to the size of a free server, so the result says what that server can carry. |
 | `scripts/smoke.sh` | End-to-end smoke test of the real binary, the way a person would use it: make a token, start the hub, log a machine in, and run the connection check. |
+| `scripts/tests_gate.py` | A diff line that adds a test. |

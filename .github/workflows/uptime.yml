@@ -1,0 +1,23 @@
+name: uptime
+
+# An outside check of the hub, from GitHub's network every 5 minutes, which is free. A failure here means the hub could not be
+# reached from the internet: DNS, TLS, the host or the hub itself. GitHub emails the repository owner when a scheduled run
+# fails. Set the repository variable HUB_URL (Settings > Secrets and variables > Actions > Variables) to turn it on.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  probe:
+    if: vars.HUB_URL != ''
+    runs-on: ubuntu-latest
+    steps:
+      # Three tries, ten seconds apart, so one dropped packet is not an outage (the same debounce the prober uses).
+      - run: |
+          for i in 1 2 3; do
+            code=$(curl -s -o body.json -w '%{http_code}' --max-time 10 "${{ vars.HUB_URL }}/readyz" || true)
+            [ "$code" = "200" ] && { echo "ready"; exit 0; }
+            echo "try $i: HTTP $code"; cat body.json 2>/dev/null; sleep 10
+          done
+          exit 1

@@ -29,6 +29,9 @@ pub struct GatewayOpts {
     pub backoff_max: Duration,
 }
 
+/// The name of the event the gateway makes up when its connection to Discord ends.
+pub const DISCONNECTED: &str = "CC_DISCONNECTED";
+
 /// Starts the connection in the background. Events arrive on `events`. It runs until the receiver is dropped.
 pub fn spawn(
     rest: Rest,
@@ -65,6 +68,13 @@ async fn run(rest: Rest, opts: GatewayOpts, events: mpsc::Sender<Event>) {
         if events.is_closed() {
             return;
         }
+        // Not a Discord event: the bridge uses it to record that the connection is down (see `crate::uptime`).
+        let _ = events
+            .send(Event {
+                name: DISCONNECTED.into(),
+                data: Value::Null,
+            })
+            .await;
         failures = if started.elapsed() > Duration::from_secs(30) {
             1
         } else {

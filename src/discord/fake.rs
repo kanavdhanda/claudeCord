@@ -201,7 +201,11 @@ pub async fn start_fake() -> (Fake, String) {
                             f.log.lock().unwrap().identifies += 1;
                             let _ = s.send(WsMsg::Text(json!({"op": 0, "s": 1, "t": "READY", "d": {"session_id": "sess", "resume_gateway_url": format!("ws://{}/gateway", f.addr.lock().unwrap())}}).to_string().into())).await;
                         }
-                        Some(6) => f.log.lock().unwrap().resumes += 1,
+                        Some(6) => {
+                            f.log.lock().unwrap().resumes += 1;
+                            // The real gateway confirms a resume with this event.
+                            let _ = s.send(WsMsg::Text(json!({"op": 0, "s": 2, "t": "RESUMED", "d": {}}).to_string().into())).await;
+                        }
                         Some(1) => { let _ = s.send(WsMsg::Text(json!({"op": 11}).to_string().into())).await; }
                         _ => {}
                     }

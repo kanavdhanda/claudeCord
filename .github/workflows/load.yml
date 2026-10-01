@@ -1,0 +1,23 @@
+name: load
+
+# Runs the k6 load test (users with three bots each, all talking at once) against a hub limited to the size of a free
+# server. Run it by hand from the Actions tab; it is never run on a push because it takes a long time.
+on:
+  workflow_dispatch:
+    inputs:
+      users:
+        description: Simulated users (each has three bots)
+        default: "10000"
+
+jobs:
+  load:
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [oracle-arm, small-vps, oracle-micro]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: grafana/setup-k6-action@v1
+      - run: docker build -t claudecord .
+      - run: scripts/load/profile.sh ${{ matrix.profile }} ${{ inputs.users }} 60

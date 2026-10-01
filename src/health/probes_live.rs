@@ -103,6 +103,16 @@ pub fn features() -> Vec<Feature> {
             probe: daemon_flow,
         },
         Feature {
+            name: "uptime: recorded, ready check, outside prober",
+            covers: &["uptime"],
+            probe: uptime_probe,
+        },
+        Feature {
+            name: "dashboard sign-in with Discord (against a stand-in)",
+            covers: &["server/login"],
+            probe: signin_probe,
+        },
+        Feature {
             name: "dashboard in a browser",
             covers: &["server"],
             probe: dashboard_probe,
@@ -645,6 +655,16 @@ fn command_line() -> Probe {
             vec!["claudecord", "say", "hi"],
             vec!["claudecord", "done", "T1", "ok"],
             vec!["claudecord", "doctor"],
+            vec!["claudecord", "uptime", "--target", "99.9"],
+            vec!["claudecord", "probe", "https://hub.example.com", "--once"],
+            vec![
+                "claudecord",
+                "load-tokens",
+                "--count",
+                "2",
+                "--out",
+                "t.json",
+            ],
             vec!["claudecord", "selftest"],
             vec!["claudecord", "storage", "show"],
             vec!["claudecord", "discord", "show"],
@@ -1028,5 +1048,123 @@ fn dashboard_probe() -> Probe {
         );
         hub.shutdown().await;
         Ok("page served, data refused without a token and given to a dashboard token".into())
+    })
+}
+
+/// The hub records itself, answers a prober, goes down on stop, and a debounced prober dates an outage from its first failure.
+fn uptime_probe() -> Probe {
+    boxed(async {
+        let dir = scratch("uptime");
+        let (hub, _, db) = hub(&dir, "127.0.0.1:0").await?;
+        let base = format!("http://{}", hub.addr);
+        ensure!(
+            crate::uptime::probe_once(&base, Duration::from_secs(2)).await,
+            "a prober did not see the hub as ready"
+        );
+        hub.shutdown().await;
+        ensure!(
+            !crate::uptime::probe_once(&base, Duration::from_millis(500)).await,
+            "a prober still saw a stopped hub as up"
+        );
+        let log = Store::open(&db, None).map_err(|e| e.to_string())?;
+        let changes = log.uptime_changes("hub", 0).map_err(|e| e.to_string())?;
+        let states: Vec<_> = changes.iter().map(|c| c.state.as_str()).collect();
+        ensure!(states == ["up", "down"], "the hub's record was {states:?}");
+        let mut d = crate::uptime::Debounce::new(2);
+        d.check(true, 0);
+        d.check(false, 10);
+        let outage = d.check(false, 20);
+        ensure!(
+            outage.is_some_and(|c| c.at == 10 && c.state == crate::uptime::State::Down),
+            "the outage was not dated from the first failure"
+        );
+        Ok("start and stop recorded, ready check answered, outage dated from the first failed check".into())
+    })
+}
+
+/// The whole sign-in against a tiny stand-in Discord: redirect, state check, code swap, a session that sees the project.
+fn signin_probe() -> Probe {
+    boxed(async {
+        use axum::{
+            Json, Router,
+            routing::{get, post},
+        };
+        let fake = Router::new()
+            .route(
+                "/oauth2/token",
+                post(|| async { Json(serde_json::json!({"access_token": "t"})) }),
+            )
+            .route(
+                "/users/@me",
+                get(|| async { Json(serde_json::json!({"id": "1", "username": "kd"})) }),
+            );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|e| e.to_string())?;
+        let discord = format!("http://{}", l.local_addr().map_err(|e| e.to_string())?);
+        tokio::spawn(async move {
+            let _ = axum::serve(l, fake).await;
+        });
+        let dir = scratch("signin");
+        let store = Store::open(&dir.join("hub.db"), None).map_err(|e| e.to_string())?;
+        let mut core = HubCore::default();
+        core.add_owner("1");
+        let cfg = ServerConfig {
+            oauth: Some(server::Oauth {
+                client_id: "app".into(),
+                client_secret: "s".into(),
+                redirect_uri: "http://127.0.0.1/auth/callback".into(),
+                authorize_url: format!("{discord}/authorize"),
+                api_base: discord,
+            }),
+            ..server_cfg("127.0.0.1:0")
+        };
+        let hub = server::start(cfg, core, store)
+            .await
+            .map_err(|e| e.to_string())?;
+        let base = format!("http://{}", hub.addr);
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| e.to_string())?;
+        let start = http
+            .get(format!("{base}/auth/login"))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let cookie = |r: &reqwest::Response, n: &str| {
+            r.headers()
+                .get_all("set-cookie")
+                .iter()
+                .filter_map(|v| v.to_str().ok())
+                .find_map(|c| {
+                    c.strip_prefix(&format!("{n}="))
+                        .map(|v| v.split(';').next().unwrap_or("").to_string())
+                })
+        };
+        let state = cookie(&start, "cc_state").ok_or("no state cookie")?;
+        let wrong = http
+            .get(format!("{base}/auth/callback?code=x&state=bad"))
+            .header("cookie", format!("cc_state={state}"))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        ensure!(wrong.status() == 400, "a wrong state was accepted");
+        let back = http
+            .get(format!("{base}/auth/callback?code=x&state={state}"))
+            .header("cookie", format!("cc_state={state}"))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let session = cookie(&back, "cc_session").ok_or("signing in gave no session")?;
+        let me = http
+            .get(format!("{base}/auth/me"))
+            .header("cookie", format!("cc_session={session}"))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        ensure!(me.status() == 200, "the session was not accepted");
+        hub.shutdown().await;
+        Ok("redirect, state check, code swap and a working session".into())
     })
 }

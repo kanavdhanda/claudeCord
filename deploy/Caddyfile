@@ -1,0 +1,6 @@
+# TLS for the hub with a free, automatically renewed Let's Encrypt certificate. Replace hub.example.com with your name,
+# point its DNS A (and AAAA) record at this machine, open ports 80 and 443, then: sudo caddy run --config Caddyfile
+hub.example.com {
+	# WebSockets (the machines) and plain requests (the dashboard, /readyz) both pass through unchanged.
+	reverse_proxy 127.0.0.1:8787
+}

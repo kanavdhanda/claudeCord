@@ -12,7 +12,8 @@
   function row(left, right, cls) { var r = el("div", "row" + (cls ? " " + cls : "")); r.appendChild(el("span", "", left)); r.appendChild(el("span", "dim", right || "")); return r; }
   function fill(id, nodes, empty) { var box = $(id); box.replaceChildren.apply(box, nodes.length ? nodes : [el("div", "dim", empty)]); }
   function api(path) {
-    return fetch(path, { headers: { authorization: "Bearer " + token }, cache: "no-store" }).then(function (r) {
+    // A Discord sign-in travels as a cookie; a pasted token as a header.
+    return fetch(path, { headers: token ? { authorization: "Bearer " + token } : {}, cache: "no-store" }).then(function (r) {
       if (r.status === 401) { throw new Error("denied"); }
       return r.json();
     });
@@ -47,6 +48,7 @@
   function refresh() {
     api("/api/v1/state").then(function (s) {
       $("login").hidden = true; $("app").hidden = false; show(s);
+      api("/api/v1/uptime").then(showUptime).catch(function () {});
       if (project) { return api("/api/v1/history?project=" + encodeURIComponent(project) + "&limit=60&latest=1").then(showHistory); }
     }).catch(function (e) {
       $("conn").textContent = e.message === "denied" ? "sign in" : "offline";
@@ -54,7 +56,24 @@
     });
   }
 
+  // Availability per component over the last day and week, and whether it is up now.
+  function showUptime(u) {
+    var names = Object.keys(u.components || {}).sort();
+    var pct = function (w) { return w && w.availability !== null ? (w.availability * 100).toFixed(3) + "%" : "no data"; };
+    fill("uptime", names.map(function (n) {
+      var c = u.components[n];
+      return row(n + " (" + c.state + ")", "24h " + pct(c.windows["24h"]) + "  7d " + pct(c.windows["7d"]) + "  30d " + pct(c.windows["30d"]), c.state === "up" ? "on" : "off");
+    }), "Nothing recorded yet.");
+  }
+
+  // Show who is signed in with Discord (if anyone) and let them sign out.
+  function whoami() {
+    fetch("/auth/me", { cache: "no-store" }).then(function (r) { return r.ok ? r.json() : null; }).then(function (me) {
+      $("who").textContent = me ? me.user : ""; $("out").hidden = !me;
+    }).catch(function () {});
+  }
+  $("out").addEventListener("click", function () { fetch("/auth/logout", { method: "POST" }).then(function () { location.reload(); }); });
   $("go").addEventListener("click", function () { token = $("token").value.trim(); sessionStorage.setItem("cc-token", token); refresh(); });
-  refresh();
+  refresh(); whoami();
   setInterval(refresh, 2500);
 })();

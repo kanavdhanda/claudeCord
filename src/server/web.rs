@@ -26,7 +26,7 @@ const STYLE: &str = include_str!("web/app.css");
 pub const WEB_PREFIX: &str = "web:";
 
 /// Headers every response carries: no guessing at types, no referrer, and scripts only from this origin.
-fn secure(mut r: Response, content_type: &'static str, cache: &'static str) -> Response {
+pub(super) fn secure(mut r: Response, content_type: &'static str, cache: &'static str) -> Response {
     let h = r.headers_mut();
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
@@ -66,12 +66,37 @@ pub async fn style() -> Response {
     secure(STYLE.into_response(), "text/css; charset=utf-8", "no-cache")
 }
 
-/// Checks the dashboard token on a request. Repeated failures from one address are blocked, like for machines.
-async fn authorised(st: &AppState, peer: SocketAddr, headers: &HeaderMap) -> bool {
+/// Who is looking at the dashboard: someone holding a dashboard token sees everything, someone signed in with Discord sees
+/// the projects their account has a role in.
+pub(super) enum Who {
+    Everything,
+    Account(String),
+}
+
+impl Who {
+    /// Whether this viewer may see a project's data, given the core.
+    fn may_see(&self, c: &crate::hub::HubCore, project: &str) -> bool {
+        match self {
+            Who::Everything => true,
+            Who::Account(id) => c.role_of(project, id).is_some(),
+        }
+    }
+}
+
+/// Works out who is asking: a Discord sign-in, or a dashboard token. Repeated bad tokens from one address are blocked, like for
+/// machines. Having no credentials at all is not a failure (the page asks before it has any).
+pub(super) async fn authorised(
+    st: &AppState,
+    peer: SocketAddr,
+    headers: &HeaderMap,
+) -> Option<Who> {
+    if let Some((id, _)) = super::login::who(st, headers) {
+        return Some(Who::Account(id));
+    }
     let ip = peer.ip().to_string();
     let now = crate::now_ms() as f64;
     if st.failures.lock().expect("lock").blocked(&ip, now) {
-        return false;
+        return None;
     }
     let token = headers
         .get("authorization")
@@ -79,27 +104,29 @@ async fn authorised(st: &AppState, peer: SocketAddr, headers: &HeaderMap) -> boo
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or("")
         .to_string();
+    if token.is_empty() {
+        return None;
+    }
     let (reply, answer) = oneshot::channel();
-    let node = if token.is_empty()
-        || st
-            .to_actor
-            .send(Input::Auth { token, reply })
-            .await
-            .is_err()
+    let node = if st
+        .to_actor
+        .send(Input::Auth { token, reply })
+        .await
+        .is_err()
     {
         None
     } else {
         answer.await.ok().flatten()
     };
     if node.as_deref().is_some_and(|n| n.starts_with(WEB_PREFIX)) {
-        true
+        Some(Who::Everything)
     } else {
         st.failures.lock().expect("lock").fail(&ip, now);
-        false
+        None
     }
 }
 
-fn denied() -> Response {
+pub(super) fn denied() -> Response {
     secure(
         (
             StatusCode::UNAUTHORIZED,
@@ -118,15 +145,15 @@ pub(super) async fn state(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Response {
-    if !authorised(&st, peer, &headers).await {
+    let Some(who) = authorised(&st, peer, &headers).await else {
         return denied();
-    }
+    };
     let body = st
         .handle
-        .call(|c, _| {
+        .call(move |c, _| {
             let devices: Vec<Value> = c.devices().iter().map(|d| json!({"node": d.node, "connected": d.connected, "agents": d.agents.len(), "max": d.max_agents, "labels": d.labels, "lastSeen": d.last_seen})).collect();
             let mut projects = serde_json::Map::new();
-            for p in c.projects() {
+            for p in c.projects().into_iter().filter(|p| who.may_see(c, p)) {
                 let agents: Vec<Value> = c.agents_of_project(&p).iter().map(|a| json!({"name": a.name, "lead": a.is_lead, "node": a.node_name, "status": format!("{:?}", c.status_of(&a.agent_id)).to_lowercase()})).collect();
                 let name_of = |id: &str| c.agent(id).map_or(id.to_string(), |a| a.name.clone());
                 let asks: Vec<Value> = c.asks_of(&p).iter().filter(|a| a.state == crate::hub::AskState::Open).map(|a| json!({"id": format!("Q{}", a.qn), "agent": name_of(&a.agent_id), "question": a.question})).collect();
@@ -148,9 +175,9 @@ pub(super) async fn history(
     headers: HeaderMap,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    if !authorised(&st, peer, &headers).await {
+    let Some(who) = authorised(&st, peer, &headers).await else {
         return denied();
-    }
+    };
     let Some(project) = q.get("project") else {
         return secure(
             (
@@ -162,6 +189,24 @@ pub(super) async fn history(
             "no-store",
         );
     };
+    // A signed-in person may read only the projects they have a role in, checked now so removing them takes effect at once.
+    let project_name = project.clone();
+    if !st
+        .handle
+        .call(move |c, _| (who.may_see(c, &project_name), vec![]))
+        .await
+        .unwrap_or(false)
+    {
+        return secure(
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "no access to this project"})),
+            )
+                .into_response(),
+            "application/json",
+            "no-store",
+        );
+    }
     let limit = q
         .get("limit")
         .and_then(|l| l.parse::<usize>().ok())

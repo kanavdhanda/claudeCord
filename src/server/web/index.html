@@ -10,10 +10,12 @@
 <header>
   <h1>claudeCord</h1>
   <span id="conn">connecting</span>
+  <span id="who" class="dim"></span> <button id="out" type="button" hidden>Sign out</button>
 </header>
 <main>
   <section id="login" hidden>
-    <p>Paste a dashboard token (made with <code>claudecord web-token NAME</code>).</p>
+    <p><a id="discord" href="/auth/login">Sign in with Discord</a></p>
+    <p>Or paste a dashboard token (made with <code>claudecord web-token NAME</code>).</p>
     <input id="token" type="password" autocomplete="off" aria-label="dashboard token">
     <button id="go" type="button">Open</button>
   </section>
@@ -25,6 +27,7 @@
         <h2>Agents</h2><div id="agents"></div>
         <h2>Waiting on a person</h2><div id="waiting"></div>
         <h2>Tasks</h2><div id="tasks"></div>
+        <h2>Uptime</h2><div id="uptime"></div>
       </div>
       <div>
         <h2>Conversation</h2><div id="history"></div>
