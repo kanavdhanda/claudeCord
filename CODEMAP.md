@@ -181,5 +181,8 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | `scripts/cost/overhead.py` | Spends real tokens: runs Claude Code (haiku, tools off) a few dozen times. |
 | `scripts/cost/team_benchmark.py` | Spends real tokens (about 100 short Claude Code calls per model). |
 | `scripts/load/profile.sh` | Runs the k6 load test against a hub limited to the size of a free server, so the result says what that server can carry. |
+| `scripts/package_npm.py` | (no header comment) |
+| `scripts/publish_npm.sh` | Publishes the packages made by scripts/package_npm.py: every platform package first, the main package last, so nobody can install a main package whose platform package is not there yet. |
 | `scripts/smoke.sh` | End-to-end smoke test of the real binary, the way a person would use it: make a token, start the hub, log a machine in, and run the connection check. |
+| `scripts/test_packaging.py` | (no header comment) |
 | `scripts/tests_gate.py` | A diff line that adds a test. |

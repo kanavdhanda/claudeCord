@@ -1,0 +1,49 @@
+name: deploy
+
+# Puts a released version on your server (Oracle Cloud or any Linux machine you can SSH into) and checks it is ready. If the new
+# version does not become ready, the old one is put back. Runs when you publish a GitHub release, or by hand with a tag.
+# Set up once (see learnings/ship.md): secrets DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY, DEPLOY_KNOWN_HOSTS; variables HUB_URL and
+# DEPLOY_ARCH (x64 or arm64; Oracle's free Ampere machines are arm64).
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to deploy, such as v0.2.0
+        required: true
+
+concurrency: deploy
+
+jobs:
+  deploy:
+    if: vars.DEPLOY_ARCH != ''
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Get the program from the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "claudecord-linux-${{ vars.DEPLOY_ARCH }}" --output claudecord
+      - name: Trust only the server we pinned
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id; chmod 600 ~/.ssh/id
+          echo "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+      - name: Install, restart, check, roll back on failure
+        run: |
+          ssh_ () { ssh -i ~/.ssh/id -o StrictHostKeyChecking=yes "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" "$@"; }
+          scp -i ~/.ssh/id -o StrictHostKeyChecking=yes claudecord "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/tmp/claudecord.new"
+          ssh_ 'set -e
+            sudo cp -f /usr/local/bin/claudecord /usr/local/bin/claudecord.previous 2>/dev/null || true
+            sudo install -m 755 /tmp/claudecord.new /usr/local/bin/claudecord
+            sudo systemctl restart claudecord-hub'
+          for i in $(seq 1 20); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "${{ vars.HUB_URL }}/readyz" || true)
+            [ "$code" = "200" ] && { echo "ready after $i checks"; exit 0; }
+            sleep 3
+          done
+          echo "the new version never became ready, putting the previous one back"
+          ssh_ 'sudo install -m 755 /usr/local/bin/claudecord.previous /usr/local/bin/claudecord && sudo systemctl restart claudecord-hub'
+          exit 1

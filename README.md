@@ -26,7 +26,8 @@ people  <->  Discord  <->  hub  <->  machine daemons  <->  agents in terminals
 
 ## Try it (about ten minutes)
 
-You need Rust to build it (`cargo build --release`; the program is `target/release/claudecord`) and a Discord server you own.
+Install the program with `pip install claudecord` or `npm install -g claudecord` (no compiler needed; Linux, macOS and Windows), or build it
+with `cargo build --release`. You also need a Discord server you own.
 
 **1. Make the Discord bot.** In the Discord developer portal create an application and a bot, copy the bot token, and turn on the
 Message Content intent. Then on the hub's machine:
@@ -208,7 +209,7 @@ and macOS.
   role in; it is tested against a stand-in Discord, not the real one. A dashboard token still shows everything.
 - A load test exists (`scripts/load/`, k6, users with three bots each); it was run only up to about 9,000 users on a laptop, where k6
   itself ran out of threads. The 10,000-user runs on free-server sizes are a CI job (`load.yml`) that has not been run yet.
-- There is no packaged install (pip or npm) yet.
+- The pip and npm packages are built and tested by `scripts/test_packaging.py`, but nothing has been published yet.
 - Windows is built in CI but has not been run by me. Use tmux inside WSL for the tested route; native Windows uses the
   built-in ConPTY terminal, and the stand-in-agent tests skip themselves there.
 - tmux cannot see a half-typed line, only that someone was recently active, so messages wait for quiet instead.

@@ -1,0 +1,11 @@
+{
+  "name": "claudecord",
+  "version": "0.0.0",
+  "description": "Run Claude Code, agy and Codex agents on any machine as a Discord team",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/kanavdhanda/claudeCord.git" },
+  "bin": { "claudecord": "bin/claudecord.js" },
+  "files": ["bin/claudecord.js", "README.md"],
+  "engines": { "node": ">=16" },
+  "keywords": ["claude", "codex", "agents", "discord", "tmux", "orchestrator"]
+}
