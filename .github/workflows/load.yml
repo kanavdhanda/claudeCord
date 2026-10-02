@@ -16,6 +16,8 @@ jobs:
       matrix:
         profile: [oracle-arm, small-vps, oracle-micro]
     runs-on: ubuntu-latest
+    # Long and heavy, so each size waits for your approval (Settings > Environments > load-test > Required reviewers).
+    environment: load-test
     steps:
       - uses: actions/checkout@v4
       - uses: grafana/setup-k6-action@v1

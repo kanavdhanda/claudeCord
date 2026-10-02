@@ -28,6 +28,9 @@ const NORMAL: &str = "#!/bin/sh\necho 'fake claude'\nprintf '? for shortcuts\\n'
 /// Dies the first time it is started (leaving a marker file), then behaves normally.
 const DIES_ONCE: &str = "#!/bin/sh\necho run >> starts.log\nif [ ! -f started ]; then touch started; exit 1; fi\necho 'fake claude'\nprintf '? for shortcuts\\n'\nwhile IFS= read -r line; do\n  printf '%s\\n' \"$line\" >> fake.log\n  echo \"ack: $line\"\n  printf '? for shortcuts\\n'\ndone\n";
 
+/// Lives for a second, then dies: long enough to be seen starting, so a test can watch what happens when it ends.
+const DIES_SOON: &str = "#!/bin/sh\necho run >> starts.log\nsleep 1\nexit 1\n";
+
 /// Dies every time, at once.
 const ALWAYS_DIES: &str = "#!/bin/sh\nexit 1\n";
 
@@ -71,7 +74,8 @@ fn fast(extra: Vec<PathBuf>, max_agents: usize, labels: Vec<String>) -> Options 
 }
 
 async fn eventually(what: &str, mut f: impl AsyncFnMut() -> bool) {
-    for _ in 0..300 {
+    // Generous: shared CI machines are slow, and a wait only lasts as long as the thing it waits for.
+    for _ in 0..800 {
         if f().await {
             return;
         }
@@ -851,7 +855,7 @@ async fn nothing_is_handed_over_unless_asked_for() {
 
 #[tokio::test]
 async fn a_crashed_agent_is_not_started_again_unless_asked() {
-    let r = rig_with("norestart", DIES_ONCE).await;
+    let r = rig_with("norestart", DIES_SOON).await;
     let resp = up_with(&r, "otter", UpOpts::default()).await;
     assert!(resp.ok);
     eventually("registered", async || {

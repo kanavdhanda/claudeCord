@@ -1,0 +1,42 @@
+name: race
+
+# Looks for timing bugs: things that pass most of the time and fail when two actions land together.
+#   stress      runs every test many times, with very few and very many threads, so order-dependent tests show themselves.
+#   sanitizer   runs the concurrency tests under ThreadSanitizer, which reports data races in the program and its dependencies.
+# The stress run happens every night; the sanitizer is slow, so it waits for your approval
+# (Settings > Environments > sanitizers > Required reviewers) and is started by hand.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  stress:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --no-run --release
+      - run: |
+          for i in 1 2 3; do
+            cargo test --release -- --test-threads=1 || exit 1
+            cargo test --release -- --test-threads=32 || exit 1
+          done
+      - run: for i in $(seq 50); do cargo test --release --test races -q || exit 1; done
+
+  sanitizer:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: sanitizers
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - run: >
+          cargo test -Zbuild-std --target x86_64-unknown-linux-gnu
+          --test races --test server --test hub --test discord_bridge --test uptime --test web_login
+        env:
+          RUSTFLAGS: -Zsanitizer=thread
+          RUSTDOCFLAGS: -Zsanitizer=thread

@@ -157,6 +157,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | `tests/health.rs` | The health check as a test: every feature must pass its probe, and every source file must be claimed by a probe, so a new module cannot be added without a check that it is alive. |
 | `tests/hub.rs` | Behaviour tests for the hub core. |
 | `tests/logs.rs` | The per-agent log files: what they keep, how they are trimmed and what is removed before anyone reads them. |
+| `tests/races.rs` | Races: many things happening at the same moment. |
 | `tests/resilience.rs` | Behaviour on difficult machines: ones behind a web proxy, ones that were asleep, ones with no route to the hub. |
 | `tests/server.rs` | The hub over real sockets. |
 | `tests/store.rs` | Storage tests: history, saving and restoring the core, crash safety, and rolling old history into compressed files. |
@@ -181,6 +182,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | `scripts/cost/overhead.py` | Spends real tokens: runs Claude Code (haiku, tools off) a few dozen times. |
 | `scripts/cost/team_benchmark.py` | Spends real tokens (about 100 short Claude Code calls per model). |
 | `scripts/load/profile.sh` | Runs the k6 load test against a hub limited to the size of a free server, so the result says what that server can carry. |
+| `scripts/load/smoke.sh` | A small, cheap run of the k6 load test, fit for every push: a few hundred users with three bots each for under a minute. |
 | `scripts/package_npm.py` | (no header comment) |
 | `scripts/publish_npm.sh` | Publishes the packages made by scripts/package_npm.py: every platform package first, the main package last, so nobody can install a main package whose platform package is not there yet. |
 | `scripts/smoke.sh` | End-to-end smoke test of the real binary, the way a person would use it: make a token, start the hub, log a machine in, and run the connection check. |
