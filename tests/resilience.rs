@@ -235,7 +235,13 @@ async fn activity_cuts_a_long_pause_short_so_a_waking_machine_reconnects_at_once
         slow,
     );
     // The first attempt fails because no hub is there. Now the link is resting for about 30 seconds.
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    // Windows takes about two seconds to give up on a closed port, so the first attempt must be over before the hub starts.
+    tokio::time::sleep(Duration::from_millis(if cfg!(windows) {
+        3500
+    } else {
+        400
+    }))
+    .await;
     let hub = server::start(cfg, HubCore::default(), Store::open(&db, None).unwrap())
         .await
         .unwrap();
