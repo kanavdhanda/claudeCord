@@ -332,6 +332,8 @@ async fn the_live_database_can_be_backed_up_and_brought_back_whole() {
             Some("mac"),
             "devices can still sign in"
         );
+        // Windows will not replace a file that is still open, so the restored database is closed first (stop the hub before restoring).
+        drop(r);
         // A database that is already there is never replaced by accident.
         assert!(Store::restore_from_bucket(&b, "backup/hub-latest.db.gz", &fresh, false).is_err());
         assert!(Store::restore_from_bucket(&b, "backup/hub-latest.db.gz", &fresh, true).is_ok());

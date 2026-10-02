@@ -18,6 +18,8 @@ import package_npm  # noqa: E402
 
 
 def run(*cmd, cwd=None):
+    # On Windows npm and uv are .cmd or .exe files that only a full path finds.
+    cmd = (shutil.which(cmd[0]) or cmd[0], *cmd[1:])
     r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
     assert r.returncode == 0, f"{' '.join(map(str, cmd))} failed:\n{r.stdout}\n{r.stderr}"
     return r.stdout
@@ -49,10 +51,11 @@ def test_npm(binary, tmp):
     run("npm", "init", "-y", cwd=site)
     # The main package alone cannot fetch its platform package offline, so both tarballs are installed, as npm would.
     run("npm", "install", "--no-audit", "--no-fund", *map(str, sorted(tars.glob("*.tgz"))), cwd=site)
-    out = run(str(site / "node_modules/.bin/claudecord"), "--help")
+    launcher = site / "node_modules/.bin" / ("claudecord.cmd" if platform.system() == "Windows" else "claudecord")
+    out = run(str(launcher), "--help")
     assert "hub" in out and "start" in out, out
     # The exit code of the program comes through the launcher.
-    bad = subprocess.run([str(site / "node_modules/.bin/claudecord"), "no-such-command"], capture_output=True)
+    bad = subprocess.run([str(launcher), "no-such-command"], capture_output=True)
     assert bad.returncode != 0
     print("npm: installed from tarballs and ran claudecord --help")
 
