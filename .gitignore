@@ -11,3 +11,5 @@ target/
 
 # Local docs: never pushed
 docs/
+
+.DS_Store
