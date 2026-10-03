@@ -18,6 +18,23 @@ Rules that keep it safe to change:
 
 Commit messages say what changed and why, in the imperative.
 
-- Every pull request states its **cost impact** (agent turns and tokens) and **scale impact** (users, machines, agents per hub), even if
-  both are "none, because ...". CI does not measure them; `pr-description.yml` only checks the question was answered. The cost
-  benchmarks (`scripts/cost/`) and load tests (`scripts/load/`) are yours to run when a change touches delivery or per-connection work.
+## Cost and scale impact (every pull request)
+
+Every pull request description says what the change does to **cost** and to **scale**, even when the answer is "none, because ...".
+The pull request template (`.github/pull_request_template.md`) fills the description in for you with both headings. Nothing in CI
+measures or enforces them; a reviewer reads them and can ask for numbers.
+
+- **Cost impact**: does it change how many agent turns or tokens a message costs? Anything an agent reads (briefs, delivery, headers)
+  or any change to batching, wake-ups or ride-along counts. How to check: `python3 scripts/cost/benchmark.py --model sonnet --check`
+  and `scripts/cost/team_benchmark.py` against real Claude Code (they spend real tokens, so run them yourself, not CI), and compare
+  with `scripts/cost/baseline.json`. A change that touches none of that writes "none" and says why.
+- **Scale impact**: does it change how many users, machines or agents one hub can carry? Anything that adds work or memory per
+  connection, per message or per agent (timers, database writes, queues held in memory). How to check: `scripts/load/smoke.sh`
+  (200 users with three bots each, about a minute, locally), or the manual `load` workflow for the large runs at free-server sizes.
+  Quote the numbers before and after.
+
+Example of a filled description:
+
+    Cost impact: none. Only the dashboard page changed; no agent reads it.
+    Scale impact: adds one timer per connected machine (about 100 bytes each). scripts/load/smoke.sh p95 delivery 17 ms before, 18 ms after.
+
