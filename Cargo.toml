@@ -30,3 +30,7 @@ vt100 = "0.16.2"
 [profile.release]
 lto = "thin"
 strip = true
+
+# Debug builds keep line numbers for panics but skip full debug info: much faster to link, which matters most on Windows CI.
+[profile.dev]
+debug = "line-tables-only"
