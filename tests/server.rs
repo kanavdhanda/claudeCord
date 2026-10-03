@@ -24,7 +24,8 @@ fn kd() -> Human {
 fn cfg() -> Config {
     Config {
         bind: "127.0.0.1:0".parse().unwrap(),
-        ping_every: Duration::from_millis(80),
+        // Windows runners are slow enough to be quiet for longer than 80 ms, which would drop a healthy device mid-test.
+        ping_every: Duration::from_millis(if cfg!(windows) { 1000 } else { 80 }),
         max_out_bytes: 1 << 20,
         save_every: Duration::from_millis(10),
         tick_every: Duration::from_millis(50),
@@ -234,6 +235,9 @@ async fn a_healthy_device_that_answers_pings_is_kept() {
     hub.shutdown().await;
 }
 
+// Windows' network stack buffers an enormous amount for a socket nobody reads, so a backlog never builds up there; the cut-off is
+// proved on Linux and macOS.
+#[cfg_attr(windows, ignore = "Windows buffers too much for the backlog to build")]
 #[tokio::test]
 async fn a_device_that_stops_reading_is_cut_off_instead_of_filling_the_hub() {
     let dir = tmp("slow");
