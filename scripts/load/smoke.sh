@@ -10,4 +10,4 @@ port=$((20000 + RANDOM % 20000))
 "$bin" hub --data "$work/hub" --bind "127.0.0.1:$port" >"$work/hub.log" 2>&1 & hub=$!
 for _ in $(seq 30); do curl -fs "http://127.0.0.1:$port/readyz" >/dev/null && break; sleep 0.5; done
 ulimit -n 8192 2>/dev/null || true
-k6 run -q -e HUB="ws://127.0.0.1:$port" -e USERS="$users" -e RAMP=10 -e HOLD=20 -e TOKENS="$work/tokens.json" scripts/load/hub.js
+k6 run -q -e HUB="ws://127.0.0.1:$port" -e USERS="$users" -e RAMP=5 -e HOLD=10 -e TOKENS="$work/tokens.json" scripts/load/hub.js

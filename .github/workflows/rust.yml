@@ -1,10 +1,19 @@
 name: rust
 
+# Format, lints, every test, the timing tests repeated, the self-check and the smoke test on Linux (x86 and ARM) and macOS, plus a
+# small k6 run. Windows has its own workflow (windows.yml) and packaging has its own (packaging.yml), so each can be run alone.
 on:
   workflow_dispatch:
   push:
     branches: [main]
+    paths-ignore: ["**.md", "site/**", "learnings/**", "deploy/**", ".github/workflows/windows.yml", ".github/workflows/packaging.yml"]
   pull_request:
+    paths-ignore: ["**.md", "site/**", "learnings/**", "deploy/**"]
+
+# A newer push replaces a run still going for the same branch, instead of queueing behind it.
+concurrency:
+  group: rust-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   check:
@@ -30,7 +39,7 @@ jobs:
       # Health checks last: every feature alive, then the shipped binary used the way a person would.
       - run: cargo run -q -- selftest
       - run: scripts/smoke.sh
-  # A small k6 run (200 users with three bots each, about a minute) on every change. The big runs are in load.yml and wait for approval.
+  # A small k6 run (200 users with three bots each, under a minute) on every change. The big runs are in load.yml and wait for approval.
   load-smoke:
     runs-on: ubuntu-latest
     steps:
@@ -42,29 +51,3 @@ jobs:
       - uses: grafana/setup-k6-action@v1
       - run: cargo build --release --bin claudecord
       - run: scripts/load/smoke.sh 200 target/release/claudecord
-  # The pip wheel and npm packages are built, installed into clean folders and run. Linux on every change; macOS and Windows
-  # are checked by release.yml before anything is published (building the program twice per platform is slow).
-  packaging:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-      - uses: astral-sh/setup-uv@v7
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - run: python3 scripts/test_packaging.py
-  # Windows is built and tested natively. The stand-in-agent tests need a Unix shell and skip themselves there.
-  windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-      - run: cargo test
-      - run: cargo run -q -- selftest
