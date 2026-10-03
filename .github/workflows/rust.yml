@@ -38,13 +38,10 @@ jobs:
       - uses: grafana/setup-k6-action@v1
       - run: cargo build --release --bin claudecord
       - run: scripts/load/smoke.sh 200 target/release/claudecord
-  # The pip wheel and npm packages are built, installed into clean folders and run, on every platform, on every change.
+  # The pip wheel and npm packages are built, installed into clean folders and run. Linux on every change; macOS and Windows
+  # are checked by release.yml before anything is published (building the program twice per platform is slow).
   packaging:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -66,17 +63,3 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
       - run: cargo run -q -- selftest
-  # The cost benchmarks spend real tokens, so they run only when asked, never on every change.
-  cost:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    # Spends real money, so it waits for your approval (Settings > Environments > spend-tokens > Required reviewers).
-    environment: spend-tokens
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - run: npm install -g @anthropic-ai/claude-code
-      - run: python3 scripts/cost/benchmark.py --model sonnet --check
-      - run: python3 scripts/cost/team_benchmark.py --model sonnet --check
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

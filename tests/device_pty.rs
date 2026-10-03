@@ -142,3 +142,49 @@ async fn secrets_are_removed_from_the_agents_environment() {
     );
     assert!(!a.screen_text().contains("hunter2"));
 }
+
+#[tokio::test]
+async fn pastes_from_many_threads_each_arrive_whole_and_never_mixed() {
+    use claudecord::device::inject::Guard;
+    use claudecord::device::pty::PtyTerminal;
+    let t = std::sync::Arc::new(
+        PtyTerminal::spawn(
+            &["cat".into()],
+            std::path::Path::new("/tmp"),
+            &[],
+            &[],
+            40,
+            120,
+            Guard::with_times(0, 0, 0),
+        )
+        .unwrap(),
+    );
+    let now = claudecord::now_ms() + 100_000;
+    let threads: Vec<_> = (0..8)
+        .map(|i| {
+            let t = t.clone();
+            std::thread::spawn(move || {
+                let marker = format!("<{i}:{}>", "abcdefgh".repeat(4));
+                (marker.clone(), t.inject(&marker, now).is_ok())
+            })
+        })
+        .collect();
+    let sent: Vec<_> = threads
+        .into_iter()
+        .map(|h| h.join().unwrap())
+        .filter(|(_, ok)| *ok)
+        .collect();
+    assert!(!sent.is_empty(), "at least some pastes were accepted");
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    let screen = t.screen_text();
+    // A paste is one write, so each marker appears in one piece. Terminal wrapping at the column width could split it across
+    // lines, so the screen is compared with the line breaks removed.
+    let flat: String = screen.split_whitespace().collect();
+    for (marker, _) in &sent {
+        assert!(
+            flat.contains(marker.as_str()),
+            "{marker} is missing or broken up in: {screen}"
+        );
+    }
+    t.kill();
+}

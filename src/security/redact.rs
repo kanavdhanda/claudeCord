@@ -4,6 +4,9 @@
 //!
 //! Matching notes, all deliberate:
 //! - The `regex` crate has no lookahead. A lookahead (`(?!\[redacted)`) would keep scrubbing twice from mangling a marker. Here the match is made and then skipped if its value is already a marker.
+//! - Tokens with a distinctive prefix (ghp_, xox, AKIA, AIza, ccn1.) are caught even when glued to the word before them, since a
+//!   secret pasted as `tokenghp_...` is still a secret. Shorter or common prefixes (`sk-`, a bare JWT) keep a word boundary in front
+//!   so ordinary words such as `task-...` are left alone.
 //! - `\b`, `\w` and `\d` are forced to ASCII with `(?-u:...)`, so word characters mean the same thing on every machine.
 
 use regex::{Captures, Regex};
@@ -37,15 +40,10 @@ static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
             true,
             false,
         ),
-        rule(
-            "aws key",
-            r"(?-u:\b)(?:AKIA|ASIA)[0-9A-Z]{16}(?-u:\b)",
-            true,
-            false,
-        ),
+        rule("aws key", r"(?:AKIA|ASIA)[0-9A-Z]{16}(?-u:\b)", true, false),
         rule(
             "github token",
-            r"(?-u:\b)(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,})(?-u:\b)",
+            r"(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,})(?-u:\b)",
             true,
             false,
         ),
@@ -57,7 +55,7 @@ static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
         ),
         rule(
             "slack token",
-            r"(?-u:\b)xox[abprs]-[A-Za-z0-9-]{10,}(?-u:\b)",
+            r"xox[abprs]-[A-Za-z0-9-]{10,}(?-u:\b)",
             true,
             false,
         ),
@@ -69,16 +67,11 @@ static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
         ),
         rule(
             "claudecord token",
-            r"(?-u:\b)ccn1\.[A-Za-z0-9_-]{20,}(?-u:\b)",
+            r"ccn1\.[A-Za-z0-9_-]{20,}(?-u:\b)",
             true,
             false,
         ),
-        rule(
-            "google key",
-            r"(?-u:\b)AIza[0-9A-Za-z_-]{35}(?-u:\b)",
-            true,
-            false,
-        ),
+        rule("google key", r"AIza[0-9A-Za-z_-]{35}(?-u:\b)", true, false),
         rule(
             "jwt",
             r"(?-u:\b)eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?-u:\b)",

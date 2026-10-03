@@ -344,3 +344,131 @@ async fn without_sign_in_set_up_the_routes_say_so_and_tokens_still_work() {
     assert_eq!(r.status(), 200, "a dashboard token sees everything");
     hub.shutdown().await;
 }
+
+#[tokio::test]
+async fn many_people_signing_in_and_out_at_once_each_get_their_own_session() {
+    let (hub, base) = rig(true).await;
+    let tasks: Vec<_> = (0..40)
+        .map(|_| {
+            let base = base.clone();
+            tokio::spawn(async move { sign_in(&base, "100").await.unwrap() })
+        })
+        .collect();
+    let mut sessions = Vec::new();
+    for t in tasks {
+        sessions.push(t.await.unwrap());
+    }
+    let mut unique = sessions.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), 40, "no two people share a session id");
+    // Signing some out while others use theirs touches only the ones signed out.
+    let (out, keep) = sessions.split_at(20);
+    let outs: Vec<_> = out
+        .iter()
+        .map(|s| {
+            let (base, s) = (base.clone(), s.clone());
+            tokio::spawn(async move {
+                client()
+                    .post(format!("{base}/auth/logout"))
+                    .header("cookie", format!("cc_session={s}"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+            })
+        })
+        .collect();
+    let reads: Vec<_> = keep
+        .iter()
+        .map(|s| {
+            let (base, s) = (base.clone(), s.clone());
+            tokio::spawn(async move { get_json(&base, "/api/v1/state", &s).await.0 })
+        })
+        .collect();
+    for o in outs {
+        assert_eq!(o.await.unwrap(), 204);
+    }
+    for r in reads {
+        assert_eq!(
+            r.await.unwrap(),
+            200,
+            "someone else signing out did not end this session"
+        );
+    }
+    for s in out {
+        assert_eq!(get_json(&base, "/auth/me", s).await.0, 401);
+    }
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn odd_and_hostile_sign_in_requests_are_refused_cleanly_and_never_crash_the_hub() {
+    let (hub, base) = rig(true).await;
+    let c = client();
+    let huge = "x".repeat(6_000);
+    for url in [
+        format!("{base}/auth/callback"),
+        format!("{base}/auth/callback?code=only"),
+        format!("{base}/auth/callback?state=only"),
+        format!("{base}/auth/callback?code=%00%FF&state=%E2%80%AE"),
+        format!("{base}/auth/callback?code={huge}&state={huge}"),
+    ] {
+        let r = c
+            .get(&url)
+            .header("cookie", "cc_state=x; cc_state=y; ;;; =")
+            .send()
+            .await
+            .map(|r| r.status().as_u16());
+        assert!(
+            matches!(r, Ok(400 | 414 | 431 | 429)),
+            "{:.60} gave {r:?}",
+            url
+        );
+    }
+    // Strange cookies never open anything, and never cause a server error.
+    for cookie in [
+        "cc_session=",
+        "cc_session=%00",
+        "cc_session=a; cc_session=b",
+        &format!("cc_session={huge}"),
+        "cc_session",
+    ] {
+        let r = c
+            .get(format!("{base}/api/v1/state"))
+            .header("cookie", cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 401, "{:.40}", cookie);
+    }
+    assert_eq!(
+        c.get(format!("{base}/healthz"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200,
+        "the hub is fine"
+    );
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_address_that_keeps_failing_to_sign_in_is_blocked_for_a_while() {
+    let (hub, base) = rig(true).await;
+    let c = client();
+    for _ in 0..12 {
+        c.get(format!("{base}/auth/callback?code=x&state=wrong"))
+            .header("cookie", "cc_state=right")
+            .send()
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        sign_in(&base, "100").await,
+        Err(429),
+        "even a real sign-in waits once an address has failed too often"
+    );
+    hub.shutdown().await;
+}

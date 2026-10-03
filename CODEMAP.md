@@ -153,6 +153,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | `tests/device_tmux.rs` | The tmux backend against a real tmux (each test skips itself where tmux is not installed): start, paste, type, read, see the program end, and stop. |
 | `tests/discord_bridge.rs` | The Discord bridge, against a stand-in Discord (its REST API and its live gateway) and a real hub with a real device link. |
 | `tests/e2e.rs` | Everything together, on one machine: a real hub, a real device daemon, and a stand-in agent (a shell script named `claude` that prints the ready line and echoes each line it is given). |
+| `tests/edge.rs` | Edge cases and randomised checks: hostile or odd input must never panic, and rules that must hold for every input are checked on many generated ones (from a fixed seed, so a failure repeats). |
 | `tests/export.rs` | The Obsidian export: what notes it makes, that the links are right so the graph shows real connections, that running it again changes nothing, and that it includes history that has moved into compressed files. |
 | `tests/health.rs` | The health check as a test: every feature must pass its probe, and every source file must be claimed by a probe, so a new module cannot be added without a check that it is alive. |
 | `tests/hub.rs` | Behaviour tests for the hub core. |

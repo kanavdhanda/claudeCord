@@ -17,3 +17,7 @@ Rules that keep it safe to change:
 - Cost: `scripts/check.sh --cost` runs the real-model benchmarks (they spend tokens) and fails if turns or tokens rise.
 
 Commit messages say what changed and why, in the imperative.
+
+- Every pull request states its **cost impact** (agent turns and tokens) and **scale impact** (users, machines, agents per hub), even if
+  both are "none, because ...". CI does not measure them; `pr-description.yml` only checks the question was answered. The cost
+  benchmarks (`scripts/cost/`) and load tests (`scripts/load/`) are yours to run when a change touches delivery or per-connection work.

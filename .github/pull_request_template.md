@@ -1,15 +1,23 @@
-## What changed and why
+## What and why
 
-<!-- One or two sentences. What problem does this solve? -->
+<!-- One or two sentences. -->
 
-## How it was tested
+## Tests
 
-<!-- Commands you ran, and anything you could not test. -->
+<!-- Which test fails without this change? (The test bot comments if none was added.) -->
 
-## Checklist
+## Cost impact
 
-- [ ] Tests added or updated, and they fail without this change
-- [ ] Docs updated if behaviour changed
-- [ ] Changeset added if the published packages are affected (`pnpm changeset`)
-- [ ] I ran `pnpm lint && pnpm test:all` locally
-- [ ] If this touches messages that reach a terminal, files, the agent environment, pairing or the web server, I read docs/SECURITY.md and added a test for the property I rely on
+<!-- Does this change how many agent turns or tokens a message costs? Write "none" if it does not touch delivery, briefs or
+     anything an agent reads, and say why. If it does, say what changes (more turns? a longer standing brief?) and show the
+     measurement (scripts/cost/ has the benchmarks; they spend real tokens, so run them yourself, CI does not). -->
+
+Cost impact:
+
+## Scale impact
+
+<!-- Does this change how many users, machines or agents one hub can carry? Write "none" if not, and say why. If it adds work
+     per connection, per message or per agent (memory held, database writes, timers), say how much, and run
+     scripts/load/smoke.sh (or the load.yml workflow) to show the numbers. -->
+
+Scale impact:
