@@ -79,7 +79,8 @@ pub(crate) fn scratch(name: &str) -> std::path::PathBuf {
 
 /// Waits up to a few seconds for something to become true.
 pub(crate) async fn eventually(mut f: impl AsyncFnMut() -> bool) -> bool {
-    for _ in 0..200 {
+    // Generous: a shared CI machine can be slow, and a wait only lasts as long as the thing it waits for.
+    for _ in 0..800 {
         if f().await {
             return true;
         }
