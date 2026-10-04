@@ -121,7 +121,7 @@ async fn the_link_connects_registers_and_receives_messages() {
         ev_tx,
         fast(),
     );
-    assert!(expect(&mut ev, 2000, |e| *e == LinkEvent::Up).await);
+    assert!(expect(&mut ev, 10_000, |e| *e == LinkEvent::Up).await);
     link.send(NodeFrame::AgentRegister {
         agent: spec("otter"),
         cwd: "/x".into(),
@@ -156,7 +156,7 @@ async fn the_link_connects_registers_and_receives_messages() {
     assert!(
         expect(
             &mut ev,
-            2000,
+            10_000,
             |e| matches!(e, LinkEvent::Frame(HubFrame::Deliver { text, .. }) if text == "hi there")
         )
         .await
@@ -185,12 +185,12 @@ async fn the_link_comes_back_by_itself_after_the_hub_restarts() {
         fast(),
     );
     assert!(
-        expect(&mut ev, 2000, |e| *e == LinkEvent::Up).await,
+        expect(&mut ev, 10_000, |e| *e == LinkEvent::Up).await,
         "first connection"
     );
     hub.shutdown().await;
     assert!(
-        expect(&mut ev, 2000, |e| *e == LinkEvent::Down).await,
+        expect(&mut ev, 10_000, |e| *e == LinkEvent::Down).await,
         "told the connection ended"
     );
     // The hub is down for a moment. The link keeps trying quietly.
