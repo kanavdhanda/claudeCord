@@ -120,3 +120,77 @@ fn a_kill_is_recorded_as_a_crash_from_the_last_heartbeat_and_the_next_start_says
     signal(&again, "-TERM");
     wait_exit(&mut again);
 }
+
+/// Runs the hub program expecting it to refuse to start, and returns what it said.
+fn refuses_to_start(args: &[&str]) -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_claudecord"))
+        .arg("hub")
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "the hub started when it should not have"
+    );
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+#[test]
+fn the_hub_says_plainly_why_it_will_not_start_instead_of_failing_later() {
+    // A damaged database.
+    let data = dir("damaged");
+    {
+        let mut store = Store::open(&data.join("hub.db"), None).unwrap();
+        let rows: Vec<_> = (0..2000)
+            .map(|i| claudecord::store::HistoryRow {
+                id: 0,
+                at: i,
+                project: "p".into(),
+                thread: None,
+                from: "w".into(),
+                kind: "say".into(),
+                text: format!("row {i} {}", "x".repeat(200)),
+            })
+            .collect();
+        store.append(&rows).unwrap();
+    }
+    let mut bytes = std::fs::read(data.join("hub.db")).unwrap();
+    for b in &mut bytes[8_192..12_288] {
+        *b = 0xA5;
+    }
+    let _ = std::fs::remove_file(data.join("hub.db-wal"));
+    let _ = std::fs::remove_file(data.join("hub.db-shm"));
+    std::fs::write(data.join("hub.db"), &bytes).unwrap();
+    let said = refuses_to_start(&["--data", data.to_str().unwrap(), "--bind", "127.0.0.1:0"]);
+    assert!(
+        said.contains("damaged") || said.contains("cannot be opened"),
+        "{said}"
+    );
+    assert!(
+        said.contains("storage restore") || said.contains("cannot be opened"),
+        "it says what to do: {said}"
+    );
+
+    // A port already taken.
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = taken.local_addr().unwrap().port();
+    let data = dir("busy-port");
+    let said = refuses_to_start(&[
+        "--data",
+        data.to_str().unwrap(),
+        "--bind",
+        &format!("127.0.0.1:{port}"),
+    ]);
+    assert!(said.contains("already in use"), "{said}");
+
+    // A data folder nobody can write to (skipped when running as root, who can write anywhere).
+    use std::os::unix::fs::PermissionsExt;
+    let data = dir("readonly");
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::write(data.join("probe"), b"x").is_err() {
+        let said = refuses_to_start(&["--data", data.to_str().unwrap(), "--bind", "127.0.0.1:0"]);
+        assert!(said.contains("cannot be written"), "{said}");
+    }
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o755)).unwrap();
+}

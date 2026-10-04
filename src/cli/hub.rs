@@ -61,6 +61,8 @@ pub async fn run_hub(a: HubArgs) -> Result<(), String> {
     std::fs::create_dir_all(&a.data).map_err(|e| e.to_string())?;
     // Everything the hub logs goes to the terminal and to `hub.log` in its data folder (kept to about 20 MB in two files).
     crate::log::init(Some(a.data.join("hub.log")));
+    // Find the problems that can be found before serving anyone, and say them plainly, rather than failing in the middle of the night.
+    preflight(&a.data)?;
     let store = Store::open(&a.data.join("hub.db"), Some(&a.data.join("history")))
         .map_err(|e| e.to_string())?;
     let mut core = HubCore::default();
@@ -80,7 +82,11 @@ pub async fn run_hub(a: HubArgs) -> Result<(), String> {
         store,
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| match e.kind() {
+        std::io::ErrorKind::AddrInUse => format!("{bind} is already in use: is another hub running here? Stop it, or choose another --bind"),
+        std::io::ErrorKind::PermissionDenied => format!("not allowed to listen on {bind} (ports below 1024 need extra permission; use a higher port behind a TLS proxy)"),
+        _ => e.to_string(),
+    })?;
     // Discord is part of the hub: once `claudecord discord set` has been run, starting the hub starts the bridge too.
     match discord {
         Some(mut cfg) => {
@@ -104,6 +110,50 @@ pub async fn run_hub(a: HubArgs) -> Result<(), String> {
     crate::info!("hub", "told to stop; saving and closing connections");
     hub.shutdown().await;
     crate::info!("hub", "stopped cleanly");
+    Ok(())
+}
+
+/// Checks what can be checked before the hub starts serving: the data folder can be written, the database is not damaged, and the
+/// process may open as many connections as devices will need. A problem that stops the hub is an error with the fix in it; one
+/// that only limits it is a warning in the log.
+pub fn preflight(data: &std::path::Path) -> Result<(), String> {
+    let probe = data.join(".write-test");
+    std::fs::write(&probe, b"ok").map_err(|e| {
+        format!(
+            "the data folder {} cannot be written to: {e}",
+            data.display()
+        )
+    })?;
+    let _ = std::fs::remove_file(&probe);
+    let db = data.join("hub.db");
+    if db.exists() {
+        let store = Store::open(&db, None)
+            .map_err(|e| format!("the database {} cannot be opened: {e}", db.display()))?;
+        store.integrity().map_err(|found| {
+            format!(
+                "the database {} is damaged ({found}). Bring back the last copy with `claudecord storage restore`, or move the file aside to start fresh",
+                db.display()
+            )
+        })?;
+    }
+    // Every device is one open file for the hub. Linux says what the limit is; elsewhere there is nothing cheap to ask.
+    if let Some(limit) = std::fs::read_to_string("/proc/self/limits")
+        .ok()
+        .and_then(|t| {
+            t.lines()
+                .find(|l| l.starts_with("Max open files"))?
+                .split_whitespace()
+                .nth(3)?
+                .parse::<u64>()
+                .ok()
+        })
+        && limit < 4096
+    {
+        crate::warn!(
+            "hub",
+            "this process may open only {limit} files, which limits how many devices can connect; raise it (LimitNOFILE in the systemd unit, or ulimit -n)"
+        );
+    }
     Ok(())
 }
 

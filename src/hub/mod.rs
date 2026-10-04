@@ -34,6 +34,7 @@ pub mod tasks;
 
 pub use self::core::{
     DEFAULT_ACCEPT_TIMEOUT_MS, DEFAULT_GRANT_TTL_MS, DEFAULT_STREAK_LIMIT, HubCore,
+    MAX_AGENTS_PER_PROJECT,
 };
 pub use asks::AskOutcome;
 pub use effects::{Chat, Effect, Persist};

@@ -588,6 +588,7 @@ async fn a_bug_in_one_handler_does_not_take_the_hub_down() {
     .await;
     // Give the periodic save time to record the agent, then make a handler blow up.
     tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut chat = hub.chat();
     let r: Option<()> = hub
         .call(|_, _| -> ((), Vec<Effect>) { panic!("simulated bug") })
         .await;
@@ -595,6 +596,23 @@ async fn a_bug_in_one_handler_does_not_take_the_hub_down() {
         r.is_none(),
         "the failed call reports failure instead of hanging"
     );
+    // The failure is reported first: the project's chat is told, with the owner pinged, before anything else is said.
+    let told = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Ok(Chat::Notice {
+                project,
+                text,
+                mention,
+            }) = chat.recv().await
+                && project == "p"
+                && text.contains("Internal error")
+            {
+                return mention;
+            }
+        }
+    })
+    .await;
+    assert_eq!(told, Ok(true), "the chat was told about the bug");
     // The hub is still alive, still knows the agent (restored from the save), and the device is still connected.
     assert!(connected(&hub, "mac").await, "the connection survived");
     wait_for("agent still known", async || {
@@ -889,5 +907,34 @@ async fn one_misbehaving_device_never_disturbs_another() {
         !connected(&hub, "bad").await
     })
     .await;
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn past_its_limit_the_hub_refuses_new_devices_with_try_later_and_takes_them_again_when_room_returns()
+ {
+    let dir = tmp("cap");
+    let (hub, tokens) = boot(
+        Config {
+            max_devices: 2,
+            ..cfg()
+        },
+        &dir.join("t.db"),
+        &["a", "b", "c"],
+    )
+    .await;
+    let _a = connect(&hub, &tokens[0]).await.unwrap();
+    let mut b = connect(&hub, &tokens[1]).await.unwrap();
+    let third = connect(&hub, &tokens[2]).await;
+    assert!(
+        matches!(&third, Err(tokio_tungstenite::tungstenite::Error::Http(r)) if r.status() == 503),
+        "the third device is told to try later: {:?}",
+        third.as_ref().err()
+    );
+    // The two that are in are not disturbed, and a place given back is taken again.
+    b.close(None).await.unwrap();
+    wait_for("room again", async || !connected(&hub, "b").await).await;
+    let again = connect(&hub, &tokens[2]).await;
+    assert!(again.is_ok(), "{:?}", again.err());
     hub.shutdown().await;
 }

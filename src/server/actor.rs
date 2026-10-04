@@ -56,6 +56,8 @@ pub(crate) async fn run(
     loop {
         let now = now_ms();
         let mut fx: Vec<Effect> = Vec::new();
+        // Notices about failures that were caught while handling this batch.
+        let mut report: Vec<Effect> = Vec::new();
         tokio::select! {
             input = inbox.recv() => {
                 let Some(input) = input else { break };
@@ -73,30 +75,30 @@ pub(crate) async fn run(
                             core.touch(&node, now);
                             conns.insert(conn, Conn { node: node.clone(), tx, queued, kill });
                             fx.push(Effect::Send { conn, frame: HubFrame::Welcome { node_id: node.clone() } });
-                            fx.extend(guard(&mut core, disk.reader(), &conns, |c| c.node_connected(&node, conn)).unwrap_or_default());
+                            fx.extend(guard(&mut core, disk.reader(), &conns, &mut report, Some(&node), |c| c.node_connected(&node, conn)).unwrap_or_default());
                             dirty = true;
                         }
                         Input::Disconnected { node, conn } => {
                             conns.remove(&conn);
-                            fx.extend(guard(&mut core, disk.reader(), &conns, |c| c.node_disconnected(&node, conn)).unwrap_or_default());
+                            fx.extend(guard(&mut core, disk.reader(), &conns, &mut report, Some(&node), |c| c.node_disconnected(&node, conn)).unwrap_or_default());
                             dirty = true;
                         }
                         Input::Alive { node } => core.touch(&node, now),
                         Input::Frame { node, text } => {
                             if let Some(frame) = NodeFrame::parse(&text) {
-                                fx.extend(guard(&mut core, disk.reader(), &conns, |c| c.on_node_frame(&node, frame, now)).unwrap_or_default());
+                                fx.extend(guard(&mut core, disk.reader(), &conns, &mut report, Some(&node), |c| c.on_node_frame(&node, frame, now)).unwrap_or_default());
                                 dirty = true;
                             }
                         }
                         Input::Call(f) => {
-                            fx.extend(guard(&mut core, disk.reader(), &conns, |c| f(c, now)).unwrap_or_default());
+                            fx.extend(guard(&mut core, disk.reader(), &conns, &mut report, None, |c| f(c, now)).unwrap_or_default());
                             dirty = true;
                         }
                         Input::Shutdown { done: d } => done = Some(d),
                     }
                 }
             }
-            _ = tick.tick() => { fx.extend(guard(&mut core, disk.reader(), &conns, |c| c.tick(now)).unwrap_or_default()); dirty = true; }
+            _ = tick.tick() => { fx.extend(guard(&mut core, disk.reader(), &conns, &mut report, None, |c| c.tick(now)).unwrap_or_default()); dirty = true; }
             _ = rollover.tick() => {
                 if rolling.as_ref().is_none_or(|h| h.is_finished()) && let Some(mut s) = disk.reader().fork() {
                     let cutoff = now - cfg.hot_window.as_millis() as i64;
@@ -117,6 +119,7 @@ pub(crate) async fn run(
                 }
             }
         }
+        fx.extend(report);
         // Doing what the core asked is guarded too: a bug here must cost one batch of effects, never the actor and with it the hub.
         let carried = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             carry_out(
@@ -157,15 +160,26 @@ pub(crate) async fn run(
 /// Runs one step against the core and survives a bug in it. If the step panics, that one input is dropped, the core is
 /// rebuilt from the last saved state (plus the connections that are open right now), and the hub carries on serving
 /// everyone else. A bug in one handler must not leave every device talking to a dead hub. Returns None if it panicked.
+///
+/// A failure is reported before anything else: the projects it could have touched (those on `node`, or all of them when no machine
+/// is involved) are told in their chat, with the owner pinged, that a request was dropped and what that may mean. `report` collects
+/// those notices for the caller to carry out with the rest of the batch.
 fn guard<R>(
     core: &mut HubCore,
     store: &Store,
     conns: &HashMap<u64, Conn>,
+    report: &mut Vec<Effect>,
+    node: Option<&str>,
     step: impl FnOnce(&mut HubCore) -> R,
 ) -> Option<R> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| step(core))) {
         Ok(r) => Some(r),
         Err(_) => {
+            // Which projects to tell is worked out before the core is rebuilt, while it still knows who was where.
+            let projects = match node {
+                Some(n) => core.projects_of_node(n),
+                None => core.projects(),
+            };
             crate::error!(
                 "hub",
                 "a handler panicked; restoring the core from its last saved state"
@@ -177,6 +191,13 @@ fn guard<R>(
             for (conn, c) in conns {
                 core.node_connected(&c.node, *conn);
                 core.assume_online(&c.node);
+            }
+            for project in projects {
+                report.push(Effect::Chat(Chat::Notice {
+                    project,
+                    text: "Internal error: the hub hit a bug while handling one request. It dropped that request and recovered from its last saved state, so anything from the last moments may need repeating. The details are in the hub's log.".into(),
+                    mention: true,
+                }));
             }
             None
         }

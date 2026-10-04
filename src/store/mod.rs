@@ -92,6 +92,15 @@ impl Store {
         })
     }
 
+    /// Checks the database file is not damaged (SQLite's quick check). Ok when sound, else what it found.
+    pub fn integrity(&self) -> Result<(), String> {
+        let found: String = self
+            .conn
+            .query_row("PRAGMA quick_check", [], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        if found == "ok" { Ok(()) } else { Err(found) }
+    }
+
     /// A second connection to the same database file, for background work (like moving old history out) so the main
     /// connection is never held up by it. None for an in-memory store.
     pub fn fork(&self) -> Option<Store> {

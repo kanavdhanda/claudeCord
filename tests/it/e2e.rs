@@ -1203,3 +1203,49 @@ async fn an_agent_that_floods_its_terminal_with_garbage_does_not_hurt_the_daemon
     assert!(ipc::call(&r.dir, &Req::Ping).await.unwrap().ok);
     r.hub.shutdown().await;
 }
+
+#[tokio::test]
+async fn an_agent_whose_program_is_missing_or_whose_folder_is_gone_is_refused_at_once_with_the_reason()
+ {
+    let r = rig("preflight").await;
+    let missing = up_with(
+        &r,
+        "otter",
+        UpOpts {
+            command: Some(vec!["definitely-not-installed-xyz".into()]),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(
+        !missing.ok && missing.msg.contains("was not found"),
+        "{}",
+        missing.msg
+    );
+    let no_folder = ipc::call(
+        &r.dir,
+        &Req::Up {
+            project: "demo".into(),
+            name: Some("heron".into()),
+            adapter: "claude".into(),
+            model: None,
+            role: None,
+            cwd: r.project.join("no-such-folder").to_string_lossy().into(),
+            policy: "autonomous".into(),
+            rows: 24,
+            cols: 80,
+            opts: UpOpts::default(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        !no_folder.ok && no_folder.msg.contains("is not a folder"),
+        "{}",
+        no_folder.msg
+    );
+    // Neither left anything behind: a good start still works afterwards.
+    let good = up_with(&r, "wren", UpOpts::default()).await;
+    assert!(good.ok, "{}", good.msg);
+    r.hub.shutdown().await;
+}

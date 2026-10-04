@@ -58,3 +58,19 @@ pub async fn shutdown_signal() {
         let _ = tokio::signal::ctrl_c().await;
     }
 }
+
+/// Runs one step and survives a panic in it: the panic is logged (with `what` was being done) and the result is None, so the caller
+/// can report it and carry on with the next thing instead of the whole program going down with one bad step.
+pub async fn guarded<T>(what: &str, step: impl Future<Output = T>) -> Option<T> {
+    use futures_util::FutureExt;
+    match std::panic::AssertUnwindSafe(step).catch_unwind().await {
+        Ok(v) => Some(v),
+        Err(_) => {
+            crate::error!(
+                "task",
+                "a panic while {what}; that step was dropped and the program carries on"
+            );
+            None
+        }
+    }
+}

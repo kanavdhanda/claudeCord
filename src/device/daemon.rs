@@ -162,6 +162,8 @@ struct Agent {
     shown_prompt: Option<String>,
     deciding: Option<AwaitingDecision>,
     limit_reported: bool,
+    /// Internal errors in a row while looking at this agent (see `agent_faulted`).
+    faults: u32,
     files: HashMap<String, PathBuf>,
 }
 
@@ -240,21 +242,21 @@ pub async fn run(cfg: Config, dir: PathBuf, opts: Options) -> std::io::Result<()
                 None => break,
                 Some(LinkEvent::Up) => {
                     crate::info!("daemon", "connected to the hub");
-                    guarded("handling the hub connecting", st.on_up()).await;
+                    crate::task::guarded("handling the hub connecting", st.on_up()).await;
                 }
                 Some(LinkEvent::Down) => {
                     if st.up { crate::warn!("daemon", "lost the connection to the hub; reconnecting"); }
                     st.up = false;
                 }
-                Some(LinkEvent::Frame(f)) => { guarded("handling a frame from the hub", st.on_frame(f)).await; }
+                Some(LinkEvent::Frame(f)) => { crate::task::guarded("handling a frame from the hub", st.on_frame(f)).await; }
             },
             call = calls.recv() => {
                 let Some((env, reply)) = call else { break };
-                let resp = guarded("handling a command", st.handle(env.req, env.key.as_deref())).await
+                let resp = crate::task::guarded("handling a command", st.handle(env.req, env.key.as_deref())).await
                     .unwrap_or_else(|| Resp::err("the daemon hit an internal error on that command; see its log"));
                 let _ = reply.send(resp);
             }
-            _ = tick.tick() => { guarded("looking at the terminals", st.on_tick(crate::now_ms())).await; }
+            _ = tick.tick() => { crate::task::guarded("looking at the terminals", st.on_tick(crate::now_ms())).await; }
             _ = &mut stop => {
                 crate::info!("daemon", "told to stop; closing the agents");
                 break;
@@ -271,19 +273,21 @@ pub async fn run(cfg: Config, dir: PathBuf, opts: Options) -> std::io::Result<()
     Ok(())
 }
 
-/// Runs one step of the daemon's loop and survives a panic in it: the panic is logged and the step's result is None.
-async fn guarded<T>(what: &str, step: impl std::future::Future<Output = T>) -> Option<T> {
-    use futures_util::FutureExt;
-    match std::panic::AssertUnwindSafe(step).catch_unwind().await {
-        Ok(v) => Some(v),
-        Err(_) => {
-            crate::error!(
-                "daemon",
-                "a panic while {what}; that step was dropped and the daemon carries on"
-            );
-            None
-        }
+/// Whether `program` can be run: a path that exists, or a name found in one of the folders of `path`.
+fn find_program(program: &str, path: &str) -> bool {
+    let p = std::path::Path::new(program);
+    if p.components().count() > 1 {
+        return p.is_file();
     }
+    let exts: &[&str] = if cfg!(windows) {
+        &["", ".exe", ".cmd", ".bat"]
+    } else {
+        &[""]
+    };
+    std::env::split_paths(path).any(|dir| {
+        exts.iter()
+            .any(|e| dir.join(format!("{program}{e}")).is_file())
+    })
 }
 
 /// One local connection: reads a request line, asks the main loop, writes the answer. An attach request turns the
@@ -686,124 +690,177 @@ impl State {
             let _ = look.await;
         }
         for id in ids {
-            if self.agents[&id].proc.has_exited() {
-                self.revive_or_stop(&id, now).await;
-                continue;
-            }
-            let (screen, adapter) = {
-                let a = &self.agents[&id];
-                (a.proc.screen_text(), a.spec.adapter)
-            };
-            let state = adapter.detect(&screen);
-            let mut out: Vec<NodeFrame> = Vec::new();
+            // Each agent is looked at on its own, guarded: a bug while looking at one costs that agent's turn, is reported, and the
+            // others are looked at as usual. An agent that keeps failing is stopped and reported rather than looped on.
+            match crate::task::guarded(&format!("looking at {id}"), self.tick_agent(&id, now)).await
             {
-                let a = self.agents.get_mut(&id).expect("listed above");
-                if let Some(p) = &state.prompt {
-                    // Start-up dialogs such as "trust this folder" are only answered by the device if it was told to; by
-                    // default they go to a person like any other prompt.
-                    if let Some(i) = adapter.startup_choice(p).filter(|_| self.opts.auto_startup) {
-                        if a.shown_prompt.as_deref() != Some(&p.signature) && i >= 0 {
-                            a.shown_prompt = Some(p.signature.clone());
-                            for k in adapter.select_keys(p, i) {
-                                let _ = a.proc.type_input(&key_bytes(&k), now);
-                            }
-                        }
-                    } else if a.shown_prompt.as_deref() != Some(&p.signature) {
-                        // Anything else is a question for a person. It becomes a permission request in the chat.
-                        a.shown_prompt = Some(p.signature.clone());
-                        let perm_id = format!("{}-{:x}", a.spec.name, fingerprint(&p.signature));
-                        a.deciding = Some(AwaitingDecision {
-                            perm_id: perm_id.clone(),
-                            prompt: p.clone(),
-                        });
-                        out.push(NodeFrame::AgentPermission {
-                            agent_id: id.clone(),
-                            perm_id,
-                            kind: "tool".into(),
-                            action: p.question.clone(),
-                            thread: None,
-                        });
+                Some(()) => {
+                    if let Some(a) = self.agents.get_mut(&id) {
+                        a.faults = 0;
                     }
-                } else if let Some(shown) = a.shown_prompt.take() {
-                    // The prompt is gone. If a decision was still pending, it was answered here at the terminal.
-                    if let Some(d) = a.deciding.take() {
-                        out.push(NodeFrame::AgentPermissionDone {
-                            agent_id: id.clone(),
-                            perm_id: d.perm_id,
-                        });
-                    }
-                    let _ = shown;
                 }
-                let status = status_of(&state);
-                if status != a.status {
-                    a.log.event(now, "status", &format!("{status:?}"));
-                    a.status = status;
-                    out.push(NodeFrame::AgentStatus {
-                        agent_id: id.clone(),
-                        status,
-                        detail: None,
+                None => self.agent_faulted(&id).await,
+            }
+        }
+    }
+
+    /// An agent's look failed with a bug. Tell the hub (so the chat says so) and, after three in a row, stop the agent.
+    async fn agent_faulted(&mut self, id: &str) {
+        let Some(a) = self.agents.get_mut(id) else {
+            return;
+        };
+        a.faults += 1;
+        let (faults, status) = (a.faults, a.status);
+        a.log.event(
+            crate::now_ms(),
+            "fault",
+            "an internal error while looking at this agent",
+        );
+        let detail = if faults >= 3 {
+            "stopped after repeated internal errors on this machine; see the daemon log".to_string()
+        } else {
+            "an internal error on this machine while looking at this agent; see the daemon log"
+                .to_string()
+        };
+        self.link
+            .send(NodeFrame::AgentStatus {
+                agent_id: id.to_string(),
+                status: if faults >= 3 {
+                    AgentStatus::Offline
+                } else {
+                    status
+                },
+                detail: Some(detail),
+            })
+            .await;
+        if faults >= 3 {
+            crate::error!(
+                "daemon",
+                "{id}: stopped after {faults} internal errors in a row"
+            );
+            self.stop(id).await;
+        }
+    }
+
+    /// One agent's turn in the tick: its end, its screen, its prompts, and delivering what waits for it.
+    async fn tick_agent(&mut self, id: &str, now: i64) {
+        if self.agents[id].proc.has_exited() {
+            self.revive_or_stop(id, now).await;
+            return;
+        }
+        let (screen, adapter) = {
+            let a = &self.agents[id];
+            (a.proc.screen_text(), a.spec.adapter)
+        };
+        let state = adapter.detect(&screen);
+        let mut out: Vec<NodeFrame> = Vec::new();
+        {
+            let a = self.agents.get_mut(id).expect("listed above");
+            if let Some(p) = &state.prompt {
+                // Start-up dialogs such as "trust this folder" are only answered by the device if it was told to; by
+                // default they go to a person like any other prompt.
+                if let Some(i) = adapter.startup_choice(p).filter(|_| self.opts.auto_startup) {
+                    if a.shown_prompt.as_deref() != Some(&p.signature) && i >= 0 {
+                        a.shown_prompt = Some(p.signature.clone());
+                        for k in adapter.select_keys(p, i) {
+                            let _ = a.proc.type_input(&key_bytes(&k), now);
+                        }
+                    }
+                } else if a.shown_prompt.as_deref() != Some(&p.signature) {
+                    // Anything else is a question for a person. It becomes a permission request in the chat.
+                    a.shown_prompt = Some(p.signature.clone());
+                    let perm_id = format!("{}-{:x}", a.spec.name, fingerprint(&p.signature));
+                    a.deciding = Some(AwaitingDecision {
+                        perm_id: perm_id.to_string(),
+                        prompt: p.clone(),
+                    });
+                    out.push(NodeFrame::AgentPermission {
+                        agent_id: id.to_string(),
+                        perm_id,
+                        kind: "tool".into(),
+                        action: p.question.clone(),
+                        thread: None,
                     });
                 }
-                match &state.limit {
-                    Some(l) if !a.limit_reported => {
-                        a.limit_reported = true;
-                        out.push(NodeFrame::AgentLimit {
-                            agent_id: id.clone(),
-                            kind: l.kind,
-                            resets_at: l.resets_at.clone(),
-                        });
-                    }
-                    None => a.limit_reported = false,
-                    _ => {}
+            } else if let Some(shown) = a.shown_prompt.take() {
+                // The prompt is gone. If a decision was still pending, it was answered here at the terminal.
+                if let Some(d) = a.deciding.take() {
+                    out.push(NodeFrame::AgentPermissionDone {
+                        agent_id: id.to_string(),
+                        perm_id: d.perm_id,
+                    });
                 }
-                // Harness commands typed by a person (the raw queue) go first, one at a time, exactly as written.
-                if a.inflight.is_none()
-                    && state.prompt.is_none()
-                    && let Some(text) = a.raw.front().cloned()
-                    && a.proc.inject(&text, now).is_ok()
+                let _ = shown;
+            }
+            let status = status_of(&state);
+            if status != a.status {
+                a.log.event(now, "status", &format!("{status:?}"));
+                a.status = status;
+                out.push(NodeFrame::AgentStatus {
+                    agent_id: id.to_string(),
+                    status,
+                    detail: None,
+                });
+            }
+            match &state.limit {
+                Some(l) if !a.limit_reported => {
+                    a.limit_reported = true;
+                    out.push(NodeFrame::AgentLimit {
+                        agent_id: id.to_string(),
+                        kind: l.kind,
+                        resets_at: l.resets_at.clone(),
+                    });
+                }
+                None => a.limit_reported = false,
+                _ => {}
+            }
+            // Harness commands typed by a person (the raw queue) go first, one at a time, exactly as written.
+            if a.inflight.is_none()
+                && state.prompt.is_none()
+                && let Some(text) = a.raw.front().cloned()
+                && a.proc.inject(&text, now).is_ok()
+            {
+                a.log.event(now, "raw", &text);
+                a.raw.pop_front();
+            }
+            // Paste what is waiting, as one input, when it is safe.
+            if !a.held
+                && a.inflight.is_none()
+                && !a.queue.is_empty()
+                && state.limit.is_none()
+                && state.prompt.is_none()
+            {
+                let text = format_deliveries(&a.queue);
+                let before = a.proc.screen_hash();
+                if a.proc.inject(&text, now).is_ok() {
+                    a.log.event(now, "delivered", &text);
+                    let ids: Vec<String> = a.queue.drain(..).filter_map(|d| d.msg_id).collect();
+                    a.inflight = Some(Inflight {
+                        ids,
+                        since: now,
+                        screen_before: before,
+                    });
+                }
+            }
+            // The agent counts as having taken a message up once its screen changes, or after a short wait.
+            if let Some(f) = &a.inflight {
+                let changed = a.proc.screen_hash() != f.screen_before;
+                if changed && now - f.since > 300
+                    || now - f.since > self.opts.accept_after.as_millis() as i64
                 {
-                    a.log.event(now, "raw", &text);
-                    a.raw.pop_front();
-                }
-                // Paste what is waiting, as one input, when it is safe.
-                if !a.held
-                    && a.inflight.is_none()
-                    && !a.queue.is_empty()
-                    && state.limit.is_none()
-                    && state.prompt.is_none()
-                {
-                    let text = format_deliveries(&a.queue);
-                    let before = a.proc.screen_hash();
-                    if a.proc.inject(&text, now).is_ok() {
-                        a.log.event(now, "delivered", &text);
-                        let ids: Vec<String> = a.queue.drain(..).filter_map(|d| d.msg_id).collect();
-                        a.inflight = Some(Inflight {
-                            ids,
-                            since: now,
-                            screen_before: before,
+                    let f = a.inflight.take().expect("checked above");
+                    if !f.ids.is_empty() {
+                        a.log.event(now, "accepted", &f.ids.join(","));
+                        out.push(NodeFrame::AgentAccepted {
+                            agent_id: id.to_string(),
+                            msg_ids: f.ids,
                         });
-                    }
-                }
-                // The agent counts as having taken a message up once its screen changes, or after a short wait.
-                if let Some(f) = &a.inflight {
-                    let changed = a.proc.screen_hash() != f.screen_before;
-                    if changed && now - f.since > 300
-                        || now - f.since > self.opts.accept_after.as_millis() as i64
-                    {
-                        let f = a.inflight.take().expect("checked above");
-                        if !f.ids.is_empty() {
-                            a.log.event(now, "accepted", &f.ids.join(","));
-                            out.push(NodeFrame::AgentAccepted {
-                                agent_id: id.clone(),
-                                msg_ids: f.ids,
-                            });
-                        }
                     }
                 }
             }
-            for f in out {
-                self.link.send(f).await;
-            }
+        }
+        for f in out {
+            self.link.send(f).await;
         }
     }
 
@@ -1191,6 +1248,9 @@ impl State {
                 self.agents.len()
             ));
         }
+        if !std::path::Path::new(&cwd).is_dir() {
+            return Resp::err(format!("{cwd} is not a folder on this machine"));
+        }
         // Remember the folder, so the hub can start more agents for this project here later.
         let origin = PathBuf::from(&cwd);
         self.folders.insert(project.clone(), origin.clone());
@@ -1251,8 +1311,15 @@ impl State {
                 "CLAUDECORD_HOME".to_string(),
                 self.dir.to_string_lossy().into_owned(),
             ),
-            ("PATH".to_string(), path),
+            ("PATH".to_string(), path.clone()),
         ];
+        // Better to say so now than to start a terminal that shows "command not found" and ends.
+        if !find_program(&argv[0], &path) {
+            return Resp::err(format!(
+                "{} was not found on this machine. Install it, or put its folder on the PATH of the machine running claudecord",
+                argv[0]
+            ));
+        }
         let spawn = Spawn {
             name: &agent_id,
             argv: &argv,
@@ -1315,6 +1382,7 @@ impl State {
                 shown_prompt: None,
                 deciding: None,
                 limit_reported: false,
+                faults: 0,
                 files: HashMap::new(),
             },
         );

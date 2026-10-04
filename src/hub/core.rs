@@ -43,6 +43,10 @@ pub(super) struct Queued {
 /// How long informing-only items may wait for a reason to wake the agent before they are delivered anyway.
 pub const RIDE_MAX_MS: i64 = 2 * 60_000;
 
+/// Most agents one project may have. A bug or a hostile device registering agents without end would otherwise grow the hub's memory,
+/// the chat's channel and every status refresh without limit.
+pub const MAX_AGENTS_PER_PROJECT: usize = 500;
+
 /// A delivery that has been sent and not yet accepted, kept to confirm acceptance and measure how long it took.
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Pending {
@@ -145,6 +149,19 @@ impl HubCore {
     pub fn projects(&self) -> Vec<String> {
         let mut v: Vec<String> = self.by_project.keys().cloned().collect();
         v.sort();
+        v
+    }
+
+    /// The projects that have agents on this machine, for telling their chats when something goes wrong with it.
+    pub fn projects_of_node(&self, node: &str) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .agents
+            .values()
+            .filter(|a| a.node_name == node)
+            .map(|a| a.project.clone())
+            .collect();
+        v.sort();
+        v.dedup();
         v
     }
 
@@ -437,6 +454,30 @@ impl HubCore {
                     frame: HubFrame::Error { message },
                 });
             }
+            return;
+        }
+        if !self.agents.contains_key(&spec.agent_id)
+            && self.agents_of_project(&spec.project).len() >= MAX_AGENTS_PER_PROJECT
+        {
+            if let Some(&conn) = self.conns.get(node) {
+                fx.push(Effect::Send {
+                    conn,
+                    frame: HubFrame::Error {
+                        message: format!(
+                            "project {} already has {MAX_AGENTS_PER_PROJECT} agents, which is the limit",
+                            spec.project
+                        ),
+                    },
+                });
+            }
+            Self::notice(
+                &spec.project,
+                format!(
+                    "An agent was refused: the project is at its limit of {MAX_AGENTS_PER_PROJECT} agents."
+                ),
+                false,
+                fx,
+            );
             return;
         }
         fx.push(Effect::Chat(Chat::EnsureProject(spec.project.clone())));

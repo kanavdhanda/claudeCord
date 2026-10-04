@@ -137,8 +137,13 @@ secrets, and a panic anywhere is logged with where it happened.
 
 What each part does when something goes wrong: a bug while handling one device's frame, one command or one terminal costs only that step,
 is logged, and the hub or daemon carries on; the Discord bridge restarts itself if it panics, and keeps retrying if Discord is down at start-up;
-a device that misbehaves or stops reading is cut off with the reason in the log, and nobody else notices; a normal stop (Ctrl-C, or SIGTERM from
+a bug caught inside the hub is reported to the affected projects' chats (owner pinged) before anything else; each agent on a machine is looked at on its own, so one agent's fault is reported and the others carry on, and one that keeps failing is stopped and reported; a device that misbehaves or stops reading is cut off with the reason in the log, and nobody else notices; a normal stop (Ctrl-C, or SIGTERM from
 `systemctl stop` or Docker) saves everything and is recorded as a stop, while a kill is counted as downtime from the last heartbeat.
+
+Failures are also prevented where they can be: the hub checks before serving that its data folder is writable and its database is sound
+(and says what to do if not), explains a port already in use, warns if the process may open too few files, refuses devices past a limit
+instead of running out of file handles, caps agents per project, and logs when its core stops answering. A machine refuses an agent whose
+program is not installed or whose folder is gone, immediately and with the reason.
 
 ## Is it up?
 

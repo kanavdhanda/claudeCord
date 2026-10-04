@@ -247,3 +247,98 @@ fn history_written_while_old_rows_are_moved_out_is_neither_lost_nor_doubled() {
     texts.dedup();
     assert_eq!(texts.len(), 4 * 25 * 5, "no row twice");
 }
+
+#[test]
+fn a_project_cannot_have_more_than_its_limit_of_agents_and_the_ones_it_has_are_untouched() {
+    use claudecord::hub::{Chat, Effect, HubCore, MAX_AGENTS_PER_PROJECT};
+    use claudecord::protocol::{AdapterId, AgentSpec, NodeFrame};
+    let mut c = HubCore::default();
+    let register = |c: &mut HubCore, name: &str| {
+        c.on_node_frame(
+            "mac",
+            NodeFrame::AgentRegister {
+                agent: AgentSpec {
+                    agent_id: format!("demo/{name}"),
+                    name: name.into(),
+                    project: "demo".into(),
+                    adapter: AdapterId::Claude,
+                    model: None,
+                    role: None,
+                },
+                cwd: "/x".into(),
+            },
+            0,
+        )
+    };
+    for i in 0..MAX_AGENTS_PER_PROJECT {
+        register(&mut c, &format!("a{i}"));
+    }
+    assert_eq!(c.agents_of_project("demo").len(), MAX_AGENTS_PER_PROJECT);
+    let fx = register(&mut c, "one-too-many");
+    assert_eq!(
+        c.agents_of_project("demo").len(),
+        MAX_AGENTS_PER_PROJECT,
+        "the extra agent was refused"
+    );
+    assert!(c.agent("demo/one-too-many").is_none());
+    assert!(
+        fx.iter().any(
+            |e| matches!(e, Effect::Chat(Chat::Notice { text, .. }) if text.contains("limit"))
+        ),
+        "the chat is told why"
+    );
+    // An agent that is already there registering again (a restart) is not counted twice and not refused.
+    register(&mut c, "a0");
+    assert_eq!(c.agents_of_project("demo").len(), MAX_AGENTS_PER_PROJECT);
+}
+
+#[test]
+fn a_damaged_database_is_found_by_the_integrity_check_and_a_sound_one_passes() {
+    let dir = std::env::temp_dir().join(format!("cc-edge-integrity-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("hub.db");
+    let mut store = Store::open(&path, None).unwrap();
+    let rows: Vec<_> = (0..2000)
+        .map(|i| HistoryRow {
+            id: 0,
+            at: i,
+            project: "p".into(),
+            thread: None,
+            from: "w".into(),
+            kind: "say".into(),
+            text: format!("row {i} {}", "x".repeat(200)),
+        })
+        .collect();
+    store.append(&rows).unwrap();
+    assert!(store.integrity().is_ok());
+    drop(store);
+    // Overwrite a page in the middle of the file with junk.
+    let mut bytes = std::fs::read(&path).unwrap();
+    assert!(bytes.len() > 20_000);
+    for b in &mut bytes[8_192..12_288] {
+        *b = 0xA5;
+    }
+    std::fs::write(&path, &bytes).unwrap();
+    // Damage is noticed either by refusing to open the file or by the check, and either way a person is told.
+    let noticed = match Store::open(&path, None) {
+        Err(_) => true,
+        Ok(s) => s.integrity().is_err(),
+    };
+    assert!(noticed, "damage went unnoticed");
+}
+
+#[tokio::test]
+async fn a_step_that_panics_is_reported_as_none_and_the_next_step_still_runs() {
+    use claudecord::task::guarded;
+    let first: Option<u32> = guarded("a step that fails", async {
+        if true {
+            panic!("on purpose")
+        }
+        1
+    })
+    .await;
+    assert_eq!(first, None);
+    let second = guarded("the next step", async { 2 }).await;
+    assert_eq!(second, Some(2));
+}

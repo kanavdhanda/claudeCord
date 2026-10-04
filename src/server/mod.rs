@@ -57,6 +57,8 @@ pub struct Config {
     pub backup_every: Option<Duration>,
     /// "Sign in with Discord" for the dashboard. None leaves only dashboard tokens.
     pub oauth: Option<Oauth>,
+    /// Most device connections at once. More are refused with "try later" instead of running the hub out of file handles.
+    pub max_devices: usize,
     /// Whether a Discord bridge is run with this hub, so readiness includes it.
     pub discord_expected: bool,
     /// The availability target the dashboard measures the error budget against.
@@ -87,6 +89,7 @@ impl Default for Config {
             hot_window: Duration::from_secs(14 * 24 * 3600),
             backup_every: Some(Duration::from_secs(6 * 3600)),
             oauth: None,
+            max_devices: 20_000,
             discord_expected: false,
             uptime_target: 0.999,
         }
@@ -236,6 +239,8 @@ pub(crate) struct AppState {
     pub(crate) failures: Arc<Mutex<FailureLimiter>>,
     cfg: Config,
     next_conn: Arc<std::sync::atomic::AtomicU64>,
+    /// Device connections open right now, for the cap.
+    open: Arc<std::sync::atomic::AtomicUsize>,
     /// Dashboard sign-ins by session id (see `login`).
     pub(crate) sessions: login::Sessions,
 }
@@ -269,6 +274,7 @@ pub async fn start(cfg: Config, core: HubCore, store: Store) -> std::io::Result<
         failures: Arc::new(Mutex::new(FailureLimiter::new(10, 60_000.0))),
         cfg,
         next_conn: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        open: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         sessions: Arc::new(Mutex::new(HashMap::new())),
     };
     let app = Router::new()
@@ -287,6 +293,9 @@ pub async fn start(cfg: Config, core: HubCore, store: Store) -> std::io::Result<
         .route("/auth/me", get(login::me))
         .route("/auth/logout", axum::routing::post(login::logout))
         .with_state(state);
+    watchdog(HubHandle {
+        to_actor: to_actor.clone(),
+    });
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
     let server = tokio::spawn(async move {
         let _ = axum::serve(
@@ -353,6 +362,16 @@ async fn connect(
         st.failures.locked().fail(&ip, now);
         return StatusCode::UNAUTHORIZED.into_response();
     };
+    // Past the cap a device is told to try later, rather than the hub running out of file handles and failing for everyone.
+    let slot = OpenSlot::take(&st.open, st.cfg.max_devices);
+    let Some(slot) = slot else {
+        crate::warn!(
+            "hub",
+            "refused {node} from {ip}: already at the limit of {} device connections",
+            st.cfg.max_devices
+        );
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
     let conn = st
         .next_conn
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -360,8 +379,60 @@ async fn connect(
     let to_actor = st.to_actor.clone();
     ws.max_message_size(cfg.max_frame)
         .max_frame_size(cfg.max_frame)
-        .on_upgrade(move |socket| session::run(socket, node, conn, to_actor, cfg))
+        .on_upgrade(move |socket| async move {
+            let _slot = slot;
+            session::run(socket, node, conn, to_actor, cfg).await
+        })
         .into_response()
+}
+
+/// One of the hub's device connection places; given back when dropped.
+struct OpenSlot(Arc<std::sync::atomic::AtomicUsize>);
+
+impl OpenSlot {
+    fn take(open: &Arc<std::sync::atomic::AtomicUsize>, max: usize) -> Option<Self> {
+        use std::sync::atomic::Ordering::SeqCst;
+        open.try_update(SeqCst, SeqCst, |n| (n < max).then_some(n + 1))
+            .ok()?;
+        Some(Self(open.clone()))
+    }
+}
+
+impl Drop for OpenSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Asks the hub's core a trivial question every few seconds and says so in the log when it does not answer in time, because a stuck
+/// core looks from outside like every device quietly going silent. Ends when the hub does.
+fn watchdog(handle: HubHandle) {
+    tokio::spawn(async move {
+        let mut stuck = false;
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            match tokio::time::timeout(Duration::from_secs(5), handle.call(|_, _| ((), vec![])))
+                .await
+            {
+                Ok(Some(())) => {
+                    if stuck {
+                        crate::info!("hub", "the core answers again");
+                    }
+                    stuck = false;
+                }
+                Ok(None) => return,
+                Err(_) => {
+                    if !stuck {
+                        crate::error!(
+                            "hub",
+                            "the core has not answered for 5 seconds; it may be stuck (see /readyz)"
+                        );
+                    }
+                    stuck = true;
+                }
+            }
+        }
+    });
 }
 
 pub(crate) use crate::now_ms;
