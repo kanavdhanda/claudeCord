@@ -22,7 +22,7 @@ jobs:
           set +e
           python3 scripts/tests_gate.py "origin/${{ github.base_ref }}" > verdict.md
           echo "status=$?" >> "$GITHUB_OUTPUT"
-      - uses: actions/github-script@v7
+      - uses: actions/github-script@v9
         with:
           script: |
             const body = '<!-- tests-gate -->\n' + require('fs').readFileSync('verdict.md', 'utf8');
