@@ -14,6 +14,7 @@ export interface AgentEvents {
 }
 
 const TICK_MS = 800;
+const debug = (m: string) => process.env.CLAUDECORD_DEBUG && console.log(`[debug] ${m}`);
 const INJECT_COOLDOWN_MS = 2500;
 
 export class AgentRuntime {
@@ -30,6 +31,7 @@ export class AgentRuntime {
   private ticking = false;
   private stopped = false;
   private promptSeq = 0;
+  private lastSig = "";
   private awaiting?: { ids: string[]; snippet: string };
 
   constructor(
@@ -135,6 +137,11 @@ export class AgentRuntime {
       }
       const screen = await tmux.capture(this.paneId);
       const st = this.adapter.detect(screen);
+      const sig = `${st.ready}/${st.busy}/${!!st.prompt}/${!!st.limit}/q${this.queue.length}/h${this.held}/a${this.blockingAsks}`;
+      if (sig !== this.lastSig) {
+        this.lastSig = sig;
+        debug(`${this.spec.name} ready/busy/prompt/limit/queue/held/asks = ${sig}`);
+      }
 
       if (st.prompt) {
         if (!this.sawReady) {
@@ -194,6 +201,7 @@ export class AgentRuntime {
         const ids = batch.map((b) => b.msgId).filter((x): x is string => !!x);
         const last = batch[batch.length - 1]!;
         this.awaiting = { ids: [...(this.awaiting?.ids ?? []), ...ids], snippet: last.text.replace(/\s+/g, " ").slice(0, 24) };
+        debug(`${this.spec.name} injecting ${batch.length} message(s)`);
         await tmux.pasteAndSubmit(this.paneId, formatDeliveries(batch));
         this.emitStatus("thinking");
       }

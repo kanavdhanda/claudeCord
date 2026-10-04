@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.js",
-  "bin": { "claudecord-hub": "dist/index.js" },
+  "bin": {
+    "claudecord-hub": "dist/index.js"
+  },
   "scripts": {
     "build": "tsc -b",
     "dev": "tsx src/index.ts",
@@ -12,7 +14,10 @@
   "dependencies": {
     "@claudecord/protocol": "workspace:*",
     "discord.js": "^14.16.0",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "zod": "^3.23.0"
   },
-  "devDependencies": { "@types/ws": "^8.5.0" }
+  "devDependencies": {
+    "@types/ws": "^8.5.0"
+  }
 }

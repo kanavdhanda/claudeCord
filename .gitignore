@@ -5,3 +5,7 @@ dist
 *.db
 .claudecord.json
 packages/hub/bench/k6/tokens.json
+.tsc
+hub.json
+.claudecord/
+coverage/

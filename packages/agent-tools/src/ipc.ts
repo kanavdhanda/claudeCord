@@ -14,7 +14,8 @@ export type ControlRequest =
   | { op: "ping" }
   | { op: "up"; cwd: string; project: string; name?: string; adapter?: string; model?: string; role?: string }
   | { op: "down"; agent?: string; project?: string }
-  | { op: "ls" };
+  | { op: "ls" }
+  | { op: "shutdown" };
 
 export type DaemonRequest = AgentRequest | ControlRequest;
 export type DaemonResponse = { ok: true; data?: unknown } | { ok: false; error: string };

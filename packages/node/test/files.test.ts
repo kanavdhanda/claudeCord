@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FileReceiver, readChunks, resolveInside, safeName } from "../src/files.js";
+import { FileReceiver, isSensitivePath, readChunks, resolveInside, safeName } from "../src/files.js";
 
 let root: string;
 let outside: string;
@@ -26,7 +26,7 @@ describe("path safety", () => {
     expect(() => resolveInside(root, join(outside, "secret"))).toThrow(/outside/);
   });
 
-  it("refuses a symlink that points out of the project", () => {
+  it.skipIf(process.platform === "win32")("refuses a symlink that points out of the project", () => {
     writeFileSync(join(outside, "secret"), "s");
     symlinkSync(join(outside, "secret"), join(root, "link"));
     expect(() => resolveInside(root, "link")).toThrow(/outside/);
@@ -36,6 +36,31 @@ describe("path safety", () => {
     expect(safeName("../../etc/passwd")).toBe("passwd");
     expect(safeName(".bashrc")).toBe("_bashrc");
     expect(safeName("a:b*c.txt")).toBe("a_b_c.txt");
+  });
+});
+
+describe("sensitive files", () => {
+  it.each([
+    ".env", ".env.production", ".env.local", "config/.env", "id_rsa", "id_ed25519", "deploy.pem", "server.key",
+    "keystore.jks", ".npmrc", ".netrc", ".git-credentials", "credentials.json", "secrets.yaml", "terraform.tfvars",
+    "terraform.tfstate", "service-account-prod.json", ".ssh/config", "home/.aws/credentials", "x/.gnupg/pubring.kbx",
+  ])("treats %s as sensitive", (p) => {
+    expect(isSensitivePath(p)).toBe(true);
+  });
+
+  it.each(["src/index.ts", "README.md", "environment.md", "envelope.ts", "docs/keyboard.md", "notes.txt", ".claudecord/inbox/data.csv"])(
+    "allows %s",
+    (p) => {
+      expect(isSensitivePath(p)).toBe(false);
+    },
+  );
+
+  it("refuses to resolve a credential file inside the project", () => {
+    writeFileSync(join(root, ".env"), "API_KEY=abc");
+    expect(() => resolveInside(root, ".env")).toThrow(/credential/);
+    mkdirSync(join(root, ".ssh"));
+    writeFileSync(join(root, ".ssh", "config"), "x");
+    expect(() => resolveInside(root, ".ssh/config")).toThrow(/credential/);
   });
 });
 
@@ -99,5 +124,49 @@ describe("chunked round trip", () => {
     await expect(async () => {
       for await (const _ of readChunks(src, 50)) void _;
     }).rejects.toThrow(/limit/);
+  });
+
+  it("refuses to send a file that contains a secret, whatever it is called", async () => {
+    const send = async (name: string, content: string) => {
+      writeFileSync(join(root, name), content);
+      for await (const _ of readChunks(join(root, name))) void _;
+    };
+    await expect(send("notes.md", "deploy key:\n-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----")).rejects.toThrow(/private key/);
+    await expect(send("readme.txt", "token ghp_" + "a".repeat(36))).rejects.toThrow(/github token/);
+  });
+
+  it("refuses an environment file renamed to something harmless", async () => {
+    writeFileSync(join(root, "meeting-notes.md"), "DATABASE_PASSWORD=hunter2hunter2\nSTRIPE_SECRET_KEY=abcdefghijklmnop\nPORT=3000\n");
+    await expect(async () => {
+      for await (const _ of readChunks(join(root, "meeting-notes.md"))) void _;
+    }).rejects.toThrow(/environment variable dump/);
+  });
+
+  it("still sends ordinary files, including ones that mention tokens in prose", async () => {
+    writeFileSync(join(root, "design.md"), "The tokenizer splits text. Rotate the API key monthly via the dashboard.");
+    const chunks: string[] = [];
+    for await (const c of readChunks(join(root, "design.md"))) chunks.push(c.data);
+    expect(chunks.length).toBe(1);
+  });
+
+  it("limits how many transfers can be open at once", async () => {
+    const recv = new FileReceiver();
+    const open = (id: string) => recv.receive(root, { transferId: id, name: id, seq: 0, last: false, data: "QQ==" });
+    for (let i = 0; i < 8; i++) await open(`t${i}`);
+    await open("t9");
+    // The ninth was refused, so finishing it produces nothing and writes no file.
+    const done = await recv.receive(root, { transferId: "t9", name: "t9", seq: 1, last: true, data: "QQ==" });
+    expect(done).toBeUndefined();
+  });
+
+  it("creates received files private to the user", async () => {
+    if (process.platform === "win32") return;
+    const src = join(root, "a.txt");
+    writeFileSync(src, "x");
+    const recv = new FileReceiver();
+    let result;
+    for await (const c of readChunks(src)) result = await recv.receive(root, c);
+    const mode = (await import("node:fs")).statSync(result!.path).mode & 0o777;
+    expect(mode & 0o077).toBe(0);
   });
 });

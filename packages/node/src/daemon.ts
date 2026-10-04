@@ -1,5 +1,5 @@
-import { createServer, type Socket } from "node:net";
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { createServer, type Server, type Socket } from "node:net";
+import { chmodSync, existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
@@ -10,6 +10,8 @@ import {
   encode,
   parseHubFrame,
   AdapterId,
+  AgentSpec as AgentSpecSchema,
+  redact,
   type AgentSpec,
   type HubFrame,
   type NodeFrame,
@@ -17,6 +19,7 @@ import {
 import { getAdapter } from "./adapters/index.js";
 import { AgentRuntime } from "./agent.js";
 import {
+  ensureMeshDir,
   loadNodeConfig,
   loadProjectConfig,
   loadProjectDirs,
@@ -24,6 +27,7 @@ import {
   type NodeConfig,
   type Policy,
 } from "./config.js";
+import { secretEnvNames } from "./env.js";
 import { FileReceiver, readChunks, resolveInside } from "./files.js";
 import { buildRules } from "./rules.js";
 import * as tmux from "./tmux.js";
@@ -58,16 +62,30 @@ export class Daemon {
   private askSeq = 0;
   private backoff = 1000;
   private closing = false;
+  private server?: Server;
   private files = new FileReceiver();
   private chain: Promise<void> = Promise.resolve();
 
-  constructor() {
+  /** `handleSignals: false` is for tests, where the process must not exit on SIGINT or SIGTERM. */
+  constructor(private opts: { handleSignals?: boolean } = {}) {
     this.cfg = loadNodeConfig();
   }
 
+  /** Stops every agent, drops the hub link and closes the local socket. */
+  async close(): Promise<void> {
+    this.closing = true;
+    for (const a of [...this.agents.values()]) await this.stopAgent(a.spec.agentId);
+    this.ws?.close();
+    await new Promise<void>((r) => (this.server ? this.server.close(() => r()) : r()));
+    try { unlinkSync(sockPath()); } catch { /* already gone */ }
+  }
+
   async start(): Promise<void> {
-    if (!(await tmux.hasTmux())) throw new Error("tmux is required but was not found on PATH.");
-    mkdirSync(meshDir(), { recursive: true });
+    if (process.platform === "win32") {
+      throw new Error("The node daemon needs tmux, which is not available on native Windows. Run it inside WSL2.");
+    }
+    if (!(await tmux.hasTmux())) throw new Error("tmux is required but was not found on PATH. Install it with brew or apt.");
+    ensureMeshDir();
     this.listen();
     this.connect();
     console.log(`claudecord node "${this.cfg.nodeName}" started`);
@@ -145,7 +163,8 @@ export class Daemon {
         return;
       }
       case "spawn": {
-        const dir = f.cwd ?? loadProjectDirs()[f.agent.project];
+        // Only folders this device registered itself. The hub never gets to choose a directory.
+        const dir = loadProjectDirs()[f.agent.project];
         if (!dir) {
           this.send({ t: "agent.say", agentId: f.agent.agentId, text: `No directory known for project ${f.agent.project} on this device.` });
           return;
@@ -184,6 +203,8 @@ export class Daemon {
       model: o.model ?? pc?.model ?? this.cfg.model,
       role: o.role ?? pc?.role ?? this.cfg.role,
     };
+    const checked = AgentSpecSchema.safeParse(spec);
+    if (!checked.success) throw new Error(`invalid agent: ${checked.error.issues.map((i) => `${i.path.join(".") || "spec"} ${i.message}`).join("; ")}`);
     if (this.agents.has(spec.agentId)) throw new Error(`agent ${name} already running`);
     const policy = o.policy ?? pc?.policy ?? this.cfg.policy;
 
@@ -210,11 +231,17 @@ export class Daemon {
     }
 
     const argv = adapter.argv({ spec, policy, rules, mcpConfigPath });
+    // Agents do not inherit credentials from this shell. Includes variables the tmux server already carries.
+    const scrub = (this.cfg.envPolicy ?? "scrub") === "scrub";
+    const unset = scrub
+      ? [...new Set([...secretEnvNames(process.env, adapterId), ...secretEnvNames(Object.fromEntries((await tmux.serverEnvNames()).map((n) => [n, process.env[n] ?? "x"])), adapterId)])]
+      : [];
     const paneId = await tmux.openPane({
       session: `claude-${o.project}`,
       cwd,
       title: `${name} (${adapterId})`,
       argv,
+      unset,
       env: { CLAUDECORD_AGENT_ID: spec.agentId, CLAUDECORD_SOCK: sockPath() },
     });
 
@@ -257,7 +284,12 @@ export class Daemon {
     const p = sockPath();
     if (existsSync(p)) unlinkSync(p);
     const server = createServer((sock) => this.onSocket(sock));
-    server.listen(p);
+    this.server = server;
+    // The socket can start agents and send files, so only this user may connect.
+    server.listen(p, () => {
+      if (process.platform !== "win32") chmodSync(p, 0o600);
+    });
+    if (this.opts.handleSignals === false) return;
     const cleanup = () => {
       this.closing = true;
       try { unlinkSync(p); } catch { /* already gone */ }
@@ -294,6 +326,11 @@ export class Daemon {
     switch (req.op) {
       case "ping":
         return { ok: true, data: { node: this.cfg.nodeName, agents: this.agents.size } };
+      case "shutdown": {
+        for (const a of [...this.agents.values()]) await this.stopAgent(a.spec.agentId);
+        setTimeout(() => process.kill(process.pid, "SIGTERM"), 100);
+        return { ok: true };
+      }
       case "ls":
         return {
           ok: true,
@@ -321,19 +358,19 @@ export class Daemon {
         rt.noteActivity();
         const frame: NodeFrame =
           req.op === "assign"
-            ? { t: "agent.assign", agentId: req.agentId, to: req.to, task: req.task, thread: req.thread }
-            : { t: "agent.taskdone", agentId: req.agentId, taskId: req.taskId, summary: req.summary };
+            ? { t: "agent.assign", agentId: req.agentId, to: req.to, task: redact(req.task).text, thread: req.thread }
+            : { t: "agent.taskdone", agentId: req.agentId, taskId: req.taskId, summary: redact(req.summary).text };
         return this.send(frame) ? { ok: true, data: req.op === "assign" ? "assignment sent" : "marked done" } : { ok: false, error: "hub offline" };
       }
       case "say":
         if (!this.agents.has(req.agentId)) return { ok: false, error: "unknown agent" };
         this.agents.get(req.agentId)!.noteActivity();
-        return this.send({ t: "agent.say", agentId: req.agentId, text: req.text, thread: req.thread })
+        return this.send({ t: "agent.say", agentId: req.agentId, text: redact(req.text).text, thread: req.thread })
           ? { ok: true }
           : { ok: false, error: "hub offline" };
       case "report":
         if (!this.agents.has(req.agentId)) return { ok: false, error: "unknown agent" };
-        return this.send({ t: "agent.report", agentId: req.agentId, title: req.title, summary: req.summary, artifacts: req.artifacts })
+        return this.send({ t: "agent.report", agentId: req.agentId, title: redact(req.title).text, summary: redact(req.summary).text, artifacts: req.artifacts })
           ? { ok: true }
           : { ok: false, error: "hub offline" };
       case "send": {
@@ -354,7 +391,7 @@ export class Daemon {
         if (!rt) return { ok: false, error: "unknown agent" };
         const askId = `${req.agentId}#a${++this.askSeq}`;
         const sent = this.send({
-          t: "agent.ask", agentId: req.agentId, askId, question: req.question, options: req.options, thread: req.thread,
+          t: "agent.ask", agentId: req.agentId, askId, question: redact(req.question).text, options: req.options, thread: req.thread,
         });
         if (!sent) return { ok: false, error: "hub offline" };
         rt.noteActivity();
