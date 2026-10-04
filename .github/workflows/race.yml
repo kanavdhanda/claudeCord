@@ -34,11 +34,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rust-src
+      # Only the concurrency tests that do not depend on timing run here: under the sanitizer everything is 10 to 20 times slower, which makes
+      # timeouts in the socket tests fail for no reason that matters.
       # ThreadSanitizer cannot see through tokio and the bundled SQLite, so it reports races inside them. The filter fails the job only if a
       # racing access is in claudeCord's own code, or a test fails (see scripts/tsan_filter.py).
       - run: |
           set +e
-          cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --test it -- races:: server:: hub:: discord_bridge:: uptime:: web_login:: 2>&1 | tee tsan.log
+          cargo test -Zbuild-std --target x86_64-unknown-linux-gnu --test it -- races:: durability:: edge:: tiering:: hub:: 2>&1 | tee tsan.log
           python3 scripts/tsan_filter.py tsan.log
         env:
           RUSTFLAGS: -Zsanitizer=thread
