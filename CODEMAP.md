@@ -141,7 +141,10 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | File | What it is |
 |---|---|
 | `src/lib.rs` | claudeCord: run coding agents on any machine and manage them from a chat. |
+| `src/log.rs` | Logging: one line per event, `2026-10-04 14:05:09 UTC INFO  hub: message`, to stderr and, once a file is set, to a size-capped file as well. |
 | `src/main.rs` | The `claudecord` program. |
+| `src/sync.rs` | A lock that survives a panic elsewhere. |
+| `src/task.rs` | Keeping long-running work alive: a supervisor that restarts a task if it panics, and the signal that means "stop now". |
 
 ## tests
 
@@ -162,6 +165,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | `tests/it/main.rs` | Every integration test, built as ONE program so the whole tree is compiled and linked once (twenty separate test programs meant twenty links, which is most of the time a CI run spends, above all on Windows). |
 | `tests/it/races.rs` | Races: many things happening at the same moment. |
 | `tests/it/resilience.rs` | Behaviour on difficult machines: ones behind a web proxy, ones that were asleep, ones with no route to the hub. |
+| `tests/it/robust.rs` | The hub as a real program, started and stopped the way an operator does it: a normal stop (SIGTERM, which is what `systemctl stop` and Docker send) saves everything and is recorded as a stop, while a kill is recorded as a crash from the last heartbeat. |
 | `tests/it/server.rs` | The hub over real sockets. |
 | `tests/it/store.rs` | Storage tests: history, saving and restoring the core, crash safety, and rolling old history into compressed files. |
 | `tests/it/token_budget.rs` | Token budget, measured on a scripted chat. |

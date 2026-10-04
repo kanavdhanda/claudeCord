@@ -106,7 +106,7 @@ pub(crate) async fn run(
             _ = backup.tick() => {
                 if backing_up.as_ref().is_none_or(|h| h.is_finished()) && let Some(s) = disk.reader().fork() {
                     backing_up = Some(tokio::task::spawn_blocking(move || {
-                        if let Err(e) = s.backup_to_bucket(now_ms() / 1000) { eprintln!("hub: backup to the bucket failed: {e}"); }
+                        if let Err(e) = s.backup_to_bucket(now_ms() / 1000) { crate::error!("hub", "backup to the bucket failed: {e}"); }
                     }));
                 }
             }
@@ -117,15 +117,24 @@ pub(crate) async fn run(
                 }
             }
         }
-        carry_out(
-            fx,
-            &mut conns,
-            &chat,
-            &mut history,
-            &mut disk,
-            now,
-            cfg.max_out_bytes,
-        );
+        // Doing what the core asked is guarded too: a bug here must cost one batch of effects, never the actor and with it the hub.
+        let carried = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            carry_out(
+                fx,
+                &mut conns,
+                &chat,
+                &mut history,
+                &mut disk,
+                now,
+                cfg.max_out_bytes,
+            );
+        }));
+        if carried.is_err() {
+            crate::error!(
+                "hub",
+                "a panic while carrying out effects; that batch was dropped and the hub carries on"
+            );
+        }
         if !history.is_empty() {
             disk.append(std::mem::take(&mut history));
         }
@@ -157,7 +166,10 @@ fn guard<R>(
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| step(core))) {
         Ok(r) => Some(r),
         Err(_) => {
-            eprintln!("hub: a handler panicked; restoring the core from its last saved state");
+            crate::error!(
+                "hub",
+                "a handler panicked; restoring the core from its last saved state"
+            );
             *core = HubCore::default();
             if let Ok(Some(saved)) = store.load_snapshot() {
                 core.restore(&saved);

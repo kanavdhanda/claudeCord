@@ -18,6 +18,7 @@ use crate::protocol::{
     UsageKind, auto_name,
 };
 use crate::security::env::secret_env_names;
+use crate::sync::Lock;
 use base64::Engine;
 use interprocess::local_socket::tokio::{RecvHalf, SendHalf, Stream as LocalStream};
 use interprocess::local_socket::traits::tokio::{Listener as _, Stream as _};
@@ -224,20 +225,40 @@ pub async fn run(cfg: Config, dir: PathBuf, opts: Options) -> std::io::Result<()
         quit: false,
     };
     let mut tick = tokio::time::interval(opts.tick);
+    let mut stop = Box::pin(crate::task::shutdown_signal());
+    crate::info!(
+        "daemon",
+        "running as {} (terminals: {:?})",
+        cfg.node_name,
+        st.opts.backend.resolved()
+    );
     loop {
+        // Each step is guarded: a bug while handling one frame, request or tick costs that step, never the daemon and with it every
+        // agent it supervises.
         tokio::select! {
             ev = events.recv() => match ev {
                 None => break,
-                Some(LinkEvent::Up) => st.on_up().await,
-                Some(LinkEvent::Down) => st.up = false,
-                Some(LinkEvent::Frame(f)) => st.on_frame(f).await,
+                Some(LinkEvent::Up) => {
+                    crate::info!("daemon", "connected to the hub");
+                    guarded("handling the hub connecting", st.on_up()).await;
+                }
+                Some(LinkEvent::Down) => {
+                    if st.up { crate::warn!("daemon", "lost the connection to the hub; reconnecting"); }
+                    st.up = false;
+                }
+                Some(LinkEvent::Frame(f)) => { guarded("handling a frame from the hub", st.on_frame(f)).await; }
             },
             call = calls.recv() => {
                 let Some((env, reply)) = call else { break };
-                let resp = st.handle(env.req, env.key.as_deref()).await;
+                let resp = guarded("handling a command", st.handle(env.req, env.key.as_deref())).await
+                    .unwrap_or_else(|| Resp::err("the daemon hit an internal error on that command; see its log"));
                 let _ = reply.send(resp);
             }
-            _ = tick.tick() => st.on_tick(crate::now_ms()).await,
+            _ = tick.tick() => { guarded("looking at the terminals", st.on_tick(crate::now_ms())).await; }
+            _ = &mut stop => {
+                crate::info!("daemon", "told to stop; closing the agents");
+                break;
+            }
         }
         if st.quit {
             break;
@@ -248,6 +269,21 @@ pub async fn run(cfg: Config, dir: PathBuf, opts: Options) -> std::io::Result<()
     }
     let _ = std::fs::remove_file(&sock);
     Ok(())
+}
+
+/// Runs one step of the daemon's loop and survives a panic in it: the panic is logged and the step's result is None.
+async fn guarded<T>(what: &str, step: impl std::future::Future<Output = T>) -> Option<T> {
+    use futures_util::FutureExt;
+    match std::panic::AssertUnwindSafe(step).catch_unwind().await {
+        Ok(v) => Some(v),
+        Err(_) => {
+            crate::error!(
+                "daemon",
+                "a panic while {what}; that step was dropped and the daemon carries on"
+            );
+            None
+        }
+    }
 }
 
 /// One local connection: reads a request line, asks the main loop, writes the answer. An attach request turns the
@@ -307,7 +343,7 @@ static ATTACH: std::sync::LazyLock<
 
 /// Takes the terminal the main loop set aside for this attach.
 fn take_proc(agent: &str) -> Option<Arc<super::pty::PtyTerminal>> {
-    ATTACH.lock().expect("lock").remove(agent)
+    ATTACH.locked().remove(agent)
 }
 
 /// Connects a window to a terminal. Screen contents are sent first so the window shows where the agent is, then output
@@ -580,6 +616,10 @@ impl State {
         }
         if a.restarts.len() >= a.restart_budget {
             a.log.event(now, "ended", "the agent's program ended");
+            crate::warn!(
+                "daemon",
+                "{id}: the agent's program ended and is not set to restart"
+            );
             self.stop(id).await;
             return;
         }
@@ -599,6 +639,10 @@ impl State {
                 watch_terminal(&p, &a.log);
                 a.log
                     .event(now, "restarted", "the agent's program was started again");
+                crate::warn!(
+                    "daemon",
+                    "{id}: the agent's program ended; started it again"
+                );
                 a.proc = p;
                 a.restarts.push_back(now);
                 a.status = AgentStatus::Starting;
@@ -627,8 +671,21 @@ impl State {
     /// is safe, and says when a pasted message seems to have been taken up.
     async fn on_tick(&mut self, now: i64) {
         let ids: Vec<String> = self.agents.keys().cloned().collect();
+        // Looking at a tmux session runs the tmux program, which waits for the operating system. All of them are looked at at once on
+        // threads meant for blocking work, so many agents never hold up the daemon's own connections.
+        let looks: Vec<_> = self
+            .agents
+            .values()
+            .filter(|a| matches!(a.proc, Terminal::Tmux(_)))
+            .map(|a| {
+                let t = a.proc.clone();
+                tokio::task::spawn_blocking(move || t.observe(now))
+            })
+            .collect();
+        for look in looks {
+            let _ = look.await;
+        }
         for id in ids {
-            self.agents[&id].proc.observe(now);
             if self.agents[&id].proc.has_exited() {
                 self.revive_or_stop(&id, now).await;
                 continue;
@@ -833,7 +890,7 @@ impl State {
                         data: Some(serde_json::json!({"exec": cmd})),
                     },
                     (None, Some(pty)) => {
-                        ATTACH.lock().expect("lock").insert(agent, pty);
+                        ATTACH.locked().insert(agent, pty);
                         Resp::ok("attached")
                     }
                     _ => Resp::err("this agent has no terminal to attach to"),
@@ -1209,8 +1266,12 @@ impl State {
             super::inject::Guard::with_times(crate::now_ms(), self.opts.quiet.0, self.opts.quiet.1);
         let proc = match Terminal::spawn(&self.opts.backend, &spawn, guard) {
             Ok(p) => p,
-            Err(e) => return Resp::err(format!("could not start {}: {e}", argv[0])),
+            Err(e) => {
+                crate::error!("daemon", "{agent_id}: could not start {}: {e}", argv[0]);
+                return Resp::err(format!("could not start {}: {e}", argv[0]));
+            }
         };
+        crate::info!("daemon", "{agent_id}: started {} in {cwd}", argv[0]);
         let log = AgentLog::new(&self.dir, &agent_id);
         log.prepare();
         watch_terminal(&proc, &log);

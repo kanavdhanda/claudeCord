@@ -44,13 +44,16 @@ pub struct BridgeConfig {
 const CHECK: &str = "\u{2705}";
 const REFUSED: &str = "\u{26D4}";
 
-/// Starts the bridge in the background.
+/// Starts the bridge in the background, supervised: if it panics it is logged and started again, so Discord never quietly stops
+/// while the rest of the hub carries on.
 pub fn spawn(
     handle: HubHandle,
     chat: broadcast::Receiver<Chat>,
     cfg: BridgeConfig,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(run(handle, chat, cfg))
+    crate::task::supervised("discord bridge", move || {
+        run(handle.clone(), chat.resubscribe(), cfg.clone())
+    })
 }
 
 struct Bridge {
@@ -66,14 +69,28 @@ struct Bridge {
 /// The main loop: chat effects out, Discord events in.
 async fn run(handle: HubHandle, mut chat: broadcast::Receiver<Chat>, cfg: BridgeConfig) {
     let Ok(kv) = Store::open(&cfg.db_path, None) else {
-        eprintln!(
-            "discord bridge: cannot open the database at {}",
+        crate::error!(
+            "discord",
+            "cannot open the database at {}",
             cfg.db_path.display()
         );
         return;
     };
     let rest = Rest::new(&cfg.api_base, &cfg.token);
-    let me = rest.me().await.unwrap_or(Value::Null);
+    // Asks Discord who the bot is. If Discord cannot be reached, or refuses the token, say so and keep trying, so a Discord outage at
+    // start-up only delays the bridge instead of leaving it half set up for good.
+    let me = loop {
+        match rest.me().await {
+            Ok(v) => break v,
+            Err(e) => {
+                crate::error!(
+                    "discord",
+                    "cannot reach Discord, or it refused the bot token ({e}); trying again soon"
+                );
+                tokio::time::sleep(cfg.backoff_max.min(Duration::from_secs(30))).await;
+            }
+        }
+    };
     let app_id = me["id"].as_str().unwrap_or("").to_string();
     let owner = me["owner"]["id"]
         .as_str()
@@ -89,7 +106,7 @@ async fn run(handle: HubHandle, mut chat: broadcast::Receiver<Chat>, cfg: Bridge
             .register_commands(&app_id, &cfg.guild, commands::definitions())
             .await
     {
-        eprintln!("discord bridge: could not register slash commands: {e}");
+        crate::error!("discord", "could not register the slash commands: {e}");
     }
     // Down until the gateway says READY, so a bridge that never connects shows as down.
     let _ = kv.uptime_set("discord", crate::uptime::State::Down, crate::now_ms());
@@ -115,7 +132,7 @@ async fn run(handle: HubHandle, mut chat: broadcast::Receiver<Chat>, cfg: Bridge
         tokio::select! {
             c = chat.recv() => match c {
                 Ok(c) => b.outward(c).await,
-                Err(broadcast::error::RecvError::Lagged(n)) => eprintln!("discord bridge: fell behind and skipped {n} chat event(s)"),
+                Err(broadcast::error::RecvError::Lagged(n)) => crate::warn!("discord", "fell behind and skipped {n} chat event(s)"),
                 Err(broadcast::error::RecvError::Closed) => return,
             },
             e = events.recv() => match e {
@@ -279,7 +296,7 @@ impl Bridge {
         }
         .await;
         if let Err(e) = result {
-            eprintln!("discord bridge: {e}");
+            crate::error!("discord", "{e}");
         }
     }
 
@@ -355,8 +372,21 @@ impl Bridge {
             gateway::DISCONNECTED => Some(crate::uptime::State::Down),
             _ => None,
         };
-        if let Some(state) = state {
-            let _ = self.kv.uptime_set("discord", state, crate::now_ms());
+        if let Some(state) = state
+            && self
+                .kv
+                .uptime_set("discord", state, crate::now_ms())
+                .unwrap_or(false)
+        {
+            match state {
+                crate::uptime::State::Up => {
+                    crate::info!("discord", "connected to the Discord gateway")
+                }
+                crate::uptime::State::Down => crate::warn!(
+                    "discord",
+                    "lost the Discord gateway connection; reconnecting"
+                ),
+            }
         }
         match e.name.as_str() {
             "MESSAGE_CREATE" => self.on_message(&e.data).await,

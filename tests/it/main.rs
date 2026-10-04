@@ -16,6 +16,7 @@ mod hub;
 mod logs;
 mod races;
 mod resilience;
+mod robust;
 mod server;
 mod store;
 mod token_budget;

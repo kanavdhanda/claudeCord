@@ -11,6 +11,7 @@
 
 use super::inject::{Guard, Wait};
 use crate::agents::text::strip_control;
+use crate::sync::Lock;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
@@ -155,7 +156,7 @@ impl TmuxTerminal {
 
     /// Looks at the session now (one tmux command), updating what the guard knows. Quiet sessions are looked at less often.
     pub fn observe(&self, now: i64) {
-        let mut seen = self.seen.lock().expect("lock");
+        let mut seen = self.seen.locked();
         if now < seen.next_look {
             return;
         }
@@ -209,7 +210,7 @@ impl TmuxTerminal {
             text.hash(&mut h);
             h.finish()
         };
-        let mut guard = self.guard.lock().expect("lock");
+        let mut guard = self.guard.locked();
         if hash != seen.hash {
             guard.on_output(now);
             seen.interval = BUSY_EVERY;
@@ -227,17 +228,17 @@ impl TmuxTerminal {
 
     /// The screen as of the last look.
     pub fn screen_text(&self) -> String {
-        self.seen.lock().expect("lock").text.clone()
+        self.seen.locked().text.clone()
     }
 
     /// A fingerprint of the screen as of the last look.
     pub fn screen_hash(&self) -> u64 {
-        self.seen.lock().expect("lock").hash
+        self.seen.locked().hash
     }
 
     /// Whether the program ended, as of the last look.
     pub fn has_exited(&self) -> bool {
-        self.seen.lock().expect("lock").dead
+        self.seen.locked().dead
     }
 
     /// Stops the session.
@@ -263,7 +264,7 @@ impl TmuxTerminal {
 
     /// Types keys as a person would: the arrow keys, Enter and Escape by name, everything else as the characters themselves.
     pub fn type_input(&self, bytes: &[u8], now: i64) -> std::io::Result<()> {
-        self.seen.lock().expect("lock").next_look = now;
+        self.seen.locked().next_look = now;
         let mut literal = String::new();
         let flush = |literal: &mut String| -> std::io::Result<()> {
             if !literal.is_empty() {
@@ -311,7 +312,7 @@ impl TmuxTerminal {
     /// control character removed first, so it cannot escape the paste.
     pub fn inject(&self, text: &str, now: i64) -> Result<(), Wait> {
         // tmux cannot say which program is reading the terminal, so the foreground check always passes here.
-        self.guard.lock().expect("lock").check(now, true)?;
+        self.guard.locked().check(now, true)?;
         let clean = strip_control(text);
         let buffer = format!("cc-{}", self.session);
         let loaded = (|| -> std::io::Result<()> {
@@ -342,7 +343,7 @@ impl TmuxTerminal {
             Self::tmux(&self.socket, &["send-keys", "-t", &self.session, "Enter"])?;
             Ok(())
         })();
-        self.seen.lock().expect("lock").next_look = now;
+        self.seen.locked().next_look = now;
         // A failed paste means the session is gone, which the next look will show. The caller just tries again later.
         loaded.map_err(|_| Wait::AgentBusy)
     }

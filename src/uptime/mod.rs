@@ -129,13 +129,22 @@ pub fn recover(store: &Store, now: i64) {
         .flatten()
         .and_then(|v| v.parse::<i64>().ok());
     if let Some(beat) = beat {
+        let mut crashed = false;
         for c in store.uptime_components().unwrap_or_default() {
             if c.starts_with("external:") {
                 continue;
             }
             if store.uptime_last(&c).ok().flatten() == Some(State::Up) {
                 let _ = store.uptime_set(&c, State::Down, beat);
+                crashed = true;
             }
+        }
+        if crashed {
+            crate::warn!(
+                "uptime",
+                "the last run did not stop cleanly; counting it as down from its last heartbeat at {}",
+                iso(beat)
+            );
         }
     }
     let _ = store.uptime_set("hub", State::Up, now);
@@ -151,15 +160,39 @@ pub fn stopped(store: &Store, now: i64) {
     }
 }
 
-/// Writes the heartbeat for as long as the task runs.
-pub fn heartbeat(store: Store) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut every = tokio::time::interval(HEARTBEAT);
-        loop {
-            every.tick().await;
-            let _ = store.kv_set(ALIVE, &crate::now_ms().to_string());
+/// Writes the heartbeat every few seconds from a thread of its own (a database write can wait on the disk, which must never hold up the
+/// async runtime) until it is dropped.
+pub struct Heartbeat {
+    stop: Option<std::sync::mpsc::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+pub fn heartbeat(store: Store) -> Heartbeat {
+    let (stop, rx) = std::sync::mpsc::channel::<()>();
+    let thread = std::thread::Builder::new()
+        .name("hub-heartbeat".into())
+        .spawn(move || {
+            // Waiting on the channel is the sleep: dropping the sender wakes it at once, so stopping never waits out an interval.
+            while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = rx.recv_timeout(HEARTBEAT) {
+                if let Err(e) = store.kv_set(ALIVE, &crate::now_ms().to_string()) {
+                    crate::warn!("uptime", "could not write the heartbeat: {e}");
+                }
+            }
+        })
+        .ok();
+    Heartbeat {
+        stop: Some(stop),
+        thread,
+    }
+}
+
+impl Drop for Heartbeat {
+    fn drop(&mut self) {
+        self.stop.take();
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
         }
-    })
+    }
 }
 
 /// One check from the outside: does `base`/readyz answer 200 within the time? This is what a prober on another machine runs.

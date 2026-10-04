@@ -83,6 +83,8 @@ pub fn login(a: LoginArgs) -> Result<(), String> {
 pub async fn run_daemon() -> Result<(), String> {
     let dir = home_dir();
     let cfg = Config::load(&dir).ok_or("not logged in: run claudecord login first")?;
+    // The daemon logs to the terminal, which `claudecord start` points at daemon.log when it starts the daemon for you.
+    crate::log::init(None);
     daemon::run(cfg, dir, Options::default())
         .await
         .map_err(|e| e.to_string())
@@ -98,7 +100,12 @@ async fn ensure_daemon() -> Result<(), String> {
         return Err("not logged in: run claudecord login first".into());
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let log = std::fs::File::create(dir.join("daemon.log")).map_err(|e| e.to_string())?;
+    // Appended to, so the history of earlier runs is still there when something went wrong.
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("daemon.log"))
+        .map_err(|e| e.to_string())?;
     let mut cmd = Command::new(exe);
     cmd.arg("daemon")
         .stdin(std::process::Stdio::null())

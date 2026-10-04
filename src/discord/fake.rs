@@ -41,6 +41,8 @@ pub struct Fake {
     pub events: broadcast::Sender<String>,
     pub addr: Arc<Mutex<String>>,
     pub kick: broadcast::Sender<()>,
+    /// How many of the next "who am I" calls answer with an error, to stand in for Discord being down when the bridge starts.
+    pub me_failures: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Fake {
@@ -59,9 +61,21 @@ pub async fn start_fake() -> (Fake, String) {
         events,
         addr: Arc::default(),
         kick,
+        me_failures: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
     };
-    async fn me() -> Json<Value> {
-        Json(json!({"id": "app1", "owner": {"id": "1"}}))
+    async fn me(State(f): State<Fake>) -> Result<Json<Value>, axum::http::StatusCode> {
+        let down = f
+            .me_failures
+            .try_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |n| n.checked_sub(1),
+            )
+            .is_ok();
+        if down {
+            return Err(axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        }
+        Ok(Json(json!({"id": "app1", "owner": {"id": "1"}})))
     }
     async fn gw(State(f): State<Fake>) -> Json<Value> {
         Json(json!({"url": format!("ws://{}/gateway", f.addr.lock().unwrap())}))

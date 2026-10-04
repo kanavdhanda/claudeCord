@@ -128,6 +128,18 @@ what is waiting on a person, tasks, and the conversation. Make a token and open 
 A dashboard token opens the page and nothing else, and a machine's token never opens it. The page draws everything as text and
 is served with a strict content policy.
 
+## Logs and what survives what
+
+The hub writes one line per event to the terminal and to `hub.log` in its data folder (kept to about 20 MB in two files; read it with
+`tail -f`, or `journalctl -u claudecord-hub` under systemd). The machine daemon logs to `daemon.log` in `~/.claudecord`, and each agent has
+its own event and terminal logs (`claudecord logs`). Set `CLAUDECORD_LOG=debug` for more, or `error` for less. Every line is scrubbed of
+secrets, and a panic anywhere is logged with where it happened.
+
+What each part does when something goes wrong: a bug while handling one device's frame, one command or one terminal costs only that step,
+is logged, and the hub or daemon carries on; the Discord bridge restarts itself if it panics, and keeps retrying if Discord is down at start-up;
+a device that misbehaves or stops reading is cut off with the reason in the log, and nobody else notices; a normal stop (Ctrl-C, or SIGTERM from
+`systemctl stop` or Docker) saves everything and is recorded as a stop, while a kill is counted as downtime from the last heartbeat.
+
 ## Is it up?
 
 The hub records its own state and the Discord bridge's (a crash counts as down from the last heartbeat), answers `/healthz` (the

@@ -7,6 +7,7 @@
 //! content policy that allows scripts only from the hub itself.
 
 use super::{AppState, Input};
+use crate::sync::Lock;
 use axum::{
     Json,
     extract::{ConnectInfo, Query, State},
@@ -95,7 +96,7 @@ pub(super) async fn authorised(
     }
     let ip = peer.ip().to_string();
     let now = crate::now_ms() as f64;
-    if st.failures.lock().expect("lock").blocked(&ip, now) {
+    if st.failures.locked().blocked(&ip, now) {
         return None;
     }
     let token = headers
@@ -121,7 +122,7 @@ pub(super) async fn authorised(
     if node.as_deref().is_some_and(|n| n.starts_with(WEB_PREFIX)) {
         Some(Who::Everything)
     } else {
-        st.failures.lock().expect("lock").fail(&ip, now);
+        st.failures.locked().fail(&ip, now);
         None
     }
 }
@@ -213,22 +214,26 @@ pub(super) async fn history(
         .unwrap_or(100)
         .clamp(1, 500);
     let thread = q.get("thread").map(String::as_str);
-    let rows = {
-        let guard = st.reader.lock().expect("lock");
+    // The read goes to a thread meant for blocking work, so a big history query never holds up the connections.
+    let reader = st.reader.clone();
+    let (project, thread) = (project.clone(), thread.map(String::from));
+    let (latest, after) = (
+        q.contains_key("latest"),
+        q.get("after").and_then(|a| a.parse().ok()).unwrap_or(0),
+    );
+    let rows = tokio::task::spawn_blocking(move || {
+        let guard = reader.locked();
         guard.as_ref().and_then(|s| {
-            if q.contains_key("latest") {
-                s.history_latest(project, thread, limit).ok()
+            if latest {
+                s.history_latest(&project, thread.as_deref(), limit).ok()
             } else {
-                s.history(
-                    project,
-                    thread,
-                    q.get("after").and_then(|a| a.parse().ok()).unwrap_or(0),
-                    limit,
-                )
-                .ok()
+                s.history(&project, thread.as_deref(), after, limit).ok()
             }
         })
-    }
+    })
+    .await
+    .ok()
+    .flatten()
     .unwrap_or_default();
     let out: Vec<Value> = rows.iter().map(|r| json!({"id": r.id, "at": r.at, "from": r.from, "kind": r.kind, "thread": r.thread, "text": r.text})).collect();
     secure(Json(out).into_response(), "application/json", "no-store")

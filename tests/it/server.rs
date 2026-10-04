@@ -839,3 +839,55 @@ async fn the_dashboard_shows_machines_agents_waiting_questions_tasks_and_the_con
     );
     hub.shutdown().await;
 }
+
+#[tokio::test]
+async fn one_misbehaving_device_never_disturbs_another() {
+    let dir = tmp("badneighbour");
+    let (hub, tokens) = boot(cfg(), &dir.join("t.db"), &["good", "bad"]).await;
+    let mut good = connect(&hub, &tokens[0]).await.unwrap();
+    register(&mut good, "otter").await;
+    wait_for("the good device's agent", async || {
+        hub.call(|c, _| (c.agent("p/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    // The other device does everything wrong at once: binary junk, text that is not JSON, JSON of the wrong shape, an oversized
+    // frame, then it vanishes without a goodbye.
+    let mut bad = connect_deaf(&hub, &tokens[1], None).await;
+    for junk in [
+        Message::Binary(vec![0xff, 0x00, 0xfe, 0x01].into()),
+        Message::Text("{{{{ not json".into()),
+        Message::Text("{\"t\":\"agent.say\"}".into()),
+        Message::Text("\u{0}\u{1b}[31m".into()),
+        Message::Text("x".repeat(300_000).into()),
+    ] {
+        let _ = bad.send(junk).await;
+    }
+    drop(bad);
+    // Whatever the bad one did, the hub is up and the good device still gets its mail.
+    hub.call(|c, now| {
+        let fx = c
+            .human_message(&kd(), "p", "still here?", &MessageOpts::default(), now)
+            .unwrap()
+            .1;
+        ((), fx)
+    })
+    .await;
+    let mut got = false;
+    for _ in 0..40 {
+        if let Some(HubFrame::Deliver { text, .. }) = next_frame(&mut good, 250).await
+            && text.contains("still here?")
+        {
+            got = true;
+            break;
+        }
+    }
+    assert!(got, "the good device kept receiving");
+    assert!(connected(&hub, "good").await);
+    wait_for("the bad device is gone", async || {
+        !connected(&hub, "bad").await
+    })
+    .await;
+    hub.shutdown().await;
+}

@@ -10,11 +10,14 @@ pub mod discord;
 pub mod export;
 pub mod health;
 pub mod hub;
+pub mod log;
 pub mod metrics;
 pub mod protocol;
 pub mod security;
 pub mod server;
 pub mod store;
+pub mod sync;
+pub mod task;
 pub mod uptime;
 
 // Short paths kept so callers and the conformance tests can say `claudecord::redact` instead of the folder path.

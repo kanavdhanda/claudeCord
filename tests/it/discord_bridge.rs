@@ -86,7 +86,14 @@ impl Rig {
 }
 
 async fn rig(name: &str) -> Rig {
+    rig_with(name, 0).await
+}
+
+/// The same, with Discord refusing the bridge's first `me_failures` "who am I" calls.
+async fn rig_with(name: &str, me_failures: usize) -> Rig {
     let (fake, addr) = start_fake().await;
+    fake.me_failures
+        .store(me_failures, std::sync::atomic::Ordering::SeqCst);
     let dir = tmp(name);
     let db = dir.join("hub.db");
     let mut store = Store::open(&db, None).unwrap();
@@ -706,4 +713,28 @@ async fn the_bridge_reconnects_to_discord_by_itself_and_keeps_working() {
         deliver_text(f, "after the drop")
     })
     .await;
+}
+
+#[tokio::test]
+async fn a_discord_outage_at_start_up_only_delays_the_bridge_it_does_not_leave_it_half_set_up() {
+    // Discord refuses the first two "who am I" calls; the bridge keeps trying and then comes up fully, owner and commands included.
+    let r = rig_with("outage", 2).await;
+    r.until("slash commands registered after the outage", |l| {
+        l.commands.is_some().then_some(json!(true))
+    })
+    .await;
+    let owner = r
+        .hub
+        .call(|c, _| (c.role_of("demo", "1"), vec![]))
+        .await
+        .unwrap();
+    assert_eq!(
+        owner,
+        Some(claudecord::hub::Role::Owner),
+        "the bot's owner was found once Discord answered"
+    );
+    assert_eq!(
+        r.fake.me_failures.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
 }

@@ -55,12 +55,12 @@ impl Disk {
                         match job {
                             Job::History(rows) => {
                                 if let Err(e) = writer.append(&rows) {
-                                    eprintln!("hub: could not save history: {e}");
+                                    crate::error!("hub", "could not save history: {e}");
                                 }
                             }
                             Job::Snapshot(body, at) if Some(i) == newest_snapshot => {
                                 if let Err(e) = writer.save_snapshot(&body, at) {
-                                    eprintln!("hub: could not save state: {e}");
+                                    crate::error!("hub", "could not save state: {e}");
                                 }
                             }
                             Job::Snapshot(..) => {}

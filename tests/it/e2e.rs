@@ -28,6 +28,9 @@ const NORMAL: &str = "#!/bin/sh\necho 'fake claude'\nprintf '? for shortcuts\\n'
 /// Dies the first time it is started (leaving a marker file), then behaves normally.
 const DIES_ONCE: &str = "#!/bin/sh\necho run >> starts.log\nif [ ! -f started ]; then touch started; exit 1; fi\necho 'fake claude'\nprintf '? for shortcuts\\n'\nwhile IFS= read -r line; do\n  printf '%s\\n' \"$line\" >> fake.log\n  echo \"ack: $line\"\n  printf '? for shortcuts\\n'\ndone\n";
 
+/// Floods its terminal with 3 MB of random bytes (invalid text, stray escape codes, a terminal reset) before behaving normally.
+const GARBAGE: &str = "#!/bin/sh\nhead -c 3000000 /dev/urandom\nprintf '\\033[2J\\033[999;999H\\033]0;title\\007\\033[?1049h'\necho 'fake claude'\nprintf '? for shortcuts\\n'\nwhile IFS= read -r line; do\n  printf '%s\\n' \"$line\" >> fake.log\n  echo \"ack: $line\"\n  printf '? for shortcuts\\n'\ndone\n";
+
 /// Lives for a second, then dies: long enough to be seen starting, so a test can watch what happens when it ends.
 const DIES_SOON: &str = "#!/bin/sh\necho run >> starts.log\nsleep 1\nexit 1\n";
 
@@ -1147,5 +1150,56 @@ async fn many_says_at_once_all_arrive_and_wrong_keys_in_the_crowd_are_all_refuse
         }
     }
     assert_eq!((good, refused), (40, 20));
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_agent_that_floods_its_terminal_with_garbage_does_not_hurt_the_daemon_or_its_neighbours()
+{
+    let r = rig_with("garbage", GARBAGE).await;
+    let key = up(&r, "otter").await;
+    eventually("registered", async || {
+        r.hub
+            .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    // The daemon is alive, answers commands, and the noisy agent can still be spoken to and can speak.
+    assert!(ipc::call(&r.dir, &Req::Ping).await.unwrap().ok);
+    r.hub
+        .call(|c, now| {
+            let fx = c
+                .human_message(
+                    &kd(),
+                    "demo",
+                    "hello through the noise",
+                    &MessageOpts::default(),
+                    now,
+                )
+                .unwrap()
+                .1;
+            ((), fx)
+        })
+        .await;
+    eventually("the message got through the garbage", async || {
+        std::fs::read_to_string(r.project.join("fake.log"))
+            .is_ok_and(|s| s.contains("hello through the noise"))
+    })
+    .await;
+    let said = ipc::call_as(
+        &r.dir,
+        Some(&key),
+        &Req::Say {
+            agent: "demo/otter".into(),
+            text: "still talking".into(),
+            thread: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(said.ok, "{}", said.msg);
+    // A second agent, started afterwards, works as normal: one agent's noise is not another's problem.
+    assert!(ipc::call(&r.dir, &Req::Ping).await.unwrap().ok);
     r.hub.shutdown().await;
 }

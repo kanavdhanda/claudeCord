@@ -12,6 +12,7 @@ use crate::device::link::{self, LinkEvent, LinkOpts};
 use crate::hub::*;
 use crate::server::{self, Config as ServerConfig};
 use crate::store::Store;
+use crate::sync::Lock;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -101,6 +102,11 @@ pub fn features() -> Vec<Feature> {
             name: "daemon: message in, agent speaks, ask, file",
             covers: &["device/daemon", "device/ipc", "device/mod"],
             probe: daemon_flow,
+        },
+        Feature {
+            name: "logging, supervision and locks that survive a panic",
+            covers: &["log", "task", "sync"],
+            probe: robustness_probe,
         },
         Feature {
             name: "uptime: recorded, ready check, outside prober",
@@ -759,7 +765,7 @@ async fn fake_bucket() -> (
         {
             return (StatusCode::FORBIDDEN, vec![]);
         }
-        let mut o = o.lock().expect("lock");
+        let mut o = o.locked();
         match m {
             Method::PUT => {
                 o.insert(path, body.to_vec());
@@ -834,11 +840,7 @@ fn bucket_probe() -> Probe {
         .await
         .map_err(|e| e.to_string())??;
         ensure!(
-            objects
-                .lock()
-                .expect("lock")
-                .keys()
-                .any(|k| k.ends_with(".jsonl.gz")),
+            objects.locked().keys().any(|k| k.ends_with(".jsonl.gz")),
             "the bucket does not hold the history file"
         );
         Ok(result)
@@ -932,18 +934,15 @@ fn discord_probe() -> Probe {
         };
         bridge::spawn(hub.handle(), hub.chat(), cfg);
         ensure!(
-            eventually(async || fake.log.lock().expect("lock").identifies >= 1).await,
+            eventually(async || fake.log.locked().identifies >= 1).await,
             "the bridge never connected to the Discord gateway"
         );
         ensure!(
-            fake.log
-                .lock()
-                .expect("lock")
-                .commands
-                .as_ref()
-                .is_some_and(|c| c.as_array().is_some_and(
-                    |a| a.len() == commands::definitions().as_array().map_or(0, Vec::len)
-                )),
+            fake.log.locked().commands.as_ref().is_some_and(|c| {
+                c.as_array().is_some_and(|a| {
+                    a.len() == commands::definitions().as_array().map_or(0, Vec::len)
+                })
+            }),
             "the slash commands were not registered"
         );
         l.send(crate::protocol::NodeFrame::AgentRegister {
@@ -975,8 +974,7 @@ fn discord_probe() -> Probe {
         ensure!(
             eventually(async || fake
                 .log
-                .lock()
-                .expect("lock")
+                .locked()
                 .posts
                 .iter()
                 .any(|p| p["username"] == "otter" && p["content"] == "hello team"))
@@ -985,8 +983,7 @@ fn discord_probe() -> Probe {
         );
         let channel = fake
             .log
-            .lock()
-            .expect("lock")
+            .locked()
             .channels
             .iter()
             .find(|c| c["name"] == "demo")
@@ -1166,5 +1163,52 @@ fn signin_probe() -> Probe {
         ensure!(me.status() == 200, "the session was not accepted");
         hub.shutdown().await;
         Ok("redirect, state check, code swap and a working session".into())
+    })
+}
+
+/// A line is logged with its secret removed, a task that panics is started again, and a lock survives the panic of its holder.
+fn robustness_probe() -> Probe {
+    boxed(async {
+        use crate::sync::Lock;
+        let file = scratch("log").join("probe.log");
+        crate::log::init(Some(file.clone()));
+        let token = format!("ghp_{}", "q1W2".repeat(9));
+        crate::info!("probe", "a line with a secret {token} in it");
+        let text = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
+        ensure!(
+            text.contains("probe: a line with a secret"),
+            "the line was not logged: {text:?}"
+        );
+        ensure!(!text.contains(&token), "a secret reached the log");
+        let runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = runs.clone();
+        let task = crate::task::supervised("probe task", move || {
+            let n = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                if n < 2 {
+                    panic!("on purpose");
+                }
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .map_err(|_| "the supervisor never finished")?
+            .map_err(|e| e.to_string())?;
+        ensure!(
+            runs.load(std::sync::atomic::Ordering::SeqCst) == 3,
+            "a task that panicked twice was not started again each time"
+        );
+        let lock = std::sync::Arc::new(std::sync::Mutex::new(1));
+        let l2 = lock.clone();
+        let _ = std::thread::spawn(move || {
+            let _held = l2.lock().unwrap();
+            panic!("while holding the lock");
+        })
+        .join();
+        ensure!(
+            *lock.locked() == 1,
+            "the lock did not survive its holder's panic"
+        );
+        Ok("logged without the secret, restarted a panicking task twice, used a lock after its holder panicked".into())
     })
 }

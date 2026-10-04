@@ -7,6 +7,8 @@
 
 use super::AppState;
 use super::web::{Who, authorised, denied, secure};
+use crate::store::Store;
+use crate::sync::Lock;
 use crate::uptime::{self, State as Up};
 use axum::{
     Json,
@@ -32,19 +34,21 @@ pub(super) async fn readyz(State(st): State<AppState>) -> Response {
     let core = tokio::time::timeout(Duration::from_secs(2), st.handle.call(|_, _| ((), vec![])))
         .await
         .is_ok_and(|r| r.is_some());
-    let db = st
-        .reader
-        .lock()
-        .expect("lock")
-        .as_ref()
-        .is_none_or(|s| s.kv_get("hub_alive_at").is_ok());
-    let discord = !st.cfg.discord_expected
-        || st
-            .reader
-            .lock()
-            .expect("lock")
+    let reader = st.reader.clone();
+    let discord_expected = st.cfg.discord_expected;
+    let (db, discord) = tokio::task::spawn_blocking(move || {
+        let guard = reader.locked();
+        let db = guard
             .as_ref()
-            .is_some_and(|s| s.uptime_last("discord").ok().flatten() == Some(Up::Up));
+            .is_none_or(|s| s.kv_get("hub_alive_at").is_ok());
+        let discord = !discord_expected
+            || guard
+                .as_ref()
+                .is_some_and(|s| s.uptime_last("discord").ok().flatten() == Some(Up::Up));
+        (db, discord)
+    })
+    .await
+    .unwrap_or((false, false));
     let ok = core && db && discord;
     let body = json!({"ok": ok, "checks": {"core": core, "database": db, "discord": discord}});
     secure(
@@ -63,9 +67,20 @@ pub(super) async fn readyz(State(st): State<AppState>) -> Response {
 }
 
 /// Availability and budget per component over every window.
-fn summary(st: &AppState) -> Value {
+/// The same, worked out on a thread meant for blocking work.
+async fn summary(st: &AppState) -> Value {
+    let (reader, target) = (st.reader.clone(), st.cfg.uptime_target);
+    tokio::task::spawn_blocking(move || summary_blocking(&reader, target))
+        .await
+        .unwrap_or_default()
+}
+
+fn summary_blocking(
+    reader: &std::sync::Arc<std::sync::Mutex<Option<Store>>>,
+    target: f64,
+) -> Value {
     let now = crate::now_ms();
-    let guard = st.reader.lock().expect("lock");
+    let guard = reader.locked();
     let Some(db) = guard.as_ref() else {
         return json!({});
     };
@@ -80,7 +95,7 @@ fn summary(st: &AppState) -> Value {
                 json!({
                     "availability": r.availability(),
                     "downMs": r.down_ms,
-                    "budgetLeftMs": uptime::budget_left(&r, st.cfg.uptime_target),
+                    "budgetLeftMs": uptime::budget_left(&r, target),
                 }),
             );
         }
@@ -105,7 +120,7 @@ fn summary(st: &AppState) -> Value {
             json!({"state": state, "windows": windows, "outages": recent}),
         );
     }
-    json!({"target": st.cfg.uptime_target, "components": out})
+    json!({"target": target, "components": out})
 }
 
 pub(super) async fn uptime(
@@ -117,7 +132,7 @@ pub(super) async fn uptime(
         return denied();
     }
     secure(
-        Json(summary(&st)).into_response(),
+        Json(summary(&st).await).into_response(),
         "application/json",
         "no-store",
     )
@@ -151,7 +166,7 @@ pub(super) async fn metrics(
     let mut text = format!(
         "# TYPE claudecord_machines_connected gauge\nclaudecord_machines_connected {devices}\n# TYPE claudecord_agents gauge\nclaudecord_agents {agents}\n# TYPE claudecord_component_up gauge\n# TYPE claudecord_availability_ratio gauge\n"
     );
-    if let Some(components) = summary(&st)["components"].as_object() {
+    if let Some(components) = summary(&st).await["components"].as_object() {
         for (name, c) in components {
             text.push_str(&format!(
                 "claudecord_component_up{{component=\"{name}\"}} {}\n",

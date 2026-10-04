@@ -9,6 +9,7 @@
 
 use super::web::secure as secure_headers;
 use super::{AppState, Oauth};
+use crate::sync::Lock;
 use axum::{
     extract::{ConnectInfo, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
@@ -94,7 +95,7 @@ fn page(status: StatusCode, text: &str) -> Response {
 /// Who a session cookie belongs to, if it is a live session.
 pub(crate) fn who(st: &AppState, headers: &HeaderMap) -> Option<(String, String)> {
     let id = cookie(headers, "cc_session")?;
-    let mut all = st.sessions.lock().expect("lock");
+    let mut all = st.sessions.locked();
     match all.get(&id) {
         Some(s) if s.expires > crate::now_ms() => Some((s.id.clone(), s.name.clone())),
         Some(_) => {
@@ -194,14 +195,15 @@ pub(super) async fn callback(
     };
     let ip = peer.ip().to_string();
     let now = crate::now_ms();
-    if st.failures.lock().expect("lock").blocked(&ip, now as f64) {
+    if st.failures.locked().blocked(&ip, now as f64) {
         return page(
             StatusCode::TOO_MANY_REQUESTS,
             "too many failed attempts, wait a minute",
         );
     }
     let refuse = |status, text: &str| {
-        st.failures.lock().expect("lock").fail(&ip, now as f64);
+        crate::warn!("login", "sign-in from {ip} refused: {text}");
+        st.failures.locked().fail(&ip, now as f64);
         page(status, text)
     };
     let (Some(code), Some(state), Some(mine)) =
@@ -245,8 +247,9 @@ pub(super) async fn callback(
         );
     }
     let sid = random_hex();
+    crate::info!("login", "{name} (account {id}) signed in to the dashboard");
     {
-        let mut all = st.sessions.lock().expect("lock");
+        let mut all = st.sessions.locked();
         all.retain(|_, s| s.expires > now);
         if all.len() >= MAX_SESSIONS {
             return page(
@@ -284,7 +287,7 @@ pub(super) async fn me(State(st): State<AppState>, headers: HeaderMap) -> Respon
 /// Signs out: the session is forgotten here, not just in the browser.
 pub(super) async fn logout(State(st): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(id) = cookie(&headers, "cc_session") {
-        st.sessions.lock().expect("lock").remove(&id);
+        st.sessions.locked().remove(&id);
     }
     let mut r = page(StatusCode::NO_CONTENT, "");
     if let Some(o) = &st.cfg.oauth {

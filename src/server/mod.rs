@@ -21,6 +21,7 @@ use crate::hub::{Chat, HubCore};
 use crate::protocol::NODE_CONNECT_PATH;
 use crate::security::limits::FailureLimiter;
 use crate::store::Store;
+use crate::sync::Lock;
 use axum::{
     Router,
     extract::{ConnectInfo, State, WebSocketUpgrade},
@@ -169,7 +170,7 @@ pub struct Hub {
     stop_server: Option<oneshot::Sender<()>>,
     server: Option<tokio::task::JoinHandle<()>>,
     /// The uptime log and the task that keeps the hub's heartbeat (see `crate::uptime`). None for an in-memory store.
-    uptime: Option<(Store, tokio::task::JoinHandle<()>)>,
+    uptime: Option<(Store, crate::uptime::Heartbeat)>,
 }
 
 impl Hub {
@@ -220,7 +221,7 @@ impl Hub {
             let _ = h.await;
         }
         if let Some((log, beat)) = self.uptime.take() {
-            beat.abort();
+            drop(beat);
             crate::uptime::stopped(&log, now_ms());
         }
     }
@@ -317,7 +318,11 @@ async fn connect(
 ) -> impl IntoResponse {
     let ip = peer.ip().to_string();
     let now = now_ms() as f64;
-    if st.failures.lock().expect("lock").blocked(&ip, now) {
+    if st.failures.locked().blocked(&ip, now) {
+        crate::debug!(
+            "hub",
+            "refused a connection from {ip}: too many failed attempts"
+        );
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
     let token = headers
@@ -341,7 +346,11 @@ async fn connect(
     // A dashboard token never connects a machine.
     let node = node.filter(|n| !n.starts_with(web::WEB_PREFIX));
     let Some(node) = node else {
-        st.failures.lock().expect("lock").fail(&ip, now);
+        crate::warn!(
+            "hub",
+            "refused a device connection from {ip}: the token is missing or not valid"
+        );
+        st.failures.locked().fail(&ip, now);
         return StatusCode::UNAUTHORIZED.into_response();
     };
     let conn = st

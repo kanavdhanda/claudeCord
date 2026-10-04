@@ -59,6 +59,8 @@ pub async fn run_hub(a: HubArgs) -> Result<(), String> {
         return Err("refusing to listen on a public address without TLS: put a TLS proxy in front and bind to 127.0.0.1, or pass --allow-plain if you really mean it".into());
     }
     std::fs::create_dir_all(&a.data).map_err(|e| e.to_string())?;
+    // Everything the hub logs goes to the terminal and to `hub.log` in its data folder (kept to about 20 MB in two files).
+    crate::log::init(Some(a.data.join("hub.log")));
     let store = Store::open(&a.data.join("hub.db"), Some(&a.data.join("history")))
         .map_err(|e| e.to_string())?;
     let mut core = HubCore::default();
@@ -84,20 +86,24 @@ pub async fn run_hub(a: HubArgs) -> Result<(), String> {
         Some(mut cfg) => {
             cfg.owners = a.owners.clone();
             crate::discord::bridge::spawn(hub.handle(), hub.chat(), cfg);
-            println!("discord bridge started");
+            crate::info!("hub", "the Discord bridge is starting");
         }
-        None => println!(
-            "discord is not set up (claudecord discord set), so only the dashboard and machines are served"
+        None => crate::warn!(
+            "hub",
+            "Discord is not set up (claudecord discord set), so only the dashboard and machines are served"
         ),
     }
-    println!(
-        "hub listening on {}  (data in {})",
+    crate::info!(
+        "hub",
+        "listening on {}  (data in {}, log in hub.log)",
         hub.addr,
         a.data.display()
     );
-    tokio::signal::ctrl_c().await.map_err(|e| e.to_string())?;
-    println!("shutting down");
+    // Ctrl-C, and on Unix SIGTERM (what `systemctl stop` and Docker send): either way the hub saves everything and records a clean stop.
+    crate::task::shutdown_signal().await;
+    crate::info!("hub", "told to stop; saving and closing connections");
     hub.shutdown().await;
+    crate::info!("hub", "stopped cleanly");
     Ok(())
 }
 

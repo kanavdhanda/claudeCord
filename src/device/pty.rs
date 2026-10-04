@@ -4,6 +4,7 @@
 //! from the hub pasted at a safe moment (see `inject`).
 
 use super::inject::{Guard, Wait, paste_bytes};
+use crate::sync::Lock;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -79,8 +80,8 @@ impl PtyTerminal {
                     if n == 0 {
                         break;
                     }
-                    screen.lock().expect("lock").process(&buf[..n]);
-                    guard.lock().expect("lock").on_output(crate::now_ms());
+                    screen.locked().process(&buf[..n]);
+                    guard.locked().on_output(crate::now_ms());
                     let _ = output.send(buf[..n].to_vec());
                 }
                 exited.store(true, Ordering::SeqCst);
@@ -99,8 +100,8 @@ impl PtyTerminal {
 
     /// Keys typed by a person in an attached window. Written straight through, and noted by the guard.
     pub fn type_input(&self, bytes: &[u8], now: i64) -> std::io::Result<()> {
-        self.guard.lock().expect("lock").on_input(bytes, now);
-        let mut w = self.writer.lock().expect("lock");
+        self.guard.locked().on_input(bytes, now);
+        let mut w = self.writer.locked();
         w.write_all(bytes)?;
         w.flush()
     }
@@ -115,23 +116,14 @@ impl PtyTerminal {
 
     /// The bytes that redraw the current screen in a freshly attached window.
     pub fn redraw_bytes(&self) -> Vec<u8> {
-        self.screen
-            .lock()
-            .expect("lock")
-            .screen()
-            .contents_formatted()
+        self.screen.locked().screen().contents_formatted()
     }
 
     /// Whether the agent itself (and not a program it started) is the one reading the terminal.
     #[cfg(unix)]
     fn foreground(&self) -> bool {
-        let leader = self.master.lock().expect("lock").process_group_leader();
-        let pid = self
-            .child
-            .lock()
-            .expect("lock")
-            .process_id()
-            .map(|p| p as i32);
+        let leader = self.master.locked().process_group_leader();
+        let pid = self.child.locked().process_id().map(|p| p as i32);
         match (leader, pid) {
             (Some(l), Some(p)) => l == p,
             // If the system cannot say, assume it is the agent rather than never delivering.
@@ -147,33 +139,26 @@ impl PtyTerminal {
 
     /// Pastes a message into the agent's terminal if that is safe now. Returns what to wait for otherwise.
     pub fn inject(&self, text: &str, now: i64) -> Result<(), Wait> {
-        self.guard
-            .lock()
-            .expect("lock")
-            .check(now, self.foreground())?;
-        let mut w = self.writer.lock().expect("lock");
+        self.guard.locked().check(now, self.foreground())?;
+        let mut w = self.writer.locked();
         let _ = w.write_all(&paste_bytes(text)).and_then(|_| w.flush());
         Ok(())
     }
 
     /// The text currently on the agent's screen.
     pub fn screen_text(&self) -> String {
-        self.screen.lock().expect("lock").screen().contents()
+        self.screen.locked().screen().contents()
     }
 
     /// Tells the terminal its window changed size.
     pub fn resize(&self, rows: u16, cols: u16) {
-        let _ = self.master.lock().expect("lock").resize(PtySize {
+        let _ = self.master.locked().resize(PtySize {
             rows,
             cols,
             pixel_width: 0,
             pixel_height: 0,
         });
-        self.screen
-            .lock()
-            .expect("lock")
-            .screen_mut()
-            .set_size(rows, cols);
+        self.screen.locked().screen_mut().set_size(rows, cols);
     }
 
     /// Whether the program has ended.
@@ -183,6 +168,6 @@ impl PtyTerminal {
 
     /// Stops the program.
     pub fn kill(&self) {
-        let _ = self.child.lock().expect("lock").kill();
+        let _ = self.child.locked().kill();
     }
 }

@@ -249,3 +249,19 @@ async fn readiness_fails_and_names_discord_when_it_is_part_of_the_hub_but_not_co
     );
     hub.shutdown().await;
 }
+
+#[test]
+fn the_heartbeat_stops_at_once_when_dropped_and_does_not_wait_out_its_interval() {
+    let db = Store::open_memory().unwrap();
+    // An in-memory database cannot be shared with a second connection, so use a file.
+    drop(db);
+    let d = dir("beat");
+    let beat = uptime::heartbeat(Store::open(&d.join("hub.db"), None).unwrap());
+    let t = std::time::Instant::now();
+    drop(beat);
+    assert!(
+        t.elapsed() < Duration::from_secs(2),
+        "dropping it took {:?}, not the 10 s between beats",
+        t.elapsed()
+    );
+}
