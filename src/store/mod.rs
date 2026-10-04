@@ -63,9 +63,11 @@ impl Store {
 
     /// Sets the database up: durable settings and the tables, if they are not there yet.
     fn init(conn: Connection, segments_dir: Option<&Path>) -> rusqlite::Result<Self> {
+        // The wait for a lock comes FIRST: switching to WAL itself needs a lock, and two connections opening the same file at once
+        // (the hub opens several) would otherwise fail on the very first statement instead of waiting their turn.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS snapshot (id INTEGER PRIMARY KEY CHECK (id = 1), at INTEGER NOT NULL, body TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS history (

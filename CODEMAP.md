@@ -115,6 +115,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | File | What it is |
 |---|---|
 | `src/server/actor.rs` | The actor: the one task that owns the hub core and the store. |
+| `src/server/disk.rs` | The hub's disk writes, kept off the async runtime. |
 | `src/server/health.rs` | What a prober, a load balancer and the dashboard ask the hub about its own health. |
 | `src/server/login.rs` | "Sign in with Discord" for the dashboard, the standard OAuth2 code flow. |
 | `src/server/mod.rs` | The hub as a running server: one small web server that accepts devices over WebSocket, feeds what they send to the hub core, and carries out what the core asks for. |

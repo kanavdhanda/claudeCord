@@ -2,6 +2,7 @@
 //! timers arrives here through one queue, so the core never has to be locked and always sees events in a single order.
 //! After each batch it saves what changed in one transaction and turns the core's effects into actions.
 
+use super::disk::Disk;
 use super::{Config, Input, Out, now_ms};
 use crate::hub::{Chat, Effect, HubCore, Persist};
 use crate::protocol::{HubFrame, NodeFrame};
@@ -23,12 +24,13 @@ struct Conn {
 /// Runs until told to shut down (or until nothing can send it work any more).
 pub(crate) async fn run(
     mut core: HubCore,
-    mut store: Store,
+    store: Store,
     mut inbox: mpsc::Receiver<Input>,
     chat: broadcast::Sender<Chat>,
     cfg: Config,
 ) {
-    if let Ok(Some(saved)) = store.load_snapshot() {
+    let mut disk = Disk::new(store);
+    if let Ok(Some(saved)) = disk.reader().load_snapshot() {
         core.restore(&saved);
     }
     let mut conns: HashMap<u64, Conn> = HashMap::new();
@@ -65,51 +67,52 @@ pub(crate) async fn run(
                 for input in batch {
                     match input {
                         Input::Auth { token, reply } => {
-                            let _ = reply.send(store.node_for_token(&token).ok().flatten());
+                            let _ = reply.send(disk.reader().node_for_token(&token).ok().flatten());
                         }
                         Input::Connected { node, conn, tx, queued, kill } => {
                             core.touch(&node, now);
                             conns.insert(conn, Conn { node: node.clone(), tx, queued, kill });
                             fx.push(Effect::Send { conn, frame: HubFrame::Welcome { node_id: node.clone() } });
-                            fx.extend(guard(&mut core, &store, &conns, |c| c.node_connected(&node, conn)).unwrap_or_default());
+                            fx.extend(guard(&mut core, disk.reader(), &conns, |c| c.node_connected(&node, conn)).unwrap_or_default());
                             dirty = true;
                         }
                         Input::Disconnected { node, conn } => {
                             conns.remove(&conn);
-                            fx.extend(guard(&mut core, &store, &conns, |c| c.node_disconnected(&node, conn)).unwrap_or_default());
+                            fx.extend(guard(&mut core, disk.reader(), &conns, |c| c.node_disconnected(&node, conn)).unwrap_or_default());
                             dirty = true;
                         }
                         Input::Alive { node } => core.touch(&node, now),
                         Input::Frame { node, text } => {
                             if let Some(frame) = NodeFrame::parse(&text) {
-                                fx.extend(guard(&mut core, &store, &conns, |c| c.on_node_frame(&node, frame, now)).unwrap_or_default());
+                                fx.extend(guard(&mut core, disk.reader(), &conns, |c| c.on_node_frame(&node, frame, now)).unwrap_or_default());
                                 dirty = true;
                             }
                         }
                         Input::Call(f) => {
-                            fx.extend(guard(&mut core, &store, &conns, |c| f(c, now)).unwrap_or_default());
+                            fx.extend(guard(&mut core, disk.reader(), &conns, |c| f(c, now)).unwrap_or_default());
                             dirty = true;
                         }
                         Input::Shutdown { done: d } => done = Some(d),
                     }
                 }
             }
-            _ = tick.tick() => { fx.extend(guard(&mut core, &store, &conns, |c| c.tick(now)).unwrap_or_default()); dirty = true; }
+            _ = tick.tick() => { fx.extend(guard(&mut core, disk.reader(), &conns, |c| c.tick(now)).unwrap_or_default()); dirty = true; }
             _ = rollover.tick() => {
-                if rolling.as_ref().is_none_or(|h| h.is_finished()) && let Some(mut s) = store.fork() {
+                if rolling.as_ref().is_none_or(|h| h.is_finished()) && let Some(mut s) = disk.reader().fork() {
                     let cutoff = now - cfg.hot_window.as_millis() as i64;
                     rolling = Some(tokio::task::spawn_blocking(move || { let _ = s.rollover(cutoff); }));
                 }
             }
             _ = backup.tick() => {
-                if backing_up.as_ref().is_none_or(|h| h.is_finished()) && let Some(s) = store.fork() {
+                if backing_up.as_ref().is_none_or(|h| h.is_finished()) && let Some(s) = disk.reader().fork() {
                     backing_up = Some(tokio::task::spawn_blocking(move || {
                         if let Err(e) = s.backup_to_bucket(now_ms() / 1000) { eprintln!("hub: backup to the bucket failed: {e}"); }
                     }));
                 }
             }
             _ = save.tick() => {
-                if dirty && store.save_snapshot(&core.snapshot(), now).is_ok() {
+                if dirty {
+                    disk.snapshot(core.snapshot(), now);
                     dirty = false;
                 }
             }
@@ -119,12 +122,12 @@ pub(crate) async fn run(
             &mut conns,
             &chat,
             &mut history,
-            &mut store,
+            &mut disk,
             now,
             cfg.max_out_bytes,
         );
-        if !history.is_empty() && store.append(&history).is_ok() {
-            history.clear();
+        if !history.is_empty() {
+            disk.append(std::mem::take(&mut history));
         }
         if done.is_some() {
             break;
@@ -134,7 +137,9 @@ pub(crate) async fn run(
     for c in conns.values() {
         let _ = c.tx.try_send(Out::Close(1001, "hub is restarting"));
     }
-    let _ = store.save_snapshot(&core.snapshot(), now_ms());
+    disk.snapshot(core.snapshot(), now_ms());
+    // Everything handed over is on disk before the hub says it has stopped.
+    disk.flush();
     if let Some(d) = done {
         let _ = d.send(());
     }
@@ -173,7 +178,7 @@ fn carry_out(
     conns: &mut HashMap<u64, Conn>,
     chat: &broadcast::Sender<Chat>,
     history: &mut Vec<HistoryRow>,
-    store: &mut Store,
+    disk: &mut Disk,
     now: i64,
     max_out: usize,
 ) {
@@ -213,7 +218,7 @@ fn carry_out(
                 what,
                 at,
             }) => {
-                let _ = store.audit(at, &project, &who, &what);
+                disk.audit(at, &project, &who, &what);
             }
             Effect::Persist(_) | Effect::AcceptCheck { .. } => {}
         }

@@ -11,6 +11,7 @@
 //! keeps what is waiting, and the device simply reconnects and registers again.
 
 pub mod actor;
+mod disk;
 pub mod health;
 pub mod login;
 pub mod session;
