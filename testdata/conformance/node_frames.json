@@ -1,0 +1,638 @@
+[
+ {
+  "input": {
+   "t": "hello",
+   "nodeName": "mac",
+   "version": "1"
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "agent.register",
+   "cwd": "/x",
+   "agent": {
+    "agentId": "proj/otter",
+    "name": "otter",
+    "project": "proj",
+    "adapter": "claude"
+   }
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "agent.register",
+   "cwd": "/x",
+   "agent": {
+    "agentId": "proj/../etc",
+    "name": "../etc",
+    "project": "proj",
+    "adapter": "claude"
+   }
+  },
+  "valid": false
+ },
+ {
+  "input": {
+   "t": "agent.status",
+   "agentId": "p/a",
+   "status": "idle"
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "agent.status",
+   "agentId": "p/a",
+   "status": "thinking",
+   "detail": "x"
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "agent.status",
+   "agentId": "p/a",
+   "status": "nope"
+  },
+  "valid": false
+ },
+ {
+  "input": {
+   "t": "agent.say",
+   "agentId": "p/a",
+   "text": "hi"
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "agent.say",
+   "agentId": "p/a",
+   "text": {
+    "$repeat": "x",
+    "$n": 8000
+   }
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "agent.say",
+   "agentId": "p/a",
+   "text": {
+    "$repeat": "x",
+    "$n": 8001
+   }
+  },
+  "valid": false
+ },
+ {
+  "input": {
+   "t": "agent.say",
+   "agentId": "p/a",
+   "text": "hi",
+   "thread": "tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt"
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "agent.say",
+   "agentId": "p/a",
+   "text": "hi",
+   "thread": "ttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt"
+  },
+  "valid": false
+ },
+ {
+  "input": {
+   "t": "agent.ask",
+   "agentId": "p/a",
+   "askId": "1",
+   "question": "q"
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "agent.ask",
+   "agentId": "p/a",
+   "askId": "1",
+   "question": "q",
+   "options": [
+    "o",
+    "o",
+    "o",
+    "o",
+    "o",
+    "o",
+    "o",
+    "o",
+    "o",
+    "o",
+    "o",
+    "o"
+   ]
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "agent.ask",
+   "agentId": "p/a",
+   "askId": "1",
+   "question": "q",
+   "options": [
+    "o",
+    "o",
+    "o",
+    "o",
+    "o",
+    "o",
+    "o",
+    "o",
+    "o",
+    "o",
+    "o",
+    "o",
+    "o"
+   ]
+  },
+  "valid": false
+ },
+ {
+  "input": {
+   "t": "agent.ask",
+   "agentId": "p/a",
+   "askId": "1",
+   "question": {
+    "$repeat": "q",
+    "$n": 4001
+   }
+  },
+  "valid": false
+ },
+ {
+  "input": {
+   "t": "agent.report",
+   "agentId": "p/a",
+   "title": "t",
+   "summary": "s"
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "agent.report",
+   "agentId": "p/a",
+   "title": "t",
+   "summary": "s",
+   "artifacts": [
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a"
+   ]
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "agent.report",
+   "agentId": "p/a",
+   "title": "t",
+   "summary": "s",
+   "artifacts": [
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a"
+   ]
+  },
+  "valid": false
+ },
+ {
+  "input": {
+   "t": "agent.limit",
+   "agentId": "p/a",
+   "kind": "session"
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "agent.limit",
+   "agentId": "p/a",
+   "kind": "weekly",
+   "resetsAt": "3pm"
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "agent.limit",
+   "agentId": "p/a",
+   "kind": "daily"
+  },
+  "valid": false
+ },
+ {
+  "input": {
+   "t": "agent.gone",
+   "agentId": "p/a"
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "agent.accepted",
+   "agentId": "p/a",
+   "msgIds": [
+    "m1"
+   ]
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "agent.accepted",
+   "agentId": "p/a",
+   "msgIds": [
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m",
+    "m"
+   ]
+  },
+  "valid": false
+ },
+ {
+  "input": {
+   "t": "agent.assign",
+   "agentId": "p/a",
+   "to": "b",
+   "task": "x"
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "agent.assign",
+   "agentId": "p/a",
+   "to": "b",
+   "task": {
+    "$repeat": "x",
+    "$n": 4001
+   }
+  },
+  "valid": false
+ },
+ {
+  "input": {
+   "t": "agent.taskdone",
+   "agentId": "p/a",
+   "taskId": "T1",
+   "summary": "s"
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "file.chunk",
+   "transferId": "t",
+   "agentId": "p/a",
+   "name": "f",
+   "seq": 0,
+   "last": true,
+   "data": "AAAAAAAAAA"
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "file.chunk",
+   "transferId": "t",
+   "agentId": "p/a",
+   "name": "f",
+   "seq": 0,
+   "last": true,
+   "data": {
+    "$repeat": "A",
+    "$n": 262144
+   }
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "file.chunk",
+   "transferId": "t",
+   "agentId": "p/a",
+   "name": "f",
+   "seq": 0,
+   "last": true,
+   "data": {
+    "$repeat": "A",
+    "$n": 393216
+   }
+  },
+  "valid": false
+ },
+ {
+  "input": {
+   "t": "file.chunk",
+   "transferId": "t",
+   "agentId": "p/a",
+   "name": "f",
+   "seq": 1001,
+   "last": true,
+   "data": "AAAAAAAAAA"
+  },
+  "valid": false
+ },
+ {
+  "input": {
+   "t": "file.chunk",
+   "transferId": "t",
+   "agentId": "p/a",
+   "name": "f",
+   "seq": 0,
+   "last": true,
+   "data": "AAAAAAAAAA",
+   "to": "heron",
+   "caption": "c"
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "file.chunk",
+   "transferId": "t",
+   "agentId": "p/a",
+   "name": {
+    "$repeat": "n",
+    "$n": 256
+   },
+   "seq": 0,
+   "last": true,
+   "data": "AAAAAAAAAA"
+  },
+  "valid": false
+ },
+ {
+  "input": {
+   "t": "nope"
+  },
+  "valid": false
+ },
+ {
+  "input": {},
+  "valid": false
+ },
+ {
+  "input": {
+   "t": "agent.say"
+  },
+  "valid": false
+ },
+ {
+  "input": {
+   "t": "agent.say",
+   "agentId": "p/a",
+   "text": 5
+  },
+  "valid": false
+ }
+]

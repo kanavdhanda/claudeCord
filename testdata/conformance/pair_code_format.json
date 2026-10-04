@@ -1,0 +1,27 @@
+[
+ {
+  "input": "abcd-2345",
+  "normalized": "ABCD2345",
+  "formatted": "ABCD-2345"
+ },
+ {
+  "input": "ABCD2345",
+  "normalized": "ABCD2345",
+  "formatted": "ABCD-2345"
+ },
+ {
+  "input": " abcd  2345 ",
+  "normalized": "ABCD2345",
+  "formatted": "ABCD-2345"
+ },
+ {
+  "input": "AbCd-23_45!",
+  "normalized": "ABCD2345",
+  "formatted": "ABCD-2345"
+ },
+ {
+  "input": "",
+  "normalized": "",
+  "formatted": "-"
+ }
+]

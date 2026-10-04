@@ -1,0 +1,199 @@
+[
+ {
+  "input": "here it is: AKIAABCDEFGHIJKLMNOP please use it",
+  "text": "here it is: [redacted aws key] please use it",
+  "found": [
+   "aws key"
+  ]
+ },
+ {
+  "input": "here it is: ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa please use it",
+  "text": "here it is: [redacted github token] please use it",
+  "found": [
+   "github token"
+  ]
+ },
+ {
+  "input": "here it is: github_pat_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa please use it",
+  "text": "here it is: [redacted github token] please use it",
+  "found": [
+   "github token"
+  ]
+ },
+ {
+  "input": "here it is: sk-ant-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx please use it",
+  "text": "here it is: [redacted api key] please use it",
+  "found": [
+   "api key"
+  ]
+ },
+ {
+  "input": "here it is: sk-proj-yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy please use it",
+  "text": "here it is: [redacted api key] please use it",
+  "found": [
+   "api key"
+  ]
+ },
+ {
+  "input": "here it is: xoxb-1234567890-abcdefghij please use it",
+  "text": "here it is: [redacted slack token] please use it",
+  "found": [
+   "slack token"
+  ]
+ },
+ {
+  "input": "here it is: MTTTTTTTTTTTTTTTTTTTTTTT.abcdef.zzzzzzzzzzzzzzzzzzzzzzzzzzz please use it",
+  "text": "here it is: [redacted discord token] please use it",
+  "found": [
+   "discord token"
+  ]
+ },
+ {
+  "input": "here it is: ccn1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA please use it",
+  "text": "here it is: [redacted claudecord token] please use it",
+  "found": [
+   "claudecord token"
+  ]
+ },
+ {
+  "input": "here it is: AIzaBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB please use it",
+  "text": "here it is: [redacted google key] please use it",
+  "found": [
+   "google key"
+  ]
+ },
+ {
+  "input": "here it is: eyJaaaaaaaaaaaa.eyJbbbbbbbbbbbb.cccccccccccc please use it",
+  "text": "here it is: [redacted jwt] please use it",
+  "found": [
+   "jwt"
+  ]
+ },
+ {
+  "input": "my key:\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk\nAAAA\n-----END OPENSSH PRIVATE KEY-----\nthanks",
+  "text": "my key:\n[redacted private key]\nthanks",
+  "found": [
+   "private key"
+  ]
+ },
+ {
+  "input": "-----BEGIN RSA PRIVATE KEY-----\nMIIEow",
+  "text": "[redacted private key]",
+  "found": [
+   "private key"
+  ]
+ },
+ {
+  "input": "export DATABASE_PASSWORD=hunter2hunter2 and API_KEY: 'abcdefgh12345'",
+  "text": "export DATABASE_PASSWORD=[redacted secret assignment] and API_KEY: '[redacted secret assignment]'",
+  "found": [
+   "secret assignment",
+   "secret assignment"
+  ]
+ },
+ {
+  "input": "curl -H 'Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456'",
+  "text": "curl -H 'Authorization: Bearer [redacted bearer token]'",
+  "found": [
+   "bearer token"
+  ]
+ },
+ {
+  "input": "Plan: heron takes the API (POST /export), I take the UI.\nconst tokenizer = new Tokenizer(); // sk-learn style names\nSee README.md",
+  "text": "Plan: heron takes the API (POST /export), I take the UI.\nconst tokenizer = new Tokenizer(); // sk-learn style names\nSee README.md",
+  "found": []
+ },
+ {
+  "input": "PASSWORD=short",
+  "text": "PASSWORD=short",
+  "found": []
+ },
+ {
+  "input": "TOKEN=",
+  "text": "TOKEN=",
+  "found": []
+ },
+ {
+  "input": "nothing secret here at all",
+  "text": "nothing secret here at all",
+  "found": []
+ },
+ {
+  "input": "",
+  "text": "",
+  "found": []
+ },
+ {
+  "input": "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa and AKIAABCDEFGHIJKLMNOP and eyJaaaaaaaaaaaa.eyJbbbbbbbbbbbb.cccccccccccc",
+  "text": "[redacted github token] and [redacted aws key] and [redacted jwt]",
+  "found": [
+   "aws key",
+   "github token",
+   "jwt"
+  ]
+ },
+ {
+  "input": "API_KEY=[redacted secret assignment]",
+  "text": "API_KEY=[redacted secret assignment]",
+  "found": []
+ },
+ {
+  "input": "Bearer [redacted bearer token]",
+  "text": "Bearer [redacted bearer token]",
+  "found": []
+ },
+ {
+  "input": "DB_PASSWORD = \"hunter2hunter2\"; STRIPE_SECRET_KEY: abcdefghijklmnop",
+  "text": "DB_PASSWORD = \"[redacted secret assignment]\"; STRIPE_SECRET_KEY: [redacted secret assignment]",
+  "found": [
+   "secret assignment",
+   "secret assignment"
+  ]
+ },
+ {
+  "input": "line one\nSECRET_TOKEN=abcdefghijkl\nline three",
+  "text": "line one\nSECRET_TOKEN=[redacted secret assignment]\nline three",
+  "found": [
+   "secret assignment"
+  ]
+ },
+ {
+  "input": "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "text": "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "found": []
+ },
+ {
+  "input": "sk-aaaaaaaaaaaaaaaaaaa",
+  "text": "sk-aaaaaaaaaaaaaaaaaaa",
+  "found": []
+ },
+ {
+  "input": "sk-aaaaaaaaaaaaaaaaaaaa",
+  "text": "[redacted api key]",
+  "found": [
+   "api key"
+  ]
+ },
+ {
+  "input": "AKIABBBBBBBBBBBBBBB",
+  "text": "AKIABBBBBBBBBBBBBBB",
+  "found": []
+ },
+ {
+  "input": "AKIABBBBBBBBBBBBBBBBB",
+  "text": "AKIABBBBBBBBBBBBBBBBB",
+  "found": []
+ },
+ {
+  "input": "xoxb-short",
+  "text": "xoxb-short",
+  "found": []
+ },
+ {
+  "input": "unicode café ✓ ghp_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb end",
+  "text": "unicode café ✓ [redacted github token] end",
+  "found": [
+   "github token"
+  ]
+ }
+]

@@ -1,0 +1,56 @@
+{
+ "max": 3,
+ "windowMs": 1000,
+ "steps": [
+  {
+   "op": "blocked",
+   "key": "a",
+   "now": 10000,
+   "result": false
+  },
+  {
+   "op": "fail",
+   "key": "a",
+   "now": 10000
+  },
+  {
+   "op": "fail",
+   "key": "a",
+   "now": 10000
+  },
+  {
+   "op": "fail",
+   "key": "a",
+   "now": 10000
+  },
+  {
+   "op": "blocked",
+   "key": "a",
+   "now": 10000,
+   "result": true
+  },
+  {
+   "op": "blocked",
+   "key": "b",
+   "now": 10000,
+   "result": false
+  },
+  {
+   "op": "blocked",
+   "key": "a",
+   "now": 11001,
+   "result": false
+  },
+  {
+   "op": "fail",
+   "key": "a",
+   "now": 11001
+  },
+  {
+   "op": "blocked",
+   "key": "a",
+   "now": 11001,
+   "result": false
+  }
+ ]
+}

@@ -1,0 +1,54 @@
+[
+ {
+  "input": "hello\u001b[201~rm -rf ~\r",
+  "output": "hello[201~rm -rf ~"
+ },
+ {
+  "input": "a\u001bb",
+  "output": "ab"
+ },
+ {
+  "input": "a\rb",
+  "output": "ab"
+ },
+ {
+  "input": "a\u0000b",
+  "output": "ab"
+ },
+ {
+  "input": "a\u0003b",
+  "output": "ab"
+ },
+ {
+  "input": "ab",
+  "output": "ab"
+ },
+ {
+  "input": "ab",
+  "output": "ab"
+ },
+ {
+  "input": "a b",
+  "output": "ab"
+ },
+ {
+  "input": "a‮b",
+  "output": "ab"
+ },
+ {
+  "input": "line one\n\tline two ✓ café",
+  "output": "line one\n\tline two ✓ café"
+ },
+ {
+  "input": "",
+  "output": ""
+ },
+ {
+  "input": "plain",
+  "output": "plain"
+ },
+ {
+  "input": "a​b",
+  "output": "a​b"
+ }
+]
