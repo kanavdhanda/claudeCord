@@ -60,6 +60,8 @@ pub(super) struct Pending {
     pub at: i64,
 }
 
+use super::tracked::{Cell, Log, TrackedMap, TrackedSet};
+
 pub struct HubCore {
     pub(super) streak_limit: u32,
     pub(super) accept_timeout_ms: u64,
@@ -69,33 +71,37 @@ pub struct HubCore {
     pub(super) seen_at: HashMap<String, i64>,
     /// What each machine said it can take on. Not saved: a machine says it again every time it connects.
     pub(super) capacity: HashMap<String, NodeCapacity>,
-    pub(super) agents: HashMap<String, AgentRow>,
+    pub(super) agents: TrackedMap<AgentRow>,
     /// Agent ids per project in the order they joined.
-    pub(super) by_project: HashMap<String, Vec<String>>,
+    pub(super) by_project: TrackedMap<Vec<String>>,
     pub(super) status: HashMap<String, (AgentStatus, Option<String>)>,
     /// Owners of the whole workspace, who are owners in every project.
-    pub(super) owners: HashSet<String>,
+    pub(super) owners: Cell<HashSet<String>>,
     /// Per-project list of humans and their roles.
-    pub(super) members: HashMap<String, HashMap<String, Member>>,
-    pub(super) asks: HashMap<String, Vec<Ask>>,
-    pub(super) perms: HashMap<String, Vec<PermRequest>>,
-    pub(super) grants: Vec<Grant>,
-    pub(super) tasks: HashMap<String, Vec<TaskRow>>,
+    pub(super) members: TrackedMap<HashMap<String, Member>>,
+    pub(super) asks: TrackedMap<Vec<Ask>>,
+    pub(super) perms: TrackedMap<Vec<PermRequest>>,
+    pub(super) grants: Cell<Vec<Grant>>,
+    pub(super) tasks: TrackedMap<Vec<TaskRow>>,
     /// Agent-only messages in a row, per agent.
     pub(super) streak: HashMap<String, u32>,
-    pub(super) queues: HashMap<String, Vec<Queued>>,
-    pub(super) pending: HashMap<String, Pending>,
+    pub(super) queues: TrackedMap<Vec<Queued>>,
+    pub(super) pending: TrackedMap<Pending>,
     /// Agents that have already been given their brief.
-    pub(super) briefed: HashSet<String>,
+    pub(super) briefed: TrackedSet,
     /// The latest saved handoff per agent.
-    pub(super) handoffs: HashMap<String, Handoff>,
+    pub(super) handoffs: TrackedMap<Handoff>,
     /// When each agent was last asked to dump its context, so it is not asked over and over.
-    pub(super) dump_asked: HashMap<String, i64>,
+    pub(super) dump_asked: TrackedMap<i64>,
     /// Agents whose project roster changed since they last heard it.
-    pub(super) roster_dirty: HashSet<String>,
+    pub(super) roster_dirty: TrackedSet,
     pub(super) uploads: HashMap<String, super::files::Upload>,
     pub(super) seq: u64,
-    pub(super) counters: HashMap<String, u32>,
+    /// What has changed since the last save (see `tracked`).
+    pub(super) dirty: Log,
+    /// The `seq` last written, so it is written again only when it moved.
+    pub(super) seq_written: u64,
+    pub(super) counters: TrackedMap<u32>,
     pub metrics: Metrics,
 }
 
@@ -113,6 +119,7 @@ impl Default for HubCore {
 impl HubCore {
     /// Builds an empty core. The limits are parameters so tests can make them small.
     pub fn new(streak_limit: u32, accept_timeout_ms: u64, grant_ttl_ms: i64) -> Self {
+        let dirty: Log = Default::default();
         Self {
             streak_limit,
             accept_timeout_ms,
@@ -120,25 +127,27 @@ impl HubCore {
             conns: HashMap::new(),
             seen_at: HashMap::new(),
             capacity: HashMap::new(),
-            agents: HashMap::new(),
-            by_project: HashMap::new(),
+            agents: TrackedMap::new("agents", &dirty),
+            by_project: TrackedMap::new("by_project", &dirty),
             status: HashMap::new(),
-            owners: HashSet::new(),
-            members: HashMap::new(),
-            asks: HashMap::new(),
-            perms: HashMap::new(),
-            grants: Vec::new(),
-            tasks: HashMap::new(),
+            owners: Cell::new("owners", &dirty, HashSet::new()),
+            members: TrackedMap::new("members", &dirty),
+            asks: TrackedMap::new("asks", &dirty),
+            perms: TrackedMap::new("perms", &dirty),
+            grants: Cell::new("grants", &dirty, Vec::new()),
+            tasks: TrackedMap::new("tasks", &dirty),
             streak: HashMap::new(),
-            queues: HashMap::new(),
-            pending: HashMap::new(),
-            briefed: HashSet::new(),
-            handoffs: HashMap::new(),
-            dump_asked: HashMap::new(),
-            roster_dirty: HashSet::new(),
+            queues: TrackedMap::new("queues", &dirty),
+            pending: TrackedMap::new("pending", &dirty),
+            briefed: TrackedSet::new("briefed", &dirty),
+            handoffs: TrackedMap::new("handoffs", &dirty),
+            dump_asked: TrackedMap::new("dump_asked", &dirty),
+            roster_dirty: TrackedSet::new("roster_dirty", &dirty),
             uploads: HashMap::new(),
             seq: 0,
-            counters: HashMap::new(),
+            seq_written: 0,
+            dirty: dirty.clone(),
+            counters: TrackedMap::new("counters", &dirty),
             metrics: Metrics::new(1440),
         }
     }

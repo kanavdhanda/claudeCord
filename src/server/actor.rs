@@ -2,12 +2,12 @@
 //! timers arrives here through one queue, so the core never has to be locked and always sees events in a single order.
 //! After each batch it saves what changed in one transaction and turns the core's effects into actions.
 
-use super::disk::Disk;
-use super::{Config, Input, Out, now_ms};
+use super::disk::{Audit, Disk};
+use super::{Config, Input, Out, Reply, now_ms};
 use crate::hub::{Chat, Effect, HubCore, Persist};
 use crate::protocol::{HubFrame, NodeFrame};
 use crate::store::{HistoryRow, Store};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -21,7 +21,104 @@ struct Conn {
     kill: Arc<tokio::sync::Notify>,
 }
 
+/// A batch whose effects and replies wait until its changes are on disk. `durable` is None while the write is in flight, then whether it
+/// reached the disk.
+struct Held {
+    id: u64,
+    durable: Option<bool>,
+    fx: Vec<Effect>,
+    replies: Vec<Reply>,
+}
+
+/// Loads the core's saved state: the saved rows, or, from a hub that still has the older single-text save, that (and then every row is
+/// written again, so the next save moves it into rows).
+fn load_core(core: &mut HubCore, store: &Store) {
+    match store.load_state() {
+        Ok(rows) if !rows.is_empty() => core.restore_rows(rows),
+        _ => {
+            if let Ok(Some(saved)) = store.load_snapshot()
+                && core.restore(&saved)
+            {
+                core.mark_all_dirty();
+            }
+        }
+    }
+}
+
+/// Pulls the history rows and audit lines out of a batch's effects: they are written with the batch, before anything else it caused.
+fn split_persist(fx: &mut Vec<Effect>) -> (Vec<HistoryRow>, Vec<Audit>) {
+    let (mut rows, mut audits, mut rest) = (Vec::new(), Vec::new(), Vec::with_capacity(fx.len()));
+    for e in fx.drain(..) {
+        match e {
+            Effect::Persist(Persist::History {
+                project,
+                thread,
+                from,
+                kind,
+                text,
+                at,
+            }) => {
+                rows.push(HistoryRow {
+                    id: 0,
+                    at,
+                    project,
+                    thread,
+                    from,
+                    kind: kind.to_string(),
+                    text,
+                });
+            }
+            Effect::Persist(Persist::Audit {
+                project,
+                who,
+                what,
+                at,
+            }) => audits.push((at, project, who, what)),
+            Effect::Persist(_) => {}
+            other => rest.push(other),
+        }
+    }
+    *fx = rest;
+    (rows, audits)
+}
+
+/// Carries out, in order, every batch at the front of the queue whose changes are on disk: first what the core asked for (frames to
+/// devices, chat posts), then the replies callers are waiting on. Nothing is sent or answered before its change is durable.
+fn release(
+    held: &mut VecDeque<Held>,
+    conns: &mut HashMap<u64, Conn>,
+    chat: &broadcast::Sender<Chat>,
+    max_out: usize,
+) {
+    while held.front().is_some_and(|h| h.durable.is_some()) {
+        let Some(h) = held.pop_front() else { break };
+        if h.durable == Some(false) {
+            crate::error!(
+                "hub",
+                "carrying on with a batch that could not be written to disk"
+            );
+        }
+        // Doing what the core asked is guarded: a bug here must cost one batch of effects, never the actor and with it the hub.
+        let carried = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            carry_out(h.fx, conns, chat, max_out)
+        }));
+        if carried.is_err() {
+            crate::error!(
+                "hub",
+                "a panic while carrying out effects; that batch was dropped and the hub carries on"
+            );
+        }
+        for reply in h.replies {
+            reply();
+        }
+    }
+}
+
 /// Runs until told to shut down (or until nothing can send it work any more).
+///
+/// Every batch of inputs is handled against the core, then its history rows and the changes to the saved state go to the disk writer
+/// as ONE transaction, and only when that is on disk are its frames sent, chat posts made and callers answered. So nothing is ever
+/// acknowledged that a crash could lose, and many batches that arrive during one write share the next (group commit).
 pub(crate) async fn run(
     mut core: HubCore,
     store: Store,
@@ -30,13 +127,8 @@ pub(crate) async fn run(
     cfg: Config,
 ) {
     let mut disk = Disk::new(store);
-    if let Ok(Some(saved)) = disk.reader().load_snapshot() {
-        core.restore(&saved);
-    }
+    load_core(&mut core, disk.reader());
     let mut conns: HashMap<u64, Conn> = HashMap::new();
-    let mut history: Vec<HistoryRow> = Vec::new();
-    let mut dirty = false;
-    let mut save = tokio::time::interval(cfg.save_every);
     let mut tick = tokio::time::interval(cfg.tick_every);
     // History rollover runs on its own timer, in the background, on a second database connection.
     let mut rollover = tokio::time::interval(
@@ -52,15 +144,20 @@ pub(crate) async fn run(
     );
     backup.tick().await;
     let mut backing_up: Option<tokio::task::JoinHandle<()>> = None;
-    let mut done = None;
+    let mut held: VecDeque<Held> = VecDeque::new();
+    let (written_tx, mut written_rx) = mpsc::unbounded_channel::<(u64, bool)>();
+    let mut next_id = 0u64;
+    let mut stopping = None;
+    let mut closed = false;
     loop {
         let now = now_ms();
         let mut fx: Vec<Effect> = Vec::new();
-        // Notices about failures that were caught while handling this batch.
+        // Notices about failures that were caught while handling this batch, and the replies callers wait for.
         let mut report: Vec<Effect> = Vec::new();
+        let mut replies: Vec<Reply> = Vec::new();
         tokio::select! {
-            input = inbox.recv() => {
-                let Some(input) = input else { break };
+            input = inbox.recv(), if !closed => {
+                let Some(input) = input else { closed = true; continue };
                 // Take everything already waiting, so a burst is handled as one batch and saved with one write.
                 let mut batch = vec![input];
                 while batch.len() < 256 && let Ok(more) = inbox.try_recv() {
@@ -76,29 +173,34 @@ pub(crate) async fn run(
                             conns.insert(conn, Conn { node: node.clone(), tx, queued, kill });
                             fx.push(Effect::Send { conn, frame: HubFrame::Welcome { node_id: node.clone() } });
                             fx.extend(guard(&mut core, disk.reader(), &conns, &mut report, Some(&node), |c| c.node_connected(&node, conn)).unwrap_or_default());
-                            dirty = true;
                         }
                         Input::Disconnected { node, conn } => {
                             conns.remove(&conn);
                             fx.extend(guard(&mut core, disk.reader(), &conns, &mut report, Some(&node), |c| c.node_disconnected(&node, conn)).unwrap_or_default());
-                            dirty = true;
                         }
                         Input::Alive { node } => core.touch(&node, now),
                         Input::Frame { node, text } => {
                             if let Some(frame) = NodeFrame::parse(&text) {
                                 fx.extend(guard(&mut core, disk.reader(), &conns, &mut report, Some(&node), |c| c.on_node_frame(&node, frame, now)).unwrap_or_default());
-                                dirty = true;
                             }
                         }
                         Input::Call(f) => {
-                            fx.extend(guard(&mut core, disk.reader(), &conns, &mut report, None, |c| f(c, now)).unwrap_or_default());
-                            dirty = true;
+                            if let Some((e, reply)) = guard(&mut core, disk.reader(), &conns, &mut report, None, |c| f(c, now)) {
+                                fx.extend(e);
+                                replies.push(reply);
+                            }
                         }
-                        Input::Shutdown { done: d } => done = Some(d),
+                        Input::Read(f) => {
+                            // Reading changes nothing, so it is answered at once; a bug in the reader costs only that answer.
+                            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&core, now))).is_err() {
+                                crate::error!("hub", "a read of the core panicked; that answer was dropped");
+                            }
+                        }
+                        Input::Shutdown { done: d } => stopping = Some(d),
                     }
                 }
             }
-            _ = tick.tick() => { fx.extend(guard(&mut core, disk.reader(), &conns, &mut report, None, |c| c.tick(now)).unwrap_or_default()); dirty = true; }
+            _ = tick.tick() => { fx.extend(guard(&mut core, disk.reader(), &conns, &mut report, None, |c| c.tick(now)).unwrap_or_default()); }
             _ = rollover.tick() => {
                 if rolling.as_ref().is_none_or(|h| h.is_finished()) && let Some(mut s) = disk.reader().fork() {
                     let cutoff = now - cfg.hot_window.as_millis() as i64;
@@ -112,47 +214,48 @@ pub(crate) async fn run(
                     }));
                 }
             }
-            _ = save.tick() => {
-                if dirty {
-                    disk.snapshot(core.snapshot(), now);
-                    dirty = false;
+            Some((id, ok)) = written_rx.recv() => {
+                if let Some(h) = held.iter_mut().find(|h| h.id == id) {
+                    h.durable = Some(ok);
                 }
             }
         }
         fx.extend(report);
-        // Doing what the core asked is guarded too: a bug here must cost one batch of effects, never the actor and with it the hub.
-        let carried = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            carry_out(
+        // The batch's history and the changes it made to the saved state go to disk together, and what it caused waits for that.
+        let (rows, audits) = split_persist(&mut fx);
+        let changes = core.take_changes();
+        let needs_write = !rows.is_empty() || !audits.is_empty() || !changes.is_empty();
+        if needs_write || !fx.is_empty() || !replies.is_empty() {
+            let id = next_id;
+            next_id += 1;
+            let durable = if needs_write {
+                let wait = disk.commit(rows, audits, vec![changes]);
+                let told = written_tx.clone();
+                tokio::spawn(async move {
+                    let _ = told.send((id, wait.await.unwrap_or(false)));
+                });
+                None
+            } else {
+                Some(true)
+            };
+            held.push_back(Held {
+                id,
+                durable,
                 fx,
-                &mut conns,
-                &chat,
-                &mut history,
-                &mut disk,
-                now,
-                cfg.max_out_bytes,
-            );
-        }));
-        if carried.is_err() {
-            crate::error!(
-                "hub",
-                "a panic while carrying out effects; that batch was dropped and the hub carries on"
-            );
+                replies,
+            });
         }
-        if !history.is_empty() {
-            disk.append(std::mem::take(&mut history));
-        }
-        if done.is_some() {
+        release(&mut held, &mut conns, &chat, cfg.max_out_bytes);
+        // Stopping waits until everything handed over is on disk and has been carried out.
+        if (stopping.is_some() || closed) && held.is_empty() {
             break;
         }
     }
-    // Shutting down: tell every device, so each reconnects at once instead of waiting to notice, then save.
+    // Shutting down: tell every device, so each reconnects at once instead of waiting to notice. Everything is already on disk.
     for c in conns.values() {
         let _ = c.tx.try_send(Out::Close(1001, "hub is restarting"));
     }
-    disk.snapshot(core.snapshot(), now_ms());
-    // Everything handed over is on disk before the hub says it has stopped.
-    disk.flush();
-    if let Some(d) = done {
+    if let Some(d) = stopping {
         let _ = d.send(());
     }
 }
@@ -185,9 +288,7 @@ fn guard<R>(
                 "a handler panicked; restoring the core from its last saved state"
             );
             *core = HubCore::default();
-            if let Ok(Some(saved)) = store.load_snapshot() {
-                core.restore(&saved);
-            }
+            load_core(core, store);
             for (conn, c) in conns {
                 core.node_connected(&c.node, *conn);
                 core.assume_online(&c.node);
@@ -210,9 +311,6 @@ fn carry_out(
     fx: Vec<Effect>,
     conns: &mut HashMap<u64, Conn>,
     chat: &broadcast::Sender<Chat>,
-    history: &mut Vec<HistoryRow>,
-    disk: &mut Disk,
-    now: i64,
     max_out: usize,
 ) {
     for e in fx {
@@ -227,36 +325,10 @@ fn carry_out(
                 // With nobody listening (no chat bridge yet) this is simply dropped.
                 let _ = chat.send(c);
             }
-            Effect::Persist(Persist::History {
-                project,
-                thread,
-                from,
-                kind,
-                text,
-                at,
-            }) => {
-                history.push(HistoryRow {
-                    id: 0,
-                    at,
-                    project,
-                    thread,
-                    from,
-                    kind: kind.to_string(),
-                    text,
-                });
-            }
-            Effect::Persist(Persist::Audit {
-                project,
-                who,
-                what,
-                at,
-            }) => {
-                disk.audit(at, &project, &who, &what);
-            }
+            // History and audit lines were written with the batch (see `split_persist`).
             Effect::Persist(_) | Effect::AcceptCheck { .. } => {}
         }
     }
-    let _ = now;
 }
 
 /// Queues one frame for a device. If the device's backlog or queue is full, it is dropped (and will reconnect).

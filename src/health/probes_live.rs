@@ -41,7 +41,6 @@ fn server_cfg(bind: &str) -> ServerConfig {
     ServerConfig {
         bind: bind.parse().expect("address"),
         ping_every: Duration::from_millis(100),
-        save_every: Duration::from_millis(10),
         tick_every: Duration::from_millis(50),
         ..ServerConfig::default()
     }
@@ -219,11 +218,11 @@ fn server_probe() -> Probe {
         let saved = eventually(async || {
             Store::open(&db, None)
                 .ok()
-                .and_then(|s| s.load_snapshot().ok().flatten())
-                .is_some_and(|s| s.contains("p/a"))
+                .and_then(|s| s.load_state().ok())
+                .is_some_and(|rows| rows.iter().any(|(k, _)| k == "agents:p/a"))
         })
         .await;
-        ensure!(saved, "state is not being saved by the timer");
+        ensure!(saved, "the agent was never saved to the database");
         hub.shutdown().await;
         Ok("bad token refused, good token welcomed, device listed, heartbeats counted, state saved by the timer, clean shutdown".into())
     })

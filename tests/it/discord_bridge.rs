@@ -102,7 +102,6 @@ async fn rig_with(name: &str, me_failures: usize) -> Rig {
         ServerConfig {
             bind: "127.0.0.1:0".parse().unwrap(),
             ping_every: Duration::from_millis(300),
-            save_every: Duration::from_millis(20),
             tick_every: Duration::from_millis(100),
             ..ServerConfig::default()
         },

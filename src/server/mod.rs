@@ -45,8 +45,6 @@ pub struct Config {
     pub max_frame: usize,
     /// Most bytes allowed to wait for a device that is not reading, before it is dropped.
     pub max_out_bytes: usize,
-    /// How often changed state is saved.
-    pub save_every: Duration,
     /// How often time-based work (reminders, expiry, release of waiting messages) runs.
     pub tick_every: Duration,
     /// How often old history is moved out of the database into compressed files. None never does.
@@ -85,7 +83,6 @@ impl Default for Config {
             ping_every: Duration::from_secs(20),
             max_frame: 1 << 20,
             max_out_bytes: 4 << 20,
-            save_every: Duration::from_millis(50),
             tick_every: Duration::from_secs(5),
             rollover_every: Some(Duration::from_secs(3600)),
             hot_window: Duration::from_secs(14 * 24 * 3600),
@@ -105,8 +102,16 @@ pub(crate) enum Out {
     Close(u16, &'static str),
 }
 
-/// Something to run against the core: it gets the core and the time and returns the effects to carry out.
-pub(crate) type Job = Box<dyn FnOnce(&mut HubCore, i64) -> Vec<crate::hub::Effect> + Send>;
+/// What happens once a job's changes are on disk: the caller gets its answer. Held back until then, so nobody is told "done" about
+/// something that a crash could still lose.
+pub(crate) type Reply = Box<dyn FnOnce() + Send>;
+
+/// Something to run against the core: it gets the core and the time and returns the effects to carry out, and the reply for the
+/// caller. Both wait for the commit.
+pub(crate) type Job = Box<dyn FnOnce(&mut HubCore, i64) -> (Vec<crate::hub::Effect>, Reply) + Send>;
+
+/// Something to read from the core. It changes nothing, so it is answered at once and never costs a write.
+pub(crate) type ReadJob = Box<dyn FnOnce(&HubCore, i64) + Send>;
 
 /// A job for the actor.
 pub(crate) enum Input {
@@ -135,8 +140,10 @@ pub(crate) enum Input {
     Alive {
         node: String,
     },
-    /// Run something against the core and the clock (used by the chat bridge and the website).
+    /// Run something against the core and the clock that may change it (used by the chat bridge and the website).
     Call(Job),
+    /// Look at the core without changing it.
+    Read(ReadJob),
     /// Save and stop, then say when done.
     Shutdown {
         done: oneshot::Sender<()>,
@@ -160,8 +167,24 @@ impl HubHandle {
         let (tx, rx) = oneshot::channel();
         let job = Input::Call(Box::new(move |core, now| {
             let (r, fx) = f(core, now);
-            let _ = tx.send(r);
-            fx
+            let reply: Reply = Box::new(move || {
+                let _ = tx.send(r);
+            });
+            (fx, reply)
+        }));
+        self.to_actor.send(job).await.ok()?;
+        rx.await.ok()
+    }
+
+    /// Looks at the core and returns what the closure returns. It cannot change anything, so it is answered at once. None if the hub is
+    /// gone or the closure failed.
+    pub async fn read<R: Send + 'static>(
+        &self,
+        f: impl FnOnce(&HubCore, i64) -> R + Send + 'static,
+    ) -> Option<R> {
+        let (tx, rx) = oneshot::channel();
+        let job = Input::Read(Box::new(move |core, now| {
+            let _ = tx.send(f(core, now));
         }));
         self.to_actor.send(job).await.ok()?;
         rx.await.ok()
@@ -200,18 +223,26 @@ impl Hub {
         let (tx, rx) = oneshot::channel();
         let job = Input::Call(Box::new(move |core, now| {
             let (r, fx) = f(core, now);
-            let _ = tx.send(r);
-            fx
+            let reply: Reply = Box::new(move || {
+                let _ = tx.send(r);
+            });
+            (fx, reply)
         }));
         self.to_actor.send(job).await.ok()?;
         rx.await.ok()
     }
 
+    /// Looks at the core without changing it (see `HubHandle::read`).
+    pub async fn read<R: Send + 'static>(
+        &self,
+        f: impl FnOnce(&HubCore, i64) -> R + Send + 'static,
+    ) -> Option<R> {
+        self.handle().read(f).await
+    }
+
     /// Every machine the hub knows, with whether it is connected and when it was last heard from.
     pub async fn devices(&self) -> Vec<crate::hub::DeviceRow> {
-        self.call(|c, _| (c.devices(), vec![]))
-            .await
-            .unwrap_or_default()
+        self.read(|c, _| c.devices()).await.unwrap_or_default()
     }
 
     /// Stops accepting devices, tells every connected device the hub is going away (so it reconnects at once), saves

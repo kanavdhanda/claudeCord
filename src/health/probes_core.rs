@@ -183,7 +183,7 @@ pub fn features() -> Vec<Feature> {
         },
         Feature {
             name: "saving and restoring state",
-            covers: &["hub/snapshot"],
+            covers: &["hub/snapshot", "hub/tracked"],
             probe: snapshot,
         },
         Feature {
@@ -725,7 +725,29 @@ fn snapshot() -> Probe {
             "a message queued before the restart was lost"
         );
         let _ = AgentStatus::Idle;
-        Ok("state restored, waiting message delivered after restart, garbage refused".into())
+        // Saving only what changed, as rows, rebuilds exactly the same state as saving it all.
+        let mut db = Store::open_memory().map_err(|e| e.to_string())?;
+        let changes = c.take_changes();
+        ensure!(
+            !changes.is_empty(),
+            "changes were made and none were noticed"
+        );
+        db.commit(&[], &[], &[changes]).map_err(|e| e.to_string())?;
+        let mut e = HubCore::default();
+        e.restore_rows(db.load_state().map_err(|e| e.to_string())?);
+        let (a, b): (serde_json::Value, serde_json::Value) = (
+            serde_json::from_str(&c.snapshot()).map_err(|e| e.to_string())?,
+            serde_json::from_str(&e.snapshot()).map_err(|e| e.to_string())?,
+        );
+        ensure!(
+            a == b,
+            "state rebuilt from changed rows differs from the state it was saved from"
+        );
+        ensure!(
+            c.take_changes().is_empty(),
+            "the same changes were reported twice"
+        );
+        Ok("state restored, waiting message delivered after restart, garbage refused, changed rows rebuild identical state".into())
     })
 }
 

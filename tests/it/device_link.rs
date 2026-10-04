@@ -31,7 +31,6 @@ fn server_cfg(bind: &str) -> ServerConfig {
     ServerConfig {
         bind: bind.parse().unwrap(),
         ping_every: Duration::from_millis(100),
-        save_every: Duration::from_millis(10),
         tick_every: Duration::from_millis(50),
         ..ServerConfig::default()
     }

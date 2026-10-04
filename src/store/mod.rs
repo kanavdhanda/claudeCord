@@ -27,6 +27,22 @@ pub struct HistoryRow {
     pub text: String,
 }
 
+/// What to write to bring the saved state up to date: rows to insert or replace, rows to delete, and collections whose rows are all
+/// replaced (their old rows are deleted first). Made by the hub core from what changed; see `crate::hub::tracked`.
+#[derive(Default, Debug, Clone)]
+pub struct Changes {
+    pub upserts: Vec<(String, String)>,
+    pub deletes: Vec<String>,
+    /// Row-name prefixes (`name:`) whose rows are all deleted before the upserts.
+    pub clears: Vec<String>,
+}
+
+impl Changes {
+    pub fn is_empty(&self) -> bool {
+        self.upserts.is_empty() && self.deletes.is_empty() && self.clears.is_empty()
+    }
+}
+
 /// A compressed file of old history and what it covers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Segment {
@@ -81,6 +97,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS uptime (component TEXT NOT NULL, at INTEGER NOT NULL, state TEXT NOT NULL);
              CREATE INDEX IF NOT EXISTS uptime_component ON uptime (component, at);
+             CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, body TEXT NOT NULL) WITHOUT ROWID;
              CREATE TABLE IF NOT EXISTS segments (
                  file TEXT PRIMARY KEY, project TEXT NOT NULL, first_id INTEGER NOT NULL, last_id INTEGER NOT NULL, rows INTEGER NOT NULL);",
         )?;
@@ -233,6 +250,55 @@ impl Store {
         all.sort_by_key(|r| r.id);
         all.dedup_by_key(|r| r.id);
         Ok(all)
+    }
+
+    /// Saves a batch's history rows, audit lines and changes to the core's state in ONE transaction: all of it is on disk, or none of it,
+    /// so the state and the history can never disagree after a crash. `audits` are (at, project, who, what). Each entry of `changes`
+    /// is applied in order, so a later change to a row wins.
+    pub fn commit(
+        &mut self,
+        rows: &[HistoryRow],
+        audits: &[(i64, String, String, String)],
+        changes: &[Changes],
+    ) -> rusqlite::Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut st = tx.prepare_cached("INSERT INTO history (at, project, thread, sender, kind, body) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")?;
+            for r in rows {
+                st.execute(params![r.at, r.project, r.thread, r.from, r.kind, r.text])?;
+            }
+            let mut au = tx.prepare_cached(
+                "INSERT INTO audit (at, project, who, what) VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for (at, project, who, what) in audits {
+                au.execute(params![at, project, who, what])?;
+            }
+            let mut up = tx.prepare_cached("INSERT INTO state (key, body) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET body = ?2")?;
+            let mut del = tx.prepare_cached("DELETE FROM state WHERE key = ?1")?;
+            for c in changes {
+                for prefix in &c.clears {
+                    // A prefix is `name:`; `substr` compares exactly, with no wildcard characters to escape.
+                    tx.execute(
+                        "DELETE FROM state WHERE substr(key, 1, ?2) = ?1",
+                        params![prefix, prefix.len() as i64],
+                    )?;
+                }
+                for (key, body) in &c.upserts {
+                    up.execute(params![key, body])?;
+                }
+                for key in &c.deletes {
+                    del.execute(params![key])?;
+                }
+            }
+        }
+        tx.commit()
+    }
+
+    /// Every saved state row, as (key, JSON). Empty on a fresh database, or one that still has the older single-text save.
+    pub fn load_state(&self) -> rusqlite::Result<Vec<(String, String)>> {
+        let mut st = self.conn.prepare("SELECT key, body FROM state")?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
     }
 
     /// Saves the core's state, replacing the previous save, in one transaction.

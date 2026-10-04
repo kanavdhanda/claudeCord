@@ -1,28 +1,34 @@
-//! The hub's disk writes, kept off the async runtime. The database syncs every commit to disk (so nothing acknowledged is lost
-//! in a crash), and a sync can take tens of milliseconds on a slow disk. Done inside the actor's own task, that would stop every
-//! connection's keepalive and message handling for as long as the disk takes, and on a one-core server it would stop all of them.
-//! So writes are handed to a thread of their own, in order, and the actor carries on. Reads stay on the actor's own connection
-//! (the database allows readers and one writer at once).
+//! The hub's disk writes, kept off the async runtime, and the one rule they serve: NOTHING is sent, reacted to or acknowledged until
+//! the change that caused it is on disk. The actor hands each batch's history rows, audit lines and (when state changed) the core's
+//! state changes to the writer thread as one commit, and holds the batch's effects until the commit is done. Many batches that arrive while
+//! one is being written share the next write (group commit), so what a commit costs does not grow with how many messages there are.
 //!
-//! What is saved is unchanged: history rows and audit lines are written in the order they were handed over, and of several
-//! snapshots waiting at once only the newest is written, because it replaces the older ones anyway. `flush` waits until
-//! everything handed over is on disk, and shutdown calls it. An in-memory database (used by some tests) cannot be shared with a
-//! second connection, so it is written inline instead.
+//! The database syncs every transaction to disk (WAL, synchronous FULL), and a commit is ONE transaction holding the history rows,
+//! the audit lines and the changes to the saved state (only the rows that changed, see `crate::hub::tracked`), so after a crash the
+//! state and the history always agree and nothing acknowledged is missing.
+//!
+//! Reads stay on the actor's own connection (the database allows readers and one writer at once). An in-memory database (used by some
+//! tests) cannot be shared with a second connection, so it is written inline instead.
 
-use crate::store::{HistoryRow, Store};
+use crate::store::{Changes, HistoryRow, Store};
 use std::sync::mpsc::{Sender, channel};
 use std::thread::JoinHandle;
+use tokio::sync::oneshot;
 
-enum Job {
-    History(Vec<HistoryRow>),
-    Snapshot(String, i64),
-    Audit(i64, String, String, String),
-    Flush(Sender<()>),
+/// An audit line: (at, project, who, what).
+pub(crate) type Audit = (i64, String, String, String);
+
+struct Commit {
+    rows: Vec<HistoryRow>,
+    audits: Vec<Audit>,
+    changes: Vec<Changes>,
+    /// Told whether the commit reached the disk.
+    done: oneshot::Sender<bool>,
 }
 
 enum Mode {
     Thread {
-        tx: Sender<Job>,
+        tx: Sender<Commit>,
         join: Option<JoinHandle<()>>,
     },
     Inline,
@@ -34,6 +40,24 @@ pub(crate) struct Disk {
     mode: Mode,
 }
 
+/// Writes what is waiting in one transaction, trying a few times if the disk objects. Returns whether it is on disk.
+fn write(store: &mut Store, rows: &[HistoryRow], audits: &[Audit], changes: &[Changes]) -> bool {
+    for attempt in 0..4u32 {
+        match store.commit(rows, audits, changes) {
+            Ok(()) => return true,
+            Err(e) => {
+                crate::error!(
+                    "hub",
+                    "could not write to the database (try {}): {e}",
+                    attempt + 1
+                );
+                std::thread::sleep(std::time::Duration::from_millis(50 << attempt));
+            }
+        }
+    }
+    false
+}
+
 impl Disk {
     pub(crate) fn new(store: Store) -> Self {
         let Some(mut writer) = store.fork() else {
@@ -42,35 +66,30 @@ impl Disk {
                 mode: Mode::Inline,
             };
         };
-        let (tx, rx) = channel::<Job>();
+        let (tx, rx) = channel::<Commit>();
         let join = std::thread::Builder::new()
             .name("hub-disk".into())
             .spawn(move || {
                 while let Ok(first) = rx.recv() {
-                    // Take everything waiting, so a snapshot that was already replaced by a newer one is never written.
-                    let mut jobs = vec![first];
-                    jobs.extend(rx.try_iter());
-                    let newest_snapshot = jobs.iter().rposition(|j| matches!(j, Job::Snapshot(..)));
-                    for (i, job) in jobs.into_iter().enumerate() {
-                        match job {
-                            Job::History(rows) => {
-                                if let Err(e) = writer.append(&rows) {
-                                    crate::error!("hub", "could not save history: {e}");
-                                }
-                            }
-                            Job::Snapshot(body, at) if Some(i) == newest_snapshot => {
-                                if let Err(e) = writer.save_snapshot(&body, at) {
-                                    crate::error!("hub", "could not save state: {e}");
-                                }
-                            }
-                            Job::Snapshot(..) => {}
-                            Job::Audit(at, project, who, what) => {
-                                let _ = writer.audit(at, &project, &who, &what);
-                            }
-                            Job::Flush(done) => {
-                                let _ = done.send(());
-                            }
-                        }
+                    // Everything waiting becomes one transaction, with rows, audit lines and state changes in the order handed over.
+                    let mut batch = vec![first];
+                    batch.extend(rx.try_iter());
+                    let mut rows = Vec::new();
+                    let mut audits = Vec::new();
+                    let mut changes = Vec::new();
+                    let mut waiting = Vec::new();
+                    for c in batch {
+                        rows.extend(c.rows);
+                        audits.extend(c.audits);
+                        changes.extend(c.changes);
+                        waiting.push(c.done);
+                    }
+                    let ok = write(&mut writer, &rows, &audits, &changes);
+                    if !ok {
+                        crate::error!("hub", "giving up on this write: the hub is running WITHOUT durability until the disk recovers");
+                    }
+                    for done in waiting {
+                        let _ = done.send(ok);
                     }
                 }
             })
@@ -89,47 +108,36 @@ impl Disk {
         &self.store
     }
 
-    pub(crate) fn append(&mut self, rows: Vec<HistoryRow>) {
+    /// Hands over one batch's changes. The receiver completes with whether they are on disk.
+    pub(crate) fn commit(
+        &mut self,
+        rows: Vec<HistoryRow>,
+        audits: Vec<Audit>,
+        changes: Vec<Changes>,
+    ) -> oneshot::Receiver<bool> {
+        let (done, wait) = oneshot::channel();
         match &mut self.mode {
             Mode::Thread { tx, .. } => {
-                let _ = tx.send(Job::History(rows));
+                if let Err(e) = tx.send(Commit {
+                    rows,
+                    audits,
+                    changes,
+                    done,
+                }) {
+                    // The writer thread is gone; say so, and answer "not saved" so the actor does not wait for ever.
+                    crate::error!(
+                        "hub",
+                        "the disk writer has stopped; changes are not being saved"
+                    );
+                    let _ = e.0.done.send(false);
+                }
             }
             Mode::Inline => {
-                let _ = self.store.append(&rows);
+                let ok = write(&mut self.store, &rows, &audits, &changes);
+                let _ = done.send(ok);
             }
         }
-    }
-
-    pub(crate) fn snapshot(&mut self, body: String, at: i64) {
-        match &mut self.mode {
-            Mode::Thread { tx, .. } => {
-                let _ = tx.send(Job::Snapshot(body, at));
-            }
-            Mode::Inline => {
-                let _ = self.store.save_snapshot(&body, at);
-            }
-        }
-    }
-
-    pub(crate) fn audit(&mut self, at: i64, project: &str, who: &str, what: &str) {
-        match &mut self.mode {
-            Mode::Thread { tx, .. } => {
-                let _ = tx.send(Job::Audit(at, project.into(), who.into(), what.into()));
-            }
-            Mode::Inline => {
-                let _ = self.store.audit(at, project, who, what);
-            }
-        }
-    }
-
-    /// Waits until everything handed over so far is on disk.
-    pub(crate) fn flush(&mut self) {
-        if let Mode::Thread { tx, .. } = &self.mode {
-            let (done, wait) = channel();
-            if tx.send(Job::Flush(done)).is_ok() {
-                let _ = wait.recv();
-            }
-        }
+        wait
     }
 }
 

@@ -87,6 +87,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | `src/hub/routing.rs` | How messages move: from a human to agents, between agents, and onto each agent's queue. |
 | `src/hub/snapshot.rs` | Saving and restoring the core's durable state. |
 | `src/hub/tasks.rs` | Tasks: what the lead hands to its peers and how they are tracked. |
+| `src/hub/tracked.rs` | Collections that remember what was changed in them, so saving state costs what changed and not how much state there is. |
 
 ## src/metrics
 
@@ -115,7 +116,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | File | What it is |
 |---|---|
 | `src/server/actor.rs` | The actor: the one task that owns the hub core and the store. |
-| `src/server/disk.rs` | The hub's disk writes, kept off the async runtime. |
+| `src/server/disk.rs` | The hub's disk writes, kept off the async runtime, and the one rule they serve: NOTHING is sent, reacted to or acknowledged until the change that caused it is on disk. |
 | `src/server/health.rs` | What a prober, a load balancer and the dashboard ask the hub about its own health. |
 | `src/server/login.rs` | "Sign in with Discord" for the dashboard, the standard OAuth2 code flow. |
 | `src/server/mod.rs` | The hub as a running server: one small web server that accepts devices over WebSocket, feeds what they send to the hub core, and carries out what the core asks for. |
@@ -157,6 +158,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | `tests/it/device_pty.rs` | The terminal side, with real pseudo-terminals and a stand-in agent (`cat`, which echoes what it is given). |
 | `tests/it/device_tmux.rs` | The tmux backend against a real tmux (each test skips itself where tmux is not installed): start, paste, type, read, see the program end, and stop. |
 | `tests/it/discord_bridge.rs` | The Discord bridge, against a stand-in Discord (its REST API and its live gateway) and a real hub with a real device link. |
+| `tests/it/durability.rs` | Durability: what is saved is exactly what changed, it is saved in one transaction with the history, and nothing is acknowledged before it is on disk. |
 | `tests/it/e2e.rs` | Everything together, on one machine: a real hub, a real device daemon, and a stand-in agent (a shell script named `claude` that prints the ready line and echoes each line it is given). |
 | `tests/it/edge.rs` | Edge cases and randomised checks: hostile or odd input must never panic, and rules that must hold for every input are checked on many generated ones (from a fixed seed, so a failure repeats). |
 | `tests/it/export.rs` | The Obsidian export: what notes it makes, that the links are right so the graph shows real connections, that running it again changes nothing, and that it includes history that has moved into compressed files. |

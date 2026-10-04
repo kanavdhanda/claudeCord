@@ -8,6 +8,7 @@ mod device_link;
 mod device_pty;
 mod device_tmux;
 mod discord_bridge;
+mod durability;
 mod e2e;
 mod edge;
 mod export;

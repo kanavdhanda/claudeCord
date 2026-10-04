@@ -92,7 +92,6 @@ fn cfg() -> Config {
         bind: "127.0.0.1:0".parse().unwrap(),
         ping_every: Duration::from_millis(80),
         max_out_bytes: 1 << 20,
-        save_every: Duration::from_millis(10),
         tick_every: Duration::from_millis(50),
         ..Config::default()
     }

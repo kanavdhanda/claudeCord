@@ -122,7 +122,6 @@ async fn rig_backend(
         ServerConfig {
             bind: "127.0.0.1:0".parse().unwrap(),
             ping_every: Duration::from_millis(200),
-            save_every: Duration::from_millis(10),
             tick_every: Duration::from_millis(50),
             ..ServerConfig::default()
         },

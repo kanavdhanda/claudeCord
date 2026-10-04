@@ -41,7 +41,6 @@ async fn rig(name: &str) -> (server::Hub, std::path::PathBuf) {
     core.add_owner("1");
     let cfg = Config {
         bind: "127.0.0.1:0".parse().unwrap(),
-        save_every: std::time::Duration::from_millis(10),
         ..Config::default()
     };
     let hub = server::start(cfg, core, Store::open(&d.join("hub.db"), None).unwrap())
