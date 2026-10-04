@@ -29,6 +29,7 @@ import {
 } from "./config.js";
 import { secretEnvNames } from "./env.js";
 import { FileReceiver, readChunks, resolveInside } from "./files.js";
+import { Sampler } from "./sampler.js";
 import { buildRules } from "./rules.js";
 import * as tmux from "./tmux.js";
 
@@ -64,6 +65,7 @@ export class Daemon {
   private closing = false;
   private server?: Server;
   private files = new FileReceiver();
+  private sampler = new Sampler();
   private chain: Promise<void> = Promise.resolve();
 
   /** `handleSignals: false` is for tests, where the process must not exit on SIGINT or SIGTERM. */
@@ -74,6 +76,7 @@ export class Daemon {
   /** Stops every agent, drops the hub link and closes the local socket. */
   async close(): Promise<void> {
     this.closing = true;
+    this.sampler.stop();
     for (const a of [...this.agents.values()]) await this.stopAgent(a.spec.agentId);
     this.ws?.close();
     await new Promise<void>((r) => (this.server ? this.server.close(() => r()) : r()));
@@ -93,6 +96,7 @@ export class Daemon {
     ensureMeshDir();
     this.listen();
     this.connect();
+    this.sampler.start();
     console.log(`claudecord node "${this.cfg.nodeName}" started`);
   }
 
@@ -292,7 +296,7 @@ export class Daemon {
     this.agents.set(spec.agentId, rt);
     saveProjectDir(o.project, cwd);
     this.send({ t: "agent.register", agent: spec, cwd });
-    rt.start();
+    this.sampler.add(rt);
     return spec;
   }
 
@@ -300,6 +304,7 @@ export class Daemon {
     const rt = this.agents.get(agentId);
     if (!rt) return false;
     this.agents.delete(agentId);
+    this.sampler.remove(rt);
     await rt.stop();
     this.send({ t: "agent.gone", agentId });
     return true;
