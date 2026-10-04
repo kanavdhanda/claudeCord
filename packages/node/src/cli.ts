@@ -58,6 +58,8 @@ Used by agents
   claudecord ask "question" [--option text]...
   claudecord report --title t "summary" [--artifact text]...
   claudecord send path [--to agent] [--caption text] [--thread t]
+  claudecord assign agent "task" [--thread t]     (lead only)
+  claudecord done T1 "summary"
 `;
 
 async function init(a: Args): Promise<void> {
@@ -207,6 +209,22 @@ async function main(): Promise<void> {
       if (!summary || !title) throw new Error('usage: claudecord report --title t "summary" [--artifact text]...');
       const r = await callDaemon({ op: "report", agentId: currentAgentId(), title, summary, artifacts: a.flags.get("artifact") });
       if (!r.ok) throw new Error(r.error);
+      return;
+    }
+    case "assign": {
+      const [to, ...rest] = a.pos;
+      if (!to || !rest.length) throw new Error('usage: claudecord assign agent "task" [--thread t]');
+      const r = await callDaemon({ op: "assign", agentId: currentAgentId(), to, task: rest.join(" "), thread: flag(a, "thread") });
+      if (!r.ok) throw new Error(r.error);
+      console.log(String(r.data));
+      return;
+    }
+    case "done": {
+      const [taskId, ...rest] = a.pos;
+      if (!taskId || !rest.length) throw new Error('usage: claudecord done T1 "summary"');
+      const r = await callDaemon({ op: "taskdone", agentId: currentAgentId(), taskId, summary: rest.join(" ") });
+      if (!r.ok) throw new Error(r.error);
+      console.log(String(r.data));
       return;
     }
     case "send": {

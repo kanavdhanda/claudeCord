@@ -24,6 +24,22 @@ export interface AgentRow {
   is_lead: number;
 }
 
+export type TaskState = "assigned" | "accepted" | "done";
+
+export interface TaskRow {
+  /** Display id such as T3, unique within a project. */
+  id: string;
+  project: string;
+  num: number;
+  from_agent: string;
+  to_agent: string;
+  text: string;
+  state: TaskState;
+  summary: string | null;
+  created: number;
+  updated: number;
+}
+
 export class Db {
   private db: DatabaseSyncType;
   // Agents are read on every routed message, so they are served from memory and written through to SQLite.
@@ -55,8 +71,61 @@ export class Db {
         role TEXT,
         is_lead INTEGER NOT NULL DEFAULT 0
       );
+      CREATE TABLE IF NOT EXISTS tasks (
+        project TEXT NOT NULL,
+        num INTEGER NOT NULL,
+        from_agent TEXT NOT NULL,
+        to_agent TEXT NOT NULL,
+        text TEXT NOT NULL,
+        state TEXT NOT NULL,
+        summary TEXT,
+        created INTEGER NOT NULL,
+        updated INTEGER NOT NULL,
+        PRIMARY KEY (project, num)
+      );
     `);
+    for (const t of this.db.prepare("SELECT * FROM tasks").all() as unknown as Omit<TaskRow, "id">[]) this.cacheTask(t);
     for (const a of this.db.prepare("SELECT * FROM agents").all() as unknown as AgentRow[]) this.cache(a);
+  }
+
+  private tasks = new Map<string, Map<number, TaskRow>>();
+
+  private cacheTask(t: Omit<TaskRow, "id">): TaskRow {
+    const row: TaskRow = { ...t, id: `T${t.num}` };
+    let m = this.tasks.get(t.project);
+    if (!m) this.tasks.set(t.project, (m = new Map()));
+    m.set(t.num, row);
+    return row;
+  }
+
+  createTask(project: string, from: string, to: string, text: string): TaskRow {
+    const num = Math.max(0, ...(this.tasks.get(project)?.keys() ?? [])) + 1;
+    const now = Date.now();
+    this.db
+      .prepare("INSERT INTO tasks(project,num,from_agent,to_agent,text,state,summary,created,updated) VALUES(?,?,?,?,?,?,?,?,?)")
+      .run(project, num, from, to, text, "assigned", null, now, now);
+    return this.cacheTask({ project, num, from_agent: from, to_agent: to, text, state: "assigned", summary: null, created: now, updated: now });
+  }
+
+  getTask(project: string, id: string): TaskRow | undefined {
+    const num = Number(id.replace(/^T/i, ""));
+    return this.tasks.get(project)?.get(num);
+  }
+
+  setTaskState(project: string, id: string, state: TaskState, summary?: string): TaskRow | undefined {
+    const t = this.getTask(project, id);
+    if (!t) return undefined;
+    t.state = state;
+    t.updated = Date.now();
+    if (summary !== undefined) t.summary = summary;
+    this.db
+      .prepare("UPDATE tasks SET state=?, summary=?, updated=? WHERE project=? AND num=?")
+      .run(t.state, t.summary, t.updated, project, t.num);
+    return t;
+  }
+
+  tasksOfProject(project: string): TaskRow[] {
+    return [...(this.tasks.get(project)?.values() ?? [])].sort((a, b) => a.num - b.num);
   }
 
   private cache(a: AgentRow): void {

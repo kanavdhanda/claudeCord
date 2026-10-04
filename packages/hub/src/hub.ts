@@ -13,7 +13,26 @@ export interface Outbound {
   postReport(project: string, agent: AgentRow, title: string, summary: string, artifacts?: string[]): Promise<void>;
   postFile(project: string, agent: AgentRow, name: string, data: Buffer, caption?: string, thread?: string): Promise<void>;
   notice(project: string, text: string, mention?: boolean): Promise<void>;
+  /** Marks a human message as accepted by an agent, for example with a reaction. */
+  confirm(project: string, ref: string, agentName: string): Promise<void>;
   refreshStatus(project: string): void;
+}
+
+export interface RouteResult {
+  /** Agents the message was sent to. */
+  targets: string[];
+  /** Targets whose node is not connected, so nothing was delivered. */
+  offline: string[];
+  /** Targets that will not pick the message up right away, with the reason. */
+  held: { name: string; why: string }[];
+}
+
+interface Pending {
+  project: string;
+  agentId: string;
+  /** Opaque Discord message reference of the human message, if any. */
+  ref?: string;
+  taskId?: string;
 }
 
 export interface PendingAsk {
@@ -25,6 +44,14 @@ export interface PendingAsk {
 }
 
 const DEFAULT_STREAK_LIMIT = 20;
+const DEFAULT_ACCEPT_TIMEOUT_MS = 30_000;
+const HOLD_REASONS: Partial<Record<AgentStatus, string>> = {
+  paused: "paused",
+  limited: "at a usage limit",
+  waiting_input: "waiting on an answer",
+  offline: "offline",
+  starting: "still starting",
+};
 
 /** Core state and routing. Discord-agnostic so it can be unit tested. */
 export class Hub {
@@ -33,11 +60,14 @@ export class Hub {
   asks = new Map<string, PendingAsk[]>();
   private streak = new Map<string, number>();
   private uploads = new Map<string, { chunks: Buffer[]; bytes: number }>();
+  private pending = new Map<string, Pending>();
+  private seq = 0;
   out!: Outbound;
 
   constructor(
     readonly db: Db,
     private streakLimit = DEFAULT_STREAK_LIMIT,
+    private acceptTimeoutMs = DEFAULT_ACCEPT_TIMEOUT_MS,
   ) {}
 
   // Node lifecycle
@@ -114,6 +144,12 @@ export class Hub {
         this.out.refreshStatus(a.project);
         return;
       }
+      case "agent.accepted":
+        return this.onAccepted(f.agentId, f.msgIds);
+      case "agent.assign":
+        return this.assign(f.agentId, f.to, f.task, f.thread);
+      case "agent.taskdone":
+        return this.taskDone(f.agentId, f.taskId, f.summary);
       case "file.chunk":
         return this.onFileChunk(f);
       case "agent.gone": {
@@ -145,15 +181,122 @@ export class Hub {
     const a = this.agent(spec.agentId)!;
     await this.out.notice(spec.project, `${a.name} joined (${a.adapter}${a.model ? `, ${a.model}` : ""}, ${a.node_name}).`);
     this.out.refreshStatus(spec.project);
-    // Tell the newcomer who else is here.
-    const peers = this.db.agentsOfProject(spec.project).filter((p) => p.agent_id !== spec.agentId);
-    if (peers.length) {
-      conn.send({
-        t: "deliver",
-        agentId: spec.agentId,
-        from: "system",
-        text: `Peers in this project: ${peers.map((p) => `${p.name}${p.is_lead ? " (lead)" : ""}`).join(", ")}.`,
-      });
+    await this.briefOnJoin(a);
+  }
+
+  /** Tells the newcomer who is here and what its role is, and lets the lead know about new peers. */
+  private async briefOnJoin(a: AgentRow): Promise<void> {
+    const peers = this.db.agentsOfProject(a.project).filter((p) => p.agent_id !== a.agent_id);
+    const lead = this.db.agentsOfProject(a.project).find((p) => p.is_lead);
+    if (a.is_lead) {
+      this.system(a, this.leadBrief(a, peers));
+    } else if (lead) {
+      this.system(a, this.workerBrief(a, lead, peers));
+      this.system(lead, `${a.name} joined (${a.adapter}${a.model ? `, ${a.model}` : ""}${a.role ? `, ${a.role}` : ""}). You can assign work to them.`);
+    }
+  }
+
+  private leadBrief(a: AgentRow, peers: AgentRow[]): string {
+    if (!peers.length) {
+      return `You are the lead of project ${a.project} and nobody else is here yet. Do the work yourself. If peers join you will be told, and then you can split work.`;
+    }
+    return [
+      `You are the lead of project ${a.project}. Peers: ${peers.map((p) => `${p.name}${p.role ? ` (${p.role})` : ""}`).join(", ")}.`,
+      "When the engineer gives a task: discuss the approach briefly in chat, split it into subtasks, post the plan in a thread, and give each subtask to one peer with the assign tool (agent, task). Do not do your peers' work.",
+      "Each assignment is tracked as a task id. You are told when a peer accepts and when they finish. When every task is done, integrate the results and send the single final report.",
+    ].join("\n");
+  }
+
+  private workerBrief(a: AgentRow, lead: AgentRow, peers: AgentRow[]): string {
+    return [
+      `${lead.name} is the lead of project ${a.project}. Peers: ${[lead, ...peers.filter((p) => p.agent_id !== lead.agent_id)].map((p) => p.name).join(", ")}.`,
+      "Take assignments from the lead. Each arrives as a task with an id. Work on it, then call task_done with that id and a short summary. Ask the lead for clarification before asking the engineer.",
+    ].join("\n");
+  }
+
+  private system(a: AgentRow, text: string): void {
+    this.sendTo(a, { t: "deliver", agentId: a.agent_id, from: "system", text });
+  }
+
+  setLead(project: string, agentId: string): AgentRow | undefined {
+    const a = this.agent(agentId);
+    if (!a || a.project !== project) return undefined;
+    this.db.setLead(project, agentId);
+    const all = this.db.agentsOfProject(project);
+    for (const m of all) {
+      const peers = all.filter((p) => p.agent_id !== m.agent_id);
+      this.system(m, m.agent_id === agentId ? this.leadBrief(m, peers) : this.workerBrief(m, a, peers));
+    }
+    this.out.refreshStatus(project);
+    return a;
+  }
+
+  // Acceptance and tasks
+
+  /** Sends a delivery and, when something should be confirmed, tracks it until the node reports acceptance. */
+  private deliver(a: AgentRow, from: string, text: string, o: { thread?: string; ref?: string; taskId?: string } = {}): boolean {
+    let msgId: string | undefined;
+    if (o.ref || o.taskId) {
+      msgId = `m${++this.seq}`;
+      this.pending.set(msgId, { project: a.project, agentId: a.agent_id, ref: o.ref, taskId: o.taskId });
+    }
+    const sent = this.sendTo(a, { t: "deliver", agentId: a.agent_id, from, text, thread: o.thread, msgId });
+    if (!sent && msgId) this.pending.delete(msgId);
+    return sent;
+  }
+
+  private async onAccepted(agentId: string, msgIds: string[]): Promise<void> {
+    const a = this.agent(agentId);
+    if (!a) return;
+    for (const id of msgIds) {
+      const p = this.pending.get(id);
+      if (!p || p.agentId !== agentId) continue;
+      this.pending.delete(id);
+      if (p.ref) await this.out.confirm(p.project, p.ref, a.name).catch(() => {});
+      if (p.taskId) {
+        this.db.setTaskState(p.project, p.taskId, "accepted");
+        await this.out.notice(p.project, `${a.name} accepted ${p.taskId}.`);
+      }
+    }
+  }
+
+  private async assign(fromId: string, toName: string, task: string, thread?: string): Promise<void> {
+    const from = this.agent(fromId);
+    if (!from) return;
+    if (!from.is_lead) {
+      const lead = this.db.agentsOfProject(from.project).find((p) => p.is_lead);
+      this.system(from, `Only the lead assigns tasks.${lead ? ` Ask ${lead.name} if you need something done.` : ""}`);
+      return;
+    }
+    const to = this.findByName(from.project, toName);
+    if (!to || to.agent_id === from.agent_id) {
+      this.system(from, `Cannot assign to ${toName}. Peers: ${this.db.agentsOfProject(from.project).filter((p) => p.agent_id !== from.agent_id).map((p) => p.name).join(", ") || "none"}.`);
+      return;
+    }
+    const t = this.db.createTask(from.project, from.agent_id, to.agent_id, task);
+    const sent = this.deliver(to, from.name, `Task ${t.id}: ${task}\nWhen finished, call task_done with id ${t.id} and a short summary.`, { thread, taskId: t.id });
+    await this.out.post(from.project, from, `@${to.name} ${t.id}: ${task}`, thread);
+    if (!sent) this.system(from, `${to.name} is offline, so ${t.id} was not delivered.`);
+  }
+
+  private async taskDone(agentId: string, taskId: string, summary: string): Promise<void> {
+    const a = this.agent(agentId);
+    if (!a) return;
+    const t = this.db.getTask(a.project, taskId);
+    if (!t || t.to_agent !== a.agent_id) {
+      this.system(a, `Task ${taskId} is not assigned to you.`);
+      return;
+    }
+    this.db.setTaskState(a.project, t.id, "done", summary);
+    await this.out.post(a.project, a, `Finished ${t.id}: ${summary}`);
+    const lead = this.agent(t.from_agent);
+    if (lead) {
+      this.system(lead, `${a.name} finished ${t.id}: ${summary}`);
+      const all = this.db.tasksOfProject(a.project);
+      if (all.length && all.every((x) => x.state === "done")) {
+        this.system(lead, `All ${all.length} task(s) are done. Integrate the results and send the single final report.`);
+        await this.out.notice(a.project, `All ${all.length} task(s) are done.`);
+      }
     }
   }
 
@@ -237,8 +380,8 @@ export class Hub {
     return true;
   }
 
-  /** Message from the human in a project channel or thread. */
-  humanMessage(project: string, text: string, thread?: string): string[] {
+  /** Message from the human in a project channel or thread. `ref` identifies it for the acceptance confirmation. */
+  humanMessage(project: string, text: string, thread?: string, ref?: string): RouteResult {
     this.streak.set(project, 0);
     const agents = this.db.agentsOfProject(project);
     const mentioned = agents.filter((a) => new RegExp(`(^|\\W)@${escapeRe(a.name)}(\\W|$)`, "i").test(text));
@@ -252,18 +395,36 @@ export class Hub {
       if (ask) {
         this.dropAsk(project, ask.askId);
         this.status.set(target.agent_id, { status: "thinking" });
-        this.sendTo(target, { t: "answer", agentId: target.agent_id, askId: ask.askId, text });
+        const ok = this.sendTo(target, { t: "answer", agentId: target.agent_id, askId: ask.askId, text });
         this.out.refreshStatus(project);
-        return [target.name];
+        return ok ? { targets: [target.name], offline: [], held: [] } : { targets: [target.name], offline: [target.name], held: [] };
       }
     }
 
     const targets = mentioned.length ? mentioned : this.pickTargets(project, text);
+    const res: RouteResult = { targets: targets.map((t) => t.name), offline: [], held: [] };
     const clean = text.trim();
     for (const t of targets) {
-      this.sendTo(t, { t: "deliver", agentId: t.agent_id, from: "engineer", text: clean, thread });
+      if (!this.deliver(t, "engineer", clean, { thread, ref })) {
+        res.offline.push(t.name);
+        continue;
+      }
+      const why = HOLD_REASONS[this.status.get(t.agent_id)?.status ?? "offline"];
+      if (why) res.held.push({ name: t.name, why });
+      if (ref) this.watchAcceptance(t, ref);
     }
-    return targets.map((t) => t.name);
+    return res;
+  }
+
+  /** If an agent has not picked a message up in time, say so instead of leaving the human guessing. */
+  private watchAcceptance(a: AgentRow, ref: string): void {
+    const timer = setTimeout(() => {
+      const waiting = [...this.pending.values()].some((p) => p.agentId === a.agent_id && p.ref === ref);
+      if (!waiting) return;
+      const st = this.status.get(a.agent_id)?.status ?? "offline";
+      void this.out.notice(a.project, `${a.name} has not picked up your message yet (${HOLD_REASONS[st] ?? st}). It stays queued.`);
+    }, this.acceptTimeoutMs);
+    timer.unref();
   }
 
   /** Agent chat is visible to peers. Mentioned peers get it, otherwise everyone. Loop guard applies. */

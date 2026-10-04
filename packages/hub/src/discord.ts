@@ -26,7 +26,9 @@ const STATUS_LABEL: Record<string, string> = {
   offline: "offline",
 };
 
-const ACK_REACTION = "\u{1F440}";
+// Reactions: seen means the hub routed the message, accepted means the agent started on it.
+const SEEN_REACTION = "\u{1F440}";
+const ACCEPTED_REACTION = "\u2705";
 
 export class DiscordBridge implements Outbound {
   client: Client;
@@ -174,6 +176,17 @@ export class DiscordBridge implements Outbound {
     });
   }
 
+  async confirm(project: string, ref: string, agentName: string): Promise<void> {
+    const [channelId, messageId] = ref.split(":");
+    if (!channelId || !messageId) return;
+    const ch = await this.client.channels.fetch(channelId);
+    if (!ch?.isTextBased()) return;
+    const msg = await ch.messages.fetch(messageId);
+    await msg.reactions.cache.get(SEEN_REACTION)?.users.remove(this.client.user!.id).catch(() => {});
+    await msg.react(ACCEPTED_REACTION);
+    void agentName;
+  }
+
   async notice(project: string, text: string, mention = false): Promise<void> {
     const ch = await this.channel(project);
     await ch.send({
@@ -199,6 +212,15 @@ export class DiscordBridge implements Outbound {
         const detail = s?.detail ? ` (${s.detail})` : "";
         return `${a.name}${a.is_lead ? " [lead]" : ""} - ${a.adapter}${a.model ? `/${a.model}` : ""} on ${a.node_name}: ${STATUS_LABEL[s?.status ?? "offline"]}${detail}`;
       })
+      .join("\n");
+  }
+
+  private taskBoard(project: string): string {
+    const rows = this.hub.db.tasksOfProject(project);
+    if (!rows.length) return "No tasks yet.";
+    const name = (id: string) => this.hub.agent(id)?.name ?? id.split("/").pop();
+    return rows
+      .map((t) => `${t.id}  ${t.state.padEnd(8)} ${name(t.to_agent)}: ${t.text.slice(0, 80)}${t.summary ? `  -> ${t.summary.slice(0, 80)}` : ""}`)
       .join("\n");
   }
 
@@ -247,12 +269,19 @@ export class DiscordBridge implements Outbound {
       await this.forwardAttachments(m, p.name, thread);
       if (!m.content.trim()) return;
     }
-    const targets = this.hub.humanMessage(p.name, m.content, thread);
-    if (!targets.length) {
+    const res = this.hub.humanMessage(p.name, m.content, thread, `${m.channelId}:${m.id}`);
+    if (!res.targets.length) {
       await m.reply({ content: "No agents are connected to this project.", allowedMentions: { repliedUser: false } });
       return;
     }
-    await m.react(ACK_REACTION).catch(() => {});
+    if (res.offline.length === res.targets.length) {
+      await m.reply({ content: `${res.offline.join(", ")} not connected, so nothing was delivered.`, allowedMentions: { repliedUser: false } });
+      return;
+    }
+    await m.react(SEEN_REACTION).catch(() => {});
+    for (const h of res.held) {
+      await m.reply({ content: `${h.name} is ${h.why}. Your message is queued and will be picked up when it can.`, allowedMentions: { repliedUser: false } });
+    }
   }
 
   private async forwardAttachments(m: import("discord.js").Message, project: string, thread?: string): Promise<void> {
@@ -266,7 +295,7 @@ export class DiscordBridge implements Outbound {
       if (!res.ok) continue;
       delivered = this.hub.sendFile(project, m.content, att.name, Buffer.from(await res.arrayBuffer()), thread);
     }
-    if (delivered.length) await m.react(ACK_REACTION).catch(() => {});
+    if (delivered.length) await m.react(SEEN_REACTION).catch(() => {});
     else await m.reply({ content: "No agents are connected to this project.", allowedMentions: { repliedUser: false } });
   }
 
@@ -291,6 +320,7 @@ export class DiscordBridge implements Outbound {
         .addStringOption((o) => o.setName("role").setDescription("Role")),
       new SlashCommandBuilder().setName("agents").setDescription("List agents"),
       new SlashCommandBuilder().setName("status").setDescription("Show project status"),
+      new SlashCommandBuilder().setName("tasks").setDescription("Show the task board for this project"),
       new SlashCommandBuilder().setName("lead").setDescription("Set the lead agent")
         .addStringOption((o) => o.setName("agent").setDescription("Agent name").setRequired(true)),
       new SlashCommandBuilder().setName("token").setDescription("Create a device token")
@@ -351,12 +381,15 @@ export class DiscordBridge implements Outbound {
         const text = project ? this.statusText(project) : "Run this inside a project channel.";
         return void (await reply("```\n" + text + "\n```"));
       }
+      case "tasks": {
+        if (!project) return void (await reply("Run this inside a project channel.", true));
+        return void (await reply("```\n" + this.taskBoard(project) + "\n```"));
+      }
       case "lead": {
         if (!project) return void (await reply("Run this inside a project channel.", true));
         const a = this.hub.findByName(project, s("agent")!);
         if (!a) return void (await reply("Agent not found.", true));
-        this.hub.db.setLead(project, a.agent_id);
-        this.refreshStatus(project);
+        this.hub.setLead(project, a.agent_id);
         return void (await reply(`${a.name} is now lead.`));
       }
       case "token": {

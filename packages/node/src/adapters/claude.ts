@@ -14,7 +14,10 @@ export const claude: Adapter = {
     else if (ctx.policy === "plan") a.push("--permission-mode", "plan");
     if (ctx.mcpConfigPath) {
       a.push("--mcp-config", ctx.mcpConfigPath);
-      a.push("--allowedTools", "mcp__claudecord__say", "mcp__claudecord__ask_human", "mcp__claudecord__report");
+      a.push(
+        "--allowedTools",
+        ...["say", "ask_human", "report", "send_file", "assign", "task_done"].map((t) => `mcp__claudecord__${t}`),
+      );
     }
     a.push("--append-system-prompt", ctx.rules, "-n", ctx.spec.name);
     return a;

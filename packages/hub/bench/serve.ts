@@ -29,6 +29,7 @@ hub.out = {
   postAsk: async () => {},
   postReport: async () => {},
   postFile: async () => {},
+  confirm: async () => {},
   notice: async () => {},
   refreshStatus: () => {},
 } satisfies Outbound;

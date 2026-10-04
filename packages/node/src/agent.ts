@@ -9,6 +9,8 @@ export interface AgentEvents {
   ask(agentId: string, askId: string, question: string, options: string[]): void;
   limit(agentId: string, info: LimitInfo): void;
   gone(agentId: string): void;
+  /** The agent started on these deliveries. */
+  accepted(agentId: string, msgIds: string[]): void;
 }
 
 const TICK_MS = 800;
@@ -28,6 +30,7 @@ export class AgentRuntime {
   private ticking = false;
   private stopped = false;
   private promptSeq = 0;
+  private awaiting?: { ids: string[]; snippet: string };
 
   constructor(
     readonly spec: AgentSpec,
@@ -50,6 +53,18 @@ export class AgentRuntime {
 
   enqueue(d: Delivery): void {
     this.queue.push(d);
+  }
+
+  /** The agent spoke or asked something, which proves it is working on what it was given. */
+  noteActivity(): void {
+    this.markAccepted();
+  }
+
+  private markAccepted(): void {
+    if (!this.awaiting) return;
+    const ids = this.awaiting.ids;
+    this.awaiting = undefined;
+    if (ids.length) this.events.accepted(this.spec.agentId, ids);
   }
 
   setHeld(on: boolean): void {
@@ -141,6 +156,10 @@ export class AgentRuntime {
       }
       this.pending = undefined;
 
+      if (this.awaiting && (st.busy || (this.awaiting.snippet && screen.replace(/\s+/g, " ").includes(this.awaiting.snippet)))) {
+        this.markAccepted();
+      }
+
       if (st.limit && !this.limited) {
         this.limited = true;
         this.events.limit(this.spec.agentId, st.limit);
@@ -171,6 +190,10 @@ export class AgentRuntime {
       if (canDeliver && this.queue.length) {
         const batch = this.queue.splice(0);
         this.lastInject = Date.now();
+        // Anything still awaiting acceptance from an earlier batch is superseded by this one.
+        const ids = batch.map((b) => b.msgId).filter((x): x is string => !!x);
+        const last = batch[batch.length - 1]!;
+        this.awaiting = { ids: [...(this.awaiting?.ids ?? []), ...ids], snippet: last.text.replace(/\s+/g, " ").slice(0, 24) };
         await tmux.pasteAndSubmit(this.paneId, formatDeliveries(batch));
         this.emitStatus("thinking");
       }
