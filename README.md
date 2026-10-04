@@ -176,7 +176,7 @@ process is there) and `/readyz` (it can do its job, including Discord), and serv
     claudecord probe https://hub.example.com --name eu    # on ANOTHER machine: an outside check with its own record
 
 A scheduled GitHub Actions check (`.github/workflows/uptime.yml`, set the repository variable `HUB_URL`) is the free safety net.
-`deploy/` has a Caddyfile (automatic TLS) and a systemd unit.
+`deploy/` has a Caddyfile (automatic TLS), a systemd unit, and `bootstrap.sh`, which sets up a hub on a fresh Ubuntu or Debian machine in one command (not yet tried on a real server).
 
 ## Keeping cost down
 
