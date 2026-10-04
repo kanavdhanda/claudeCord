@@ -146,25 +146,26 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 
 | File | What it is |
 |---|---|
-| `tests/bucket.rs` | The bucket client: the signature is checked against the worked examples AWS publishes (so it is right for every S3-compatible service), and the upload, download and delete path is checked against a stand-in bucket server. |
-| `tests/conformance.rs` | Checks the code against golden vectors in `testdata/conformance`: for each case, the exact output the program must give for a given input (frames, redaction, terminal screens, rate limits, metrics and more). |
-| `tests/device_link.rs` | The device side of the connection, run against the real hub: it connects, it comes back by itself after the hub restarts or drops it, and it does not hammer a hub that is down. |
-| `tests/device_pty.rs` | The terminal side, with real pseudo-terminals and a stand-in agent (`cat`, which echoes what it is given). |
-| `tests/device_tmux.rs` | The tmux backend against a real tmux (each test skips itself where tmux is not installed): start, paste, type, read, see the program end, and stop. |
-| `tests/discord_bridge.rs` | The Discord bridge, against a stand-in Discord (its REST API and its live gateway) and a real hub with a real device link. |
-| `tests/e2e.rs` | Everything together, on one machine: a real hub, a real device daemon, and a stand-in agent (a shell script named `claude` that prints the ready line and echoes each line it is given). |
-| `tests/edge.rs` | Edge cases and randomised checks: hostile or odd input must never panic, and rules that must hold for every input are checked on many generated ones (from a fixed seed, so a failure repeats). |
-| `tests/export.rs` | The Obsidian export: what notes it makes, that the links are right so the graph shows real connections, that running it again changes nothing, and that it includes history that has moved into compressed files. |
-| `tests/health.rs` | The health check as a test: every feature must pass its probe, and every source file must be claimed by a probe, so a new module cannot be added without a check that it is alive. |
-| `tests/hub.rs` | Behaviour tests for the hub core. |
-| `tests/logs.rs` | The per-agent log files: what they keep, how they are trimmed and what is removed before anyone reads them. |
-| `tests/races.rs` | Races: many things happening at the same moment. |
-| `tests/resilience.rs` | Behaviour on difficult machines: ones behind a web proxy, ones that were asleep, ones with no route to the hub. |
-| `tests/server.rs` | The hub over real sockets. |
-| `tests/store.rs` | Storage tests: history, saving and restoring the core, crash safety, and rolling old history into compressed files. |
-| `tests/token_budget.rs` | Token budget, measured on a scripted chat. |
-| `tests/uptime.rs` | Uptime: the arithmetic, the log, crash recovery, the debounce a prober uses, and the hub's own endpoints. |
-| `tests/web_login.rs` | "Sign in with Discord" for the dashboard, against a stand-in Discord OAuth server and a real hub: the redirect, the state check, who may sign in, who sees which project, signing out, and that tokens still work and no-credentials is not a failure. |
+| `tests/it/bucket.rs` | The bucket client: the signature is checked against the worked examples AWS publishes (so it is right for every S3-compatible service), and the upload, download and delete path is checked against a stand-in bucket server. |
+| `tests/it/conformance.rs` | Checks the code against golden vectors in `testdata/conformance`: for each case, the exact output the program must give for a given input (frames, redaction, terminal screens, rate limits, metrics and more). |
+| `tests/it/device_link.rs` | The device side of the connection, run against the real hub: it connects, it comes back by itself after the hub restarts or drops it, and it does not hammer a hub that is down. |
+| `tests/it/device_pty.rs` | The terminal side, with real pseudo-terminals and a stand-in agent (`cat`, which echoes what it is given). |
+| `tests/it/device_tmux.rs` | The tmux backend against a real tmux (each test skips itself where tmux is not installed): start, paste, type, read, see the program end, and stop. |
+| `tests/it/discord_bridge.rs` | The Discord bridge, against a stand-in Discord (its REST API and its live gateway) and a real hub with a real device link. |
+| `tests/it/e2e.rs` | Everything together, on one machine: a real hub, a real device daemon, and a stand-in agent (a shell script named `claude` that prints the ready line and echoes each line it is given). |
+| `tests/it/edge.rs` | Edge cases and randomised checks: hostile or odd input must never panic, and rules that must hold for every input are checked on many generated ones (from a fixed seed, so a failure repeats). |
+| `tests/it/export.rs` | The Obsidian export: what notes it makes, that the links are right so the graph shows real connections, that running it again changes nothing, and that it includes history that has moved into compressed files. |
+| `tests/it/health.rs` | The health check as a test: every feature must pass its probe, and every source file must be claimed by a probe, so a new module cannot be added without a check that it is alive. |
+| `tests/it/hub.rs` | Behaviour tests for the hub core. |
+| `tests/it/logs.rs` | The per-agent log files: what they keep, how they are trimmed and what is removed before anyone reads them. |
+| `tests/it/main.rs` | Every integration test, built as ONE program so the whole tree is compiled and linked once (twenty separate test programs meant twenty links, which is most of the time a CI run spends, above all on Windows). |
+| `tests/it/races.rs` | Races: many things happening at the same moment. |
+| `tests/it/resilience.rs` | Behaviour on difficult machines: ones behind a web proxy, ones that were asleep, ones with no route to the hub. |
+| `tests/it/server.rs` | The hub over real sockets. |
+| `tests/it/store.rs` | Storage tests: history, saving and restoring the core, crash safety, and rolling old history into compressed files. |
+| `tests/it/token_budget.rs` | Token budget, measured on a scripted chat. |
+| `tests/it/uptime.rs` | Uptime: the arithmetic, the log, crash recovery, the debounce a prober uses, and the hub's own endpoints. |
+| `tests/it/web_login.rs` | "Sign in with Discord" for the dashboard, against a stand-in Discord OAuth server and a real hub: the redirect, the state check, who may sign in, who sees which project, signing out, and that tokens still work and no-credentials is not a failure. |
 
 ## examples
 

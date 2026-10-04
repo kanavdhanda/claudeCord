@@ -17,6 +17,7 @@ struct Conn {
     node: String,
     tx: mpsc::Sender<Out>,
     queued: Arc<AtomicUsize>,
+    kill: Arc<tokio::sync::Notify>,
 }
 
 /// Runs until told to shut down (or until nothing can send it work any more).
@@ -66,9 +67,9 @@ pub(crate) async fn run(
                         Input::Auth { token, reply } => {
                             let _ = reply.send(store.node_for_token(&token).ok().flatten());
                         }
-                        Input::Connected { node, conn, tx, queued } => {
+                        Input::Connected { node, conn, tx, queued, kill } => {
                             core.touch(&node, now);
-                            conns.insert(conn, Conn { node: node.clone(), tx, queued });
+                            conns.insert(conn, Conn { node: node.clone(), tx, queued, kill });
                             fx.push(Effect::Send { conn, frame: HubFrame::Welcome { node_id: node.clone() } });
                             fx.extend(guard(&mut core, &store, &conns, |c| c.node_connected(&node, conn)).unwrap_or_default());
                             dirty = true;
@@ -226,7 +227,9 @@ fn send(conns: &mut HashMap<u64, Conn>, conn: u64, frame: &HubFrame, max_out: us
     let text = serde_json::to_string(frame).expect("plain data");
     let n = text.len();
     if c.queued.load(Ordering::Relaxed) + n > max_out {
+        // The close order would queue behind the very backlog that is stuck, so the session is also told directly.
         let _ = c.tx.try_send(Out::Close(1013, "not reading fast enough"));
+        c.kill.notify_one();
         conns.remove(&conn);
         return;
     }

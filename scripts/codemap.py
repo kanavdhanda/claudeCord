@@ -40,7 +40,7 @@ def build():
              "comment in the file, then run `scripts/check.sh --fix`.\n\nRun `scripts/check.sh` before and after changing anything; it tests every module and checks that every feature is alive.\n"]
     for key in sorted(groups, key=lambda k: (k.startswith("("), k)):
         parts.append(section(f"src/{key}" if not key.startswith("(") else "src (crate root)", groups[key]))
-    parts.append(section("tests", sorted((ROOT / "tests").glob("*.rs"))))
+    parts.append(section("tests", sorted((ROOT / "tests").glob("it/*.rs"))))
     parts.append(section("examples", sorted((ROOT / "examples").glob("*.rs"))))
     parts.append(section("scripts", sorted(p for p in (ROOT / "scripts").rglob("*") if p.suffix in (".py", ".sh") and p.name != "codemap.py")))
     return "\n".join(parts)

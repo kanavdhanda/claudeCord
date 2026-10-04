@@ -56,8 +56,7 @@ fn kd() -> Human {
 fn fast(extra: Vec<PathBuf>, max_agents: usize, labels: Vec<String>) -> Options {
     Options {
         link: LinkOpts {
-            // Not too short: on a busy CI machine a quiet moment longer than two pings gets the device dropped.
-            ping_every: Duration::from_millis(1000),
+            ping_every: Duration::from_millis(200),
             connect_timeout: Duration::from_millis(500),
             backoff_min: Duration::from_millis(30),
             backoff_max: Duration::from_millis(300),
@@ -119,8 +118,7 @@ async fn rig_backend(
     let hub = server::start(
         ServerConfig {
             bind: "127.0.0.1:0".parse().unwrap(),
-            // Not too short: on a busy CI machine a quiet moment longer than two pings gets the device dropped.
-            ping_every: Duration::from_millis(1000),
+            ping_every: Duration::from_millis(200),
             save_every: Duration::from_millis(10),
             tick_every: Duration::from_millis(50),
             ..ServerConfig::default()

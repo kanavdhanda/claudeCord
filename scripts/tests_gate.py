@@ -36,7 +36,7 @@ def main():
         t = "+#[test]"
         assert verdict(["README.md"], [])[0]
         assert not verdict(["src/hub/core.rs"], ["+let x = 1;"])[0]
-        assert verdict(["src/hub/core.rs", "tests/hub.rs"], [])[0]
+        assert verdict(["src/hub/core.rs", "tests/it/hub.rs"], [])[0]
         assert verdict(["src/hub/core.rs"], [t])[0]
         assert verdict(["src/hub/core.rs"], ["+    #[tokio::test]"])[0]
         print("tests_gate self-check passed")

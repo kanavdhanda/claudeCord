@@ -12,7 +12,7 @@ Rules that keep it safe to change:
   stays testable.
 - Check every limit before allocating anything. Never trust a length that came off the wire.
 - A new frame, limit or safety rule gets a golden vector in `testdata/conformance` and a test.
-- Every feature has a probe in `src/health`, and `tests/health.rs` fails if a source file is not claimed by one. New module, new probe.
+- Every feature has a probe in `src/health`, and `tests/it/health.rs` fails if a source file is not claimed by one. New module, new probe.
 - A security branch gets a test that fails when the branch is removed.
 - Cost: `scripts/check.sh --cost` runs the real-model benchmarks (they spend tokens) and fails if turns or tokens rise.
 

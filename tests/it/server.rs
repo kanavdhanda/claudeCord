@@ -6,13 +6,79 @@ use claudecord::hub::*;
 use claudecord::protocol::{AdapterId, AgentSpec, HubFrame, NodeFrame};
 use claudecord::server::{self, Config};
 use claudecord::store::Store;
+use futures_util::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt};
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
+use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::{
+    Error as WsError, Message, client::IntoClientRequest, protocol::CloseFrame,
+};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, client_async, connect_async};
 
-type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
+type RawWs = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+/// A device the way the real link behaves: a task of its own reads the socket all the time, so every ping is answered at once
+/// whatever the test body is doing (sleeping, waiting on the hub, computing on a slow machine). A bare socket only answers pings
+/// while the test happens to be reading it, so a healthy "device" would be dropped as silent whenever the test paused. Frames the
+/// task reads are handed over through `next`.
+struct Ws {
+    tx: SplitSink<RawWs, Message>,
+    rx: mpsc::UnboundedReceiver<Result<Message, WsError>>,
+    reader: tokio::task::JoinHandle<()>,
+}
+
+impl Ws {
+    fn new(ws: RawWs) -> Self {
+        let (tx, mut stream) = ws.split();
+        let (to_test, rx) = mpsc::unbounded_channel();
+        let reader = tokio::spawn(async move {
+            while let Some(m) = stream.next().await {
+                if to_test.send(m).is_err() {
+                    break;
+                }
+            }
+        });
+        Self { tx, rx, reader }
+    }
+    async fn send(&mut self, m: Message) -> Result<(), WsError> {
+        self.tx.send(m).await
+    }
+    async fn next(&mut self) -> Option<Result<Message, WsError>> {
+        self.rx.recv().await
+    }
+    async fn close(&mut self, why: Option<CloseFrame>) -> Result<(), WsError> {
+        self.tx.send(Message::Close(why)).await?;
+        self.tx.close().await
+    }
+}
+
+impl Drop for Ws {
+    fn drop(&mut self) {
+        self.reader.abort();
+    }
+}
+
+/// A device that never reads, so it never answers a ping and its receive buffer fills: for the tests about devices that go
+/// quiet. `buffer` shrinks the operating system's receive buffer, so the hub's backlog builds after kilobytes on every platform
+/// (Windows would otherwise swallow megabytes first).
+async fn connect_deaf(
+    hub: &server::Hub,
+    token: &str,
+    buffer: Option<u32>,
+) -> WebSocketStream<TcpStream> {
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    if let Some(b) = buffer {
+        socket.set_recv_buffer_size(b).unwrap();
+    }
+    let stream = socket.connect(hub.addr).await.unwrap();
+    let mut req = format!("ws://{}/api/v1/node/connect", hub.addr)
+        .into_client_request()
+        .unwrap();
+    req.headers_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    client_async(req, stream).await.unwrap().0
+}
 
 fn kd() -> Human {
     Human {
@@ -24,8 +90,7 @@ fn kd() -> Human {
 fn cfg() -> Config {
     Config {
         bind: "127.0.0.1:0".parse().unwrap(),
-        // Windows runners are slow enough to be quiet for longer than 80 ms, which would drop a healthy device mid-test.
-        ping_every: Duration::from_millis(if cfg!(windows) { 1000 } else { 80 }),
+        ping_every: Duration::from_millis(80),
         max_out_bytes: 1 << 20,
         save_every: Duration::from_millis(10),
         tick_every: Duration::from_millis(50),
@@ -68,7 +133,7 @@ async fn connect(
         .unwrap();
     req.headers_mut()
         .insert("authorization", format!("Bearer {token}").parse().unwrap());
-    connect_async(req).await.map(|(ws, _)| ws)
+    connect_async(req).await.map(|(ws, _)| Ws::new(ws))
 }
 
 fn spec(name: &str) -> AgentSpec {
@@ -210,7 +275,7 @@ async fn a_message_reaches_the_device_and_acceptance_comes_back() {
 async fn a_device_that_goes_silent_is_dropped() {
     let dir = tmp("silent");
     let (hub, tokens) = boot(cfg(), &dir.join("t.db"), &["mac"]).await;
-    let ws = connect(&hub, &tokens[0]).await.unwrap();
+    let ws = connect_deaf(&hub, &tokens[0], None).await;
     wait_for("connected", async || connected(&hub, "mac").await).await;
     // Hold the socket open but never read it, so pings are never answered.
     let start = std::time::Instant::now();
@@ -228,16 +293,16 @@ async fn a_device_that_goes_silent_is_dropped() {
 async fn a_healthy_device_that_answers_pings_is_kept() {
     let dir = tmp("healthy");
     let (hub, tokens) = boot(cfg(), &dir.join("t.db"), &["mac"]).await;
-    let mut ws = connect(&hub, &tokens[0]).await.unwrap();
-    // Reading answers the pings automatically.
-    let _ = next_frame(&mut ws, 800).await;
+    let _ws = connect(&hub, &tokens[0]).await.unwrap();
+    // Far longer than two ping intervals with nothing else going on: a device that answers pings is never dropped.
+    tokio::time::sleep(Duration::from_millis(800)).await;
     assert!(connected(&hub, "mac").await);
     hub.shutdown().await;
 }
 
-// Windows' network stack buffers an enormous amount for a socket nobody reads, so a backlog never builds up there; the cut-off is
-// proved on Linux and macOS.
-#[cfg_attr(windows, ignore = "Windows buffers too much for the backlog to build")]
+// The rule: a device that stops reading is cut off once the hub has held more than its cap for it, so it can never make the hub
+// hold an unbounded amount. Pings are turned off so only the backlog can end the connection, and the device's receive buffer is
+// made tiny so the backlog starts after kilobytes whatever the operating system's own buffering would have been.
 #[tokio::test]
 async fn a_device_that_stops_reading_is_cut_off_instead_of_filling_the_hub() {
     let dir = tmp("slow");
@@ -250,16 +315,22 @@ async fn a_device_that_stops_reading_is_cut_off_instead_of_filling_the_hub() {
         &["mac"],
     )
     .await;
-    let mut ws = connect(&hub, &tokens[0]).await.unwrap();
-    register(&mut ws, "otter").await;
+    let mut ws = connect_deaf(&hub, &tokens[0], Some(4096)).await;
+    let f = NodeFrame::AgentRegister {
+        agent: spec("otter"),
+        cwd: "/x".into(),
+    };
+    ws.send(Message::Text(serde_json::to_string(&f).unwrap().into()))
+        .await
+        .unwrap();
     wait_for("agent registered", async || {
         hub.call(|c, _| (c.agent("p/otter").is_some(), vec![]))
             .await
             .unwrap()
     })
     .await;
-    // Never read again. Push far more than the backlog cap AND than the operating system will buffer (Windows buffers many MB).
-    for i in 0..40 {
+    // Never read again. Push well past the hub's cap for one device.
+    for i in 0..8 {
         hub.call(move |c, _| {
             let (_, fx) = c
                 .send_file(
@@ -277,6 +348,7 @@ async fn a_device_that_stops_reading_is_cut_off_instead_of_filling_the_hub() {
         .await;
     }
     wait_for("dropped", async || !connected(&hub, "mac").await).await;
+    drop(ws);
     hub.shutdown().await;
 }
 
@@ -476,13 +548,7 @@ async fn many_devices_can_connect_at_once_and_all_leave_cleanly() {
     let dir = tmp("many");
     let names: Vec<String> = (0..150).map(|i| format!("n{i}")).collect();
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    // These sockets are held but never read, so they would not answer pings; a long ping interval keeps the hub from
-    // dropping them as silent while the test is still counting.
-    let quiet = Config {
-        ping_every: Duration::from_secs(60),
-        ..cfg()
-    };
-    let (hub, tokens) = boot(quiet, &dir.join("t.db"), &refs).await;
+    let (hub, tokens) = boot(cfg(), &dir.join("t.db"), &refs).await;
     let mut sockets = Vec::new();
     for t in &tokens {
         sockets.push(connect(&hub, t).await.unwrap());
@@ -511,12 +577,7 @@ async fn many_devices_can_connect_at_once_and_all_leave_cleanly() {
 #[tokio::test]
 async fn a_bug_in_one_handler_does_not_take_the_hub_down() {
     let dir = tmp("panic");
-    // The test holds the socket without reading between steps, so pings must not be what ends the connection.
-    let quiet = Config {
-        ping_every: Duration::from_secs(60),
-        ..cfg()
-    };
-    let (hub, tokens) = boot(quiet, &dir.join("t.db"), &["mac"]).await;
+    let (hub, tokens) = boot(cfg(), &dir.join("t.db"), &["mac"]).await;
     let mut ws = connect(&hub, &tokens[0]).await.unwrap();
     register(&mut ws, "otter").await;
     wait_for("registered", async || {

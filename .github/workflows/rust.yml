@@ -1,16 +1,16 @@
 name: rust
 
-# Format, lints, every test, the timing tests repeated, the self-check and the smoke test on Linux (x86 and ARM) and macOS, plus a
-# small k6 run. Windows has its own workflow (windows.yml) and packaging has its own (packaging.yml), so each can be run alone.
+# One pipeline, in order: the checks on Linux (x86 and ARM) and macOS, native Windows, and a small k6 run, all at once; then packaging
+# (the pip wheel and npm packages installed in clean folders and run) only once all of those have passed, because there is no point
+# packaging a build that fails its tests. Docs-only changes skip it, and a newer push replaces a run still going.
 on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths-ignore: ["**.md", "site/**", "learnings/**", "deploy/**", ".github/workflows/windows.yml", ".github/workflows/packaging.yml"]
+    paths-ignore: ["**.md", "site/**", "learnings/**", "deploy/**"]
   pull_request:
     paths-ignore: ["**.md", "site/**", "learnings/**", "deploy/**"]
 
-# A newer push replaces a run still going for the same branch, instead of queueing behind it.
 concurrency:
   group: rust-${{ github.ref }}
   cancel-in-progress: true
@@ -32,14 +32,29 @@ jobs:
           cache-on-failure: true
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
+      # Every integration test is one program (tests/it), so it is compiled and linked once.
       - run: cargo test
       # The timing tests again, many times: a race that shows once in fifty runs is still a bug.
-      - run: for i in $(seq 20); do cargo test --test races -q || exit 1; done
+      - run: 'for i in $(seq 20); do cargo test --test it races:: -q || exit 1; done'
       - run: python3 scripts/codemap.py --check
       # Health checks last: every feature alive, then the shipped binary used the way a person would.
       - run: cargo run -q -- selftest
       - run: scripts/smoke.sh
-  # A small k6 run (200 users with three bots each, under a minute) on every change. The big runs are in load.yml and wait for approval.
+
+  # Windows is built and tested natively. The stand-in-agent tests need a Unix shell and skip themselves there; the lints run
+  # on Linux and macOS, and the Windows-only code is compiled by the test build.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - run: cargo test
+      - run: cargo run -q -- selftest
+
+  # A small k6 run (200 users with three bots each, under a minute). The big runs are in load.yml and wait for approval.
   load-smoke:
     runs-on: ubuntu-latest
     steps:
@@ -51,3 +66,19 @@ jobs:
       - uses: grafana/setup-k6-action@v1
       - run: cargo build --release --bin claudecord
       - run: scripts/load/smoke.sh 200 target/release/claudecord
+
+  # Only once everything above has passed. macOS and Windows packaging are checked by release.yml before anything is published.
+  packaging:
+    needs: [check, windows, load-smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: python3 scripts/test_packaging.py

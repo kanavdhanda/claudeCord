@@ -58,17 +58,12 @@ fn link_opts() -> LinkOpts {
 
 /// A hub with a token for machine "mac". Returns the hub, its token and the database path.
 async fn hub(dir: &Path, bind: &str) -> Result<(server::Hub, String, PathBuf), String> {
-    hub_with(dir, server_cfg(bind)).await
-}
-
-/// The same, with the server settings given.
-async fn hub_with(dir: &Path, cfg: ServerConfig) -> Result<(server::Hub, String, PathBuf), String> {
     let db = dir.join("hub.db");
     let mut store = Store::open(&db, None).map_err(|e| e.to_string())?;
     let token = store.create_token("mac", 0).map_err(|e| e.to_string())?;
     let mut core = HubCore::default();
     core.add_owner("1");
-    let hub = server::start(cfg, core, store)
+    let hub = server::start(server_cfg(bind), core, store)
         .await
         .map_err(|e| e.to_string())?;
     Ok((hub, token, db))
@@ -407,13 +402,7 @@ async fn rig(
         std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755))
             .map_err(|e| e.to_string())?;
     }
-    // A slow shared machine can be quiet for longer than a short ping interval, which would drop the connection and lose a frame
-    // mid-probe, so this hub waits longer before it calls a device silent.
-    let calm = ServerConfig {
-        ping_every: Duration::from_secs(2),
-        ..server_cfg("127.0.0.1:0")
-    };
-    let (hub, token, _) = hub_with(&root, calm).await?;
+    let (hub, token, _) = hub(&root, "127.0.0.1:0").await?;
     let dir = root.join("home");
     let cfg = Config {
         hub_url: format!("ws://{}", hub.addr),

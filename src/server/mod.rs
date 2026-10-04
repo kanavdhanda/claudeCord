@@ -112,6 +112,8 @@ pub(crate) enum Input {
         conn: u64,
         tx: mpsc::Sender<Out>,
         queued: Arc<std::sync::atomic::AtomicUsize>,
+        /// Fired by the actor to end the connection at once, even while the session is stuck writing to a device that stopped reading.
+        kill: Arc<tokio::sync::Notify>,
     },
     Disconnected {
         node: String,

@@ -1,7 +1,7 @@
 //! claudeCord: run coding agents on any machine and manage them from a chat.
 //!
 //! The expected behaviour of the wire format, secret scrubbing, terminal reading and rate limits is fixed as golden vectors in
-//! `testdata/conformance`, which `tests/conformance.rs` checks this code against.
+//! `testdata/conformance`, which `tests/it/conformance.rs` checks this code against.
 
 pub mod agents;
 pub mod cli;

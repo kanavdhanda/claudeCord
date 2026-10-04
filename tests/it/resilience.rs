@@ -212,9 +212,19 @@ async fn activity_cuts_a_long_pause_short_so_a_waking_machine_reconnects_at_once
     let mut store = Store::open(&db, None).unwrap();
     let token = store.create_token("mac", 0).unwrap();
     drop(store);
-    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let bind = probe.local_addr().unwrap();
-    drop(probe);
+    // Stand in for "no hub there": something listens on the address but hangs up on every connection, so the link's first attempt
+    // fails at once on every platform (a closed port takes Windows about two seconds to refuse) and is counted, so the test knows
+    // exactly when that attempt is over instead of guessing with a sleep.
+    let door = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bind = door.local_addr().unwrap();
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = attempts.clone();
+    let hangup = tokio::spawn(async move {
+        while let Ok((conn, _)) = door.accept().await {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            drop(conn);
+        }
+    });
     let cfg = ServerConfig {
         bind,
         ping_every: Duration::from_millis(100),
@@ -235,13 +245,11 @@ async fn activity_cuts_a_long_pause_short_so_a_waking_machine_reconnects_at_once
         slow,
     );
     // The first attempt fails because no hub is there. Now the link is resting for about 30 seconds.
-    // Windows takes about two seconds to give up on a closed port, so the first attempt must be over before the hub starts.
-    tokio::time::sleep(Duration::from_millis(if cfg!(windows) {
-        3500
-    } else {
-        400
-    }))
-    .await;
+    while attempts.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    hangup.abort();
+    let _ = hangup.await;
     let hub = server::start(cfg, HubCore::default(), Store::open(&db, None).unwrap())
         .await
         .unwrap();

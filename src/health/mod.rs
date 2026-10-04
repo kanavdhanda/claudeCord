@@ -3,7 +3,7 @@
 //! tests, and what you can run on a new machine to see that everything is alive.
 //!
 //! Each feature has a probe that does something a user would depend on and reports the evidence it saw. A feature that
-//! compiles but is not connected to anything fails its probe. A test (tests/health.rs) also fails if a source file is
+//! compiles but is not connected to anything fails its probe. A test (tests/it/health.rs) also fails if a source file is
 //! not claimed by any probe, so a new module cannot be added without a check that it is alive.
 //!
 //! Files: this one holds the registry and the report; `probes_core` checks the hub's rules and storage; `probes_live`

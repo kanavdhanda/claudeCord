@@ -22,12 +22,14 @@ pub(crate) async fn run(
 ) {
     let (tx, mut rx) = mpsc::channel::<Out>(1024);
     let queued = Arc::new(AtomicUsize::new(0));
+    let kill = Arc::new(tokio::sync::Notify::new());
     if to_actor
         .send(Input::Connected {
             node: node.clone(),
             conn,
             tx,
             queued: queued.clone(),
+            kill: kill.clone(),
         })
         .await
         .is_err()
@@ -74,13 +76,20 @@ pub(crate) async fn run(
                 Some(Out::Close(code, why)) => { close = Some((code, why)); break; }
                 Some(Out::Frame(text)) => {
                     let n = text.len();
-                    let sent = socket.send(Message::Text(text.into())).await;
+                    // A device that stopped reading fills its network buffer and a send then waits for ever, which would also stop
+                    // this loop from ever checking its pings or its close order. So a send ends when the actor says to drop the
+                    // device, or when the device has taken nothing for as long as silence is tolerated.
+                    let sent = tokio::select! {
+                        r = socket.send(Message::Text(text.into())) => r.is_ok(),
+                        _ = kill.notified() => { eprintln!("hub: dropping {node}: its backlog went over the cap"); false }
+                        _ = tokio::time::sleep(cfg.ping_every * 2) => { eprintln!("hub: dropping {node}: it took nothing for {:?}", cfg.ping_every * 2); false }
+                    };
                     queued.fetch_sub(n.min(queued.load(Ordering::Relaxed)), Ordering::Relaxed);
-                    if sent.is_err() { break; }
+                    if !sent { break; }
                 }
             },
             _ = ping.tick() => {
-                if last_seen.elapsed() > cfg.ping_every * 2 { close = Some((1001, "no sign of life")); break; }
+                if last_seen.elapsed() > cfg.ping_every * 2 { eprintln!("hub: dropping {node}: no sign of life for {:?}", last_seen.elapsed()); close = Some((1001, "no sign of life")); break; }
                 if socket.send(Message::Ping(Vec::new().into())).await.is_err() { break; }
             }
         }

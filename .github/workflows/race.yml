@@ -23,7 +23,7 @@ jobs:
             cargo test --release -- --test-threads=1 || exit 1
             cargo test --release -- --test-threads=32 || exit 1
           done
-      - run: for i in $(seq 50); do cargo test --release --test races -q || exit 1; done
+      - run: 'for i in $(seq 50); do cargo test --release --test it races:: -q || exit 1; done'
 
   sanitizer:
     if: github.event_name == 'workflow_dispatch'
@@ -36,7 +36,7 @@ jobs:
           components: rust-src
       - run: >
           cargo test -Zbuild-std --target x86_64-unknown-linux-gnu
-          --test races --test server --test hub --test discord_bridge --test uptime --test web_login
+          --test it -- races:: server:: hub:: discord_bridge:: uptime:: web_login::
         env:
           RUSTFLAGS: -Zsanitizer=thread
           RUSTDOCFLAGS: -Zsanitizer=thread
