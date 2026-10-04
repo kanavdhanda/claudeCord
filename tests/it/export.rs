@@ -357,3 +357,217 @@ fn a_permission_request_and_its_decision_become_one_note() {
         "{idx}"
     );
 }
+
+fn read_vault(dir: &std::path::Path) -> std::collections::BTreeMap<String, String> {
+    fn walk(
+        base: &std::path::Path,
+        dir: &std::path::Path,
+        out: &mut std::collections::BTreeMap<String, String>,
+    ) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(base, &p, out);
+            } else if p.extension().is_some_and(|x| x == "md") {
+                out.insert(
+                    p.strip_prefix(base)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                    std::fs::read_to_string(&p).unwrap(),
+                );
+            }
+        }
+    }
+    let mut out = Default::default();
+    walk(dir, dir, &mut out);
+    out
+}
+
+/// A whole conversation on a real hub (a request, a plan, a task, a question and its answer, a permission, a report), part of it already
+/// moved out of the database into compressed files, made into a vault by the real export command: everything is readable in Obsidian.
+#[tokio::test]
+async fn a_real_conversation_including_the_agents_report_becomes_a_readable_vault() {
+    use claudecord::hub::{Answerer, Decision, HubCore, Human, MessageOpts};
+    use claudecord::protocol::{AdapterId, AgentSpec, NodeFrame};
+    use claudecord::server::{self, Config};
+    let root = std::env::temp_dir().join(format!("cc-export-e2e-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let data = root.join("hub");
+    std::fs::create_dir_all(&data).unwrap();
+    let mut core = HubCore::default();
+    core.add_owner("1");
+    let store = Store::open(&data.join("hub.db"), Some(&data.join("history"))).unwrap();
+    let hub = server::start(
+        Config {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            ..Config::default()
+        },
+        core,
+        store,
+    )
+    .await
+    .unwrap();
+    let kd = Human {
+        id: "1".into(),
+        name: "kd".into(),
+    };
+    let spec = |n: &str| AgentSpec {
+        agent_id: format!("demo/{n}"),
+        name: n.into(),
+        project: "demo".into(),
+        adapter: AdapterId::Claude,
+        model: None,
+        role: None,
+    };
+    let kd2 = kd.clone();
+    hub.call(move |c, now| {
+        let mut fx = vec![];
+        for n in ["otter", "heron"] {
+            fx.extend(c.on_node_frame(
+                "mac",
+                NodeFrame::AgentRegister {
+                    agent: spec(n),
+                    cwd: "/x".into(),
+                },
+                now,
+            ));
+        }
+        fx.extend(
+            c.human_message(
+                &kd2,
+                "demo",
+                "Build the export feature",
+                &MessageOpts::default(),
+                now,
+            )
+            .unwrap()
+            .1,
+        );
+        let frames = [
+            NodeFrame::AgentAssign {
+                agent_id: "demo/otter".into(),
+                to: "heron".into(),
+                task: "write the csv endpoint".into(),
+                thread: None,
+            },
+            NodeFrame::AgentSay {
+                agent_id: "demo/otter".into(),
+                text: "plan: heron takes the api, I take the ui".into(),
+                thread: None,
+            },
+            NodeFrame::AgentAsk {
+                agent_id: "demo/heron".into(),
+                ask_id: "a1".into(),
+                question: "csv or json for the export?".into(),
+                options: None,
+                thread: None,
+            },
+            NodeFrame::AgentPermission {
+                agent_id: "demo/heron".into(),
+                perm_id: "p1".into(),
+                kind: "bash".into(),
+                action: "cargo test".into(),
+                thread: None,
+            },
+        ];
+        for f in frames {
+            fx.extend(c.on_node_frame("mac", f, now));
+        }
+        fx.extend(
+            c.answer_ask(
+                &Answerer::Human(kd2.clone()),
+                "demo",
+                "Q1",
+                "csv, streamed",
+                now,
+            )
+            .map(|o| o.effects)
+            .unwrap_or_default(),
+        );
+        fx.extend(
+            c.decide_permission(&kd2, "demo", "P1", Decision::Once, None, now)
+                .unwrap_or_default(),
+        );
+        fx.extend(c.on_node_frame(
+            "mac",
+            NodeFrame::AgentTaskDone {
+                agent_id: "demo/heron".into(),
+                task_id: "T1".into(),
+                summary: "endpoint streams csv".into(),
+            },
+            now,
+        ));
+        fx.extend(c.on_node_frame(
+            "mac",
+            NodeFrame::AgentReport {
+                agent_id: "demo/otter".into(),
+                title: "Export feature finished".into(),
+                summary: "The csv export streams and the ui button works".into(),
+                artifacts: Some(vec!["src/export.rs".into()]),
+            },
+            now,
+        ));
+        ((), fx)
+    })
+    .await;
+    hub.shutdown().await;
+    // The older part of the conversation has already moved out of the database into a compressed file.
+    {
+        let mut s = Store::open(&data.join("hub.db"), Some(&data.join("history"))).unwrap();
+        s.rollover(claudecord::now_ms() + 1000).unwrap();
+        assert_eq!(s.hot_rows().unwrap(), 0, "everything is in files now");
+    }
+    let vault = root.join("vault");
+    claudecord::cli::export::run(claudecord::cli::export::ExportArgs {
+        data: data.clone(),
+        out: vault.clone(),
+        project: None,
+        watch: None,
+    })
+    .unwrap();
+    let notes = read_vault(&vault);
+    // `CLAUDECORD_SHOW_VAULT=1 cargo test a_real_conversation -- --nocapture` prints the notes, to see what a person would open.
+    if std::env::var_os("CLAUDECORD_SHOW_VAULT").is_some() {
+        for (k, v) in &notes {
+            println!("==== {k}\n{v}");
+        }
+    }
+    let all: String = notes.values().cloned().collect::<Vec<_>>().join("\n");
+    for want in [
+        "Build the export feature",
+        "plan: heron takes the api",
+        "Export feature finished",
+        "The csv export streams and the ui button works",
+        "csv or json for the export?",
+        "csv, streamed",
+        "cargo test",
+        "write the csv endpoint",
+    ] {
+        assert!(
+            all.contains(want),
+            "the vault has no mention of {want:?}; notes: {:?}",
+            notes.keys().collect::<Vec<_>>()
+        );
+    }
+    assert!(
+        notes.keys().any(|k| k.starts_with("People/")),
+        "a note for each person and agent"
+    );
+    assert!(
+        notes
+            .keys()
+            .any(|k| k.contains("Q") || k.to_lowercase().contains("question")),
+        "a note for the question and its answer: {:?}",
+        notes.keys().collect::<Vec<_>>()
+    );
+    // Running it again changes nothing.
+    claudecord::cli::export::run(claudecord::cli::export::ExportArgs {
+        data,
+        out: vault.clone(),
+        project: None,
+        watch: None,
+    })
+    .unwrap();
+    assert_eq!(read_vault(&vault), notes);
+}

@@ -214,12 +214,16 @@ S3-compatible bucket (Oracle Cloud's free tier first, Cloudflare R2 later), so a
     claudecord storage backup               # the hub also copies the live database to the bucket every few hours
     claudecord storage restore              # on a host that lost its disk: bring the database back
 
-To read and graph the conversation in Obsidian:
+To read and graph the whole conversation in Obsidian (messages, plans, questions and answers, permission decisions, tasks and the agents' reports),
+open a folder as a vault and let the hub keep it up to date while it runs, and once more when it stops:
 
-    claudecord export --data claudecord-hub --out ~/Vault/claudeCord --watch 30
+    claudecord hub --data claudecord-hub --vault ~/Vault/claudeCord          # refreshed every 30 s (--vault-every)
+    claudecord export --data claudecord-hub --out ~/Vault/claudeCord         # or write it once, or with --watch 30
 
-It writes plain Markdown notes with links: a note per day and thread, one per person or agent, one per task, one per question
-(who asked, what, who answered, the answer) and one per permission request. Open the folder as a vault and use the graph view.
+It writes plain Markdown notes with links: a note per day and thread, one per person or agent, one per task, one per question (who asked, what, who
+answered, the answer), one per permission request (what, and who decided) and one per report (title, summary and the files it named). Each project
+has an index page that links them all. It includes history that has already moved into files or the bucket, and running it again changes nothing.
+Use Obsidian's graph view to see who talked to whom.
 
 ## Several machines
 

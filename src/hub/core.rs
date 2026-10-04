@@ -663,7 +663,11 @@ impl HubCore {
                     thread: None,
                     from: a.name.clone(),
                     kind: "report",
-                    text: format!("{title}: {summary}"),
+                    // The artifacts go in the record too, so a report read back later (in the vault, say) is whole.
+                    text: match artifacts.as_ref().filter(|a| !a.is_empty()) {
+                        Some(a) => format!("{title}: {summary}\nArtifacts: {}", a.join(", ")),
+                        None => format!("{title}: {summary}"),
+                    },
                     at: now,
                 }));
                 fx.push(Effect::Chat(Chat::Report {

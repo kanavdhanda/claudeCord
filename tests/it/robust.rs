@@ -356,3 +356,129 @@ async fn nothing_acknowledged_is_lost_when_the_hub_is_killed_at_random_moments_a
         "after {crashes} crashes, messages were lost, doubled or reordered"
     );
 }
+
+#[test]
+fn the_hub_tells_systemd_when_it_is_ready_and_when_it_is_stopping() {
+    use std::os::unix::net::UnixDatagram;
+    // A socket standing in for systemd's notify socket, given to the hub through its environment (the child's only, not this process's).
+    let data = dir("notify");
+    let socket = data.join("notify.sock");
+    let listener = UnixDatagram::bind(&socket).unwrap();
+    listener
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let mut hub = Command::new(env!("CARGO_BIN_EXE_claudecord"))
+        .args(["hub", "--data"])
+        .arg(&data)
+        .args(["--bind", &format!("127.0.0.1:{port}")])
+        .env("NOTIFY_SOCKET", &socket)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut buf = [0u8; 64];
+    let n = listener
+        .recv(&mut buf)
+        .expect("systemd was never told the hub is ready");
+    assert_eq!(&buf[..n], b"READY=1");
+    signal(&hub, "-TERM");
+    let n = listener
+        .recv(&mut buf)
+        .expect("systemd was never told the hub is stopping");
+    assert_eq!(&buf[..n], b"STOPPING=1");
+    wait_exit(&mut hub);
+}
+
+#[tokio::test]
+async fn the_hub_keeps_an_obsidian_vault_up_to_date_while_it_runs_and_once_more_when_it_stops() {
+    let data = dir("vault");
+    let vault = data.join("vault");
+    let tokens = data.join("tokens.json");
+    assert!(
+        Command::new(env!("CARGO_BIN_EXE_claudecord"))
+            .args(["load-tokens", "--count", "1", "--prefix", "mac", "--out"])
+            .arg(&tokens)
+            .arg("--data")
+            .arg(&data)
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let token =
+        serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&tokens).unwrap())
+            .unwrap()[0]["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let mut hub = Command::new(env!("CARGO_BIN_EXE_claudecord"))
+        .args(["hub", "--data"])
+        .arg(&data)
+        .args(["--bind", &format!("127.0.0.1:{port}"), "--vault"])
+        .arg(&vault)
+        .args(["--vault-every", "1"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let up = Instant::now();
+    while !std::fs::read_to_string(data.join("hub.log"))
+        .unwrap_or_default()
+        .contains("listening on")
+    {
+        assert!(
+            up.elapsed() < Duration::from_secs(20),
+            "the hub never started"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mut machine = connect_machine(port, &token).await;
+    for n in 1..=3 {
+        machine.tx.send(numbered(1, n)).await.unwrap();
+    }
+    // Within a few seconds the vault has the conversation, while the hub is still running.
+    let look = || -> String {
+        let mut all = String::new();
+        let mut stack = vec![vault.clone()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "md") {
+                    all.push_str(&std::fs::read_to_string(&p).unwrap_or_default());
+                }
+            }
+        }
+        all
+    };
+    let t = Instant::now();
+    while !look().contains("crash-0003") {
+        assert!(
+            t.elapsed() < Duration::from_secs(15),
+            "the vault never got the messages while the hub ran"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    // A message right before a stop is in the vault too, because the hub refreshes it once more after everything is saved.
+    machine.tx.send(numbered(1, 4)).await.unwrap();
+    while machine.acked.load(Ordering::SeqCst) < 4 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    signal(&hub, "-TERM");
+    wait_exit(&mut hub);
+    assert!(
+        look().contains("crash-0004"),
+        "the last message before the stop is missing from the vault"
+    );
+}

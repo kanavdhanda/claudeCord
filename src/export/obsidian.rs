@@ -138,6 +138,18 @@ fn link_text(project: &str, text: &str) -> (String, Links) {
     (out, links)
 }
 
+/// A report's title, summary and artifacts from its saved text (`title: summary`, then an optional `Artifacts: a, b` line).
+fn split_report(text: &str) -> (String, String, Vec<String>) {
+    let (main, artifacts) = match text.rsplit_once("\nArtifacts: ") {
+        Some((m, a)) => (m, a.split(", ").map(str::to_string).collect()),
+        None => (text, Vec::new()),
+    };
+    match main.split_once(": ") {
+        Some((t, s)) => (t.to_string(), s.to_string(), artifacts),
+        None => (main.chars().take(80).collect(), main.to_string(), artifacts),
+    }
+}
+
 /// One message as a Markdown list item. Extra lines are indented so they stay inside the item.
 fn line(project: &str, r: &HistoryRow) -> String {
     let (_, time) = when(r.at);
@@ -148,6 +160,16 @@ fn line(project: &str, r: &HistoryRow) -> String {
     } else {
         format!("[[People/{who}|{}]]", r.from.replace('|', "/"))
     };
+    // A report is a note of its own; in the chat it is a line that links to it.
+    if r.kind == "report" {
+        let (title, _, _) = split_report(&r.text);
+        return format!(
+            "- {time} **{sender}** (report): [[{}/Reports/R{}|{}]]\n",
+            file_name(project),
+            r.id,
+            title.replace('|', "/")
+        );
+    }
     let body = text.replace('\n', "\n  ");
     format!("- {time} **{sender}** ({}): {body}\n", r.kind)
 }
@@ -168,6 +190,7 @@ pub fn render(rows: &[HistoryRow]) -> Vec<NoteFile> {
         let mut tasks: BTreeMap<String, TaskNote> = BTreeMap::new();
         let mut asks: BTreeMap<String, AskNote> = BTreeMap::new();
         let mut perms: BTreeMap<String, PermNote> = BTreeMap::new();
+        let mut reports: Vec<ReportNote> = Vec::new();
         for r in prows {
             let thread = r.thread.as_deref().map_or("general".to_string(), file_name);
             threads
@@ -232,6 +255,20 @@ pub fn render(rows: &[HistoryRow]) -> Vec<NoteFile> {
                         n.thread = r.thread.as_deref().map_or("general".to_string(), file_name);
                         n.day = day;
                     }
+                }
+                "report" => {
+                    let (title, summary, artifacts) = split_report(&r.text);
+                    reports.push(ReportNote {
+                        id: r.id,
+                        day: day.clone(),
+                        time: when(r.at).1,
+                        thread: r.thread.as_deref().map_or("general".to_string(), file_name),
+                        by: who.clone(),
+                        label: r.from.clone(),
+                        title,
+                        summary,
+                        artifacts,
+                    });
                 }
                 "decision" => {
                     if let Some((id, how)) = r.text.split_once(' ') {
@@ -378,6 +415,37 @@ pub fn render(rows: &[HistoryRow]) -> Vec<NoteFile> {
             ));
             perm_list.push(format!("- [[{proj}/Permissions/{id}|{id}]] ({status})\n"));
         }
+        // Report notes: what an agent said it had finished, in full, with the files it named.
+        let mut report_list = Vec::new();
+        for n in &reports {
+            let artifacts = if n.artifacts.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\n## Files\n{}",
+                    n.artifacts
+                        .iter()
+                        .map(|a| format!("- `{a}`\n"))
+                        .collect::<String>()
+                )
+            };
+            files.push((
+                format!("{proj}/Reports/R{}.md", n.id),
+                format!(
+                    "---\nproject: {project}\nreport: R{}\ndate: {}\nby: {}\ntags: [claudecord, report]\n---\n# {}\n\nProject: [[{proj}/index|{project}]]\n\nReported by [[People/{}|{}]] at {} in [[{proj}/Chat/{}/{}|{} / {}]]:\n\n{}\n{artifacts}",
+                    n.id, n.day, n.by, n.title, n.by, n.label.replace('|', "/"), n.time, n.thread, n.day, n.thread, n.day,
+                    n.summary.lines().map(|l| format!("> {l}\n")).collect::<String>(),
+                ),
+            ));
+            report_list.push(format!(
+                "- [[{proj}/Reports/R{}|{}]] ({}, by [[People/{}|{}]])\n",
+                n.id,
+                n.title.replace('|', "/"),
+                n.day,
+                n.by,
+                n.label.replace('|', "/")
+            ));
+        }
         let members: Vec<String> = people_in
             .iter()
             .filter(|(_, v)| v.1.contains(&proj))
@@ -385,7 +453,7 @@ pub fn render(rows: &[HistoryRow]) -> Vec<NoteFile> {
             .collect();
         files.push((
             format!("{proj}/index.md"),
-            format!("---\nproject: {project}\ntags: [claudecord, project]\n---\n# {project}\n\n## Threads\n{}\n## People\n{}\n## Tasks\n{}\n## Questions\n{}\n## Permissions\n{}", thread_list.concat(), members.concat(), task_list.concat(), ask_list.concat(), perm_list.concat()),
+            format!("---\nproject: {project}\ntags: [claudecord, project]\n---\n# {project}\n\n## Threads\n{}\n## People\n{}\n## Tasks\n{}\n## Questions\n{}\n## Permissions\n{}\n## Reports\n{}", thread_list.concat(), members.concat(), task_list.concat(), ask_list.concat(), perm_list.concat(), report_list.concat()),
         ));
     }
     for (name, (kind, projects)) in &people_in {
@@ -416,6 +484,19 @@ struct AskNote {
 }
 
 /// What is known about a permission request from the history.
+/// A report from an agent, for its own note.
+struct ReportNote {
+    id: i64,
+    day: String,
+    time: String,
+    thread: String,
+    by: String,
+    label: String,
+    title: String,
+    summary: String,
+    artifacts: Vec<String>,
+}
+
 #[derive(Default)]
 struct PermNote {
     agent: Option<String>,

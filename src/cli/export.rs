@@ -37,7 +37,7 @@ pub fn run(a: ExportArgs) -> Result<(), String> {
 }
 
 /// One export pass. Returns how many files changed.
-fn export_once(a: &ExportArgs) -> Result<usize, String> {
+pub(crate) fn export_once(a: &ExportArgs) -> Result<usize, String> {
     let mut store = Store::open(&a.data.join("hub.db"), Some(&a.data.join("history")))
         .map_err(|e| e.to_string())?;
     if a.data.join("storage.json").exists() {

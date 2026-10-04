@@ -18,6 +18,13 @@ pub struct HubArgs {
     /// Chat account ids of the owners (repeat for several).
     #[arg(long = "owner")]
     pub owners: Vec<String>,
+    /// Keep an Obsidian vault of the conversation up to date in this folder while the hub runs (open it in Obsidian), and once more when
+    /// the hub stops. The same thing `claudecord export` writes.
+    #[arg(long)]
+    pub vault: Option<PathBuf>,
+    /// How often the vault is refreshed, in seconds.
+    #[arg(long, default_value_t = 30)]
+    pub vault_every: u64,
     /// Allow listening on a public address without TLS. Tokens and messages would travel unencrypted.
     #[arg(long)]
     pub allow_plain: bool,
@@ -108,11 +115,21 @@ pub async fn run_hub(a: HubArgs) -> Result<(), String> {
         hub.addr,
         a.data.display()
     );
+    // Now systemd (if it started the hub with Type=notify) is told the hub is serving, and the vault, if asked for, starts being kept.
+    crate::notify::ready();
+    let vault = a
+        .vault
+        .clone()
+        .map(|out| VaultKeeper::start(a.data.clone(), out, a.vault_every));
     // Ctrl-C, and on Unix SIGTERM (what `systemctl stop` and Docker send): either way the hub saves everything and records a clean stop.
     stop.wait().await;
     crate::notify::stopping();
     crate::info!("hub", "told to stop; saving and closing connections");
     hub.shutdown().await;
+    // The vault gets one last refresh, now that everything is saved.
+    if let Some(v) = vault {
+        v.finish();
+    }
     crate::info!("hub", "stopped cleanly");
     Ok(())
 }
@@ -219,4 +236,54 @@ pub fn make_load_tokens(a: LoadTokensArgs) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     eprintln!("wrote {} tokens to {}", a.count, a.out.display());
     Ok(())
+}
+
+/// Keeps an Obsidian vault up to date from a thread of its own (it reads the hub's files and never changes them), and once more at the end.
+struct VaultKeeper {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: std::thread::JoinHandle<()>,
+    args: super::export::ExportArgs,
+}
+
+impl VaultKeeper {
+    fn start(data: PathBuf, out: PathBuf, every: u64) -> Self {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let args = || super::export::ExportArgs {
+            data: data.clone(),
+            out: out.clone(),
+            project: None,
+            watch: None,
+        };
+        let (flag, a) = (stop.clone(), args());
+        let thread = std::thread::spawn(move || {
+            crate::info!(
+                "hub",
+                "keeping an Obsidian vault up to date in {} (every {every} s)",
+                a.out.display()
+            );
+            let mut waited = 0u64;
+            while !flag.load(std::sync::atomic::Ordering::SeqCst) {
+                if waited == 0
+                    && let Err(e) = super::export::export_once(&a)
+                {
+                    crate::warn!("hub", "could not update the Obsidian vault: {e}");
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                waited = (waited + 1) % every.max(1);
+            }
+        });
+        Self {
+            stop,
+            thread,
+            args: args(),
+        }
+    }
+
+    fn finish(self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = self.thread.join();
+        if let Err(e) = super::export::export_once(&self.args) {
+            crate::warn!("hub", "could not update the Obsidian vault at the end: {e}");
+        }
+    }
 }
