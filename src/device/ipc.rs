@@ -1,11 +1,37 @@
 //! How the `claudecord` command talks to the daemon on the same machine: one JSON line each way over a unix socket in
-//! the user's claudeCord folder. An agent uses the same door when it runs `claudecord say ...` in its shell, so the
+//! the user's claudeCord folder (a unix socket there, or a named pipe on Windows). An agent uses the same door when it runs `claudecord say ...` in its shell, so the
 //! verbs an agent has are exactly these requests, with no extra tool definitions loaded into its context.
 
+use interprocess::local_socket::{
+    GenericFilePath, GenericNamespaced, ListenerOptions, Name, ToFsName, ToNsName,
+    tokio::{Listener, Stream as LocalStream},
+    traits::tokio::Stream as _,
+};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+
+/// Choices when starting an agent. Everything here is off unless asked for: nothing happens by itself.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpOpts {
+    /// Run this instead of the agent program's usual command line (anything that runs in a terminal).
+    pub command: Option<Vec<String>>,
+    /// If another agent here already works in this folder, give this one its own git worktree. Without this such a start is refused.
+    pub worktree: bool,
+    /// Ask the hub for a saved handoff to carry on from. Without this the agent starts clean.
+    pub pickup: bool,
+    /// Start the agent again this many times (within ten minutes) if its program ends. Zero means never.
+    pub restart: u32,
+}
+
+/// What goes over the socket: the request, and the secret key of the agent making it when an agent makes it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Envelope {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(flatten)]
+    pub req: Req,
+}
 
 /// A request to the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +49,8 @@ pub enum Req {
         policy: String,
         rows: u16,
         cols: u16,
+        #[serde(default)]
+        opts: UpOpts,
     },
     List,
     Stop {
@@ -92,6 +120,12 @@ pub enum Req {
     Attach {
         agent: String,
     },
+    /// The tail of an agent's log (what it was sent and what it did, or what its terminal showed).
+    Logs {
+        agent: String,
+        lines: usize,
+        terminal: bool,
+    },
     Shutdown,
 }
 
@@ -124,15 +158,49 @@ impl Resp {
     }
 }
 
-/// Where the daemon's socket lives.
+/// Where the daemon's socket lives (a file; on Windows it only names the pipe).
 pub fn socket_path(dir: &Path) -> PathBuf {
     dir.join("daemon.sock")
 }
 
-/// Sends one request and reads the one answer. Fails if no daemon is listening.
+/// The name the daemon listens on: the socket file on unix, a named pipe derived from the folder on Windows.
+fn socket_name(dir: &Path) -> std::io::Result<Name<'static>> {
+    if cfg!(windows) {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        dir.hash(&mut h);
+        format!("claudecord-{:x}", h.finish()).to_ns_name::<GenericNamespaced>()
+    } else {
+        socket_path(dir).to_fs_name::<GenericFilePath>()
+    }
+}
+
+/// Starts listening for local commands, replacing a stale socket left by a daemon that did not shut down cleanly.
+pub fn listen(dir: &Path) -> std::io::Result<Listener> {
+    ListenerOptions::new()
+        .name(socket_name(dir)?)
+        .try_overwrite(true)
+        .create_tokio()
+}
+
+/// Connects to the daemon's socket. Fails if no daemon is listening.
+pub async fn connect(dir: &Path) -> std::io::Result<LocalStream> {
+    LocalStream::connect(socket_name(dir)?).await
+}
+
+/// Sends one request as a person at this machine and reads the one answer. Fails if no daemon is listening.
 pub async fn call(dir: &Path, req: &Req) -> std::io::Result<Resp> {
-    let mut s = UnixStream::connect(socket_path(dir)).await?;
-    let mut line = serde_json::to_string(req).expect("plain data");
+    call_as(dir, None, req).await
+}
+
+/// Sends one request, carrying an agent's secret key (agents' own commands need it), and reads the one answer.
+pub async fn call_as(dir: &Path, key: Option<&str>, req: &Req) -> std::io::Result<Resp> {
+    let mut s = connect(dir).await?;
+    let mut line = serde_json::to_string(&Envelope {
+        key: key.map(String::from),
+        req: req.clone(),
+    })
+    .expect("plain data");
     line.push('\n');
     s.write_all(line.as_bytes()).await?;
     let mut reply = String::new();

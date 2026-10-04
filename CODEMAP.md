@@ -28,14 +28,17 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 
 | File | What it is |
 |---|---|
-| `src/device/agent.rs` | One agent's terminal. |
 | `src/device/config.rs` | What a machine remembers between runs: the hub address, its token, and its name. |
 | `src/device/daemon.rs` | The daemon: the one program that runs on a machine with agents. |
 | `src/device/doctor.rs` | `claudecord doctor`: checks, step by step, whether this machine can reach the hub, and says plainly where it stops. |
 | `src/device/inject.rs` | When it is safe to type into an agent's terminal on someone's behalf. |
-| `src/device/ipc.rs` | How the `claudecord` command talks to the daemon on the same machine: one JSON line each way over a unix socket in the user's claudeCord folder. |
+| `src/device/ipc.rs` | How the `claudecord` command talks to the daemon on the same machine: one JSON line each way over a unix socket in the user's claudeCord folder (a unix socket there, or a named pipe on Windows). |
 | `src/device/link.rs` | The connection from a machine to the hub. |
+| `src/device/logs.rs` | What a machine writes down about each agent, so that a person (or a fresh session) can pick the work up later. |
 | `src/device/mod.rs` | Everything that runs on a machine with agents: remembering who the machine is, keeping a connection to the hub, and (later in this folder) owning the agents' terminals. |
+| `src/device/pty.rs` | One agent's terminal. |
+| `src/device/terminal.rs` | The one thing the daemon needs from an agent's terminal, whichever way it is provided: start it, type into it, paste a message safely, look at its screen, notice when it ends, stop it, and let a person get in front of it. |
+| `src/device/tmux.rs` | The tmux backend: each agent runs in its own tmux session on a private tmux server (its own socket), so a person can attach with plain `tmux attach`, scroll, and detach as they always do, and the agent keeps running when they leave. |
 
 ## src/discord
 
@@ -137,11 +140,13 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | `tests/conformance.rs` | Checks the code against golden vectors in `testdata/conformance`: for each case, the exact output the program must give for a given input (frames, redaction, terminal screens, rate limits, metrics and more). |
 | `tests/device_link.rs` | The device side of the connection, run against the real hub: it connects, it comes back by itself after the hub restarts or drops it, and it does not hammer a hub that is down. |
 | `tests/device_pty.rs` | The terminal side, with real pseudo-terminals and a stand-in agent (`cat`, which echoes what it is given). |
+| `tests/device_tmux.rs` | The tmux backend against a real tmux (each test skips itself where tmux is not installed): start, paste, type, read, see the program end, and stop. |
 | `tests/discord_bridge.rs` | The Discord bridge, against a stand-in Discord (its REST API and its live gateway) and a real hub with a real device link. |
 | `tests/e2e.rs` | Everything together, on one machine: a real hub, a real device daemon, and a stand-in agent (a shell script named `claude` that prints the ready line and echoes each line it is given). |
 | `tests/export.rs` | The Obsidian export: what notes it makes, that the links are right so the graph shows real connections, that running it again changes nothing, and that it includes history that has moved into compressed files. |
 | `tests/health.rs` | The health check as a test: every feature must pass its probe, and every source file must be claimed by a probe, so a new module cannot be added without a check that it is alive. |
 | `tests/hub.rs` | Behaviour tests for the hub core. |
+| `tests/logs.rs` | The per-agent log files: what they keep, how they are trimmed and what is removed before anyone reads them. |
 | `tests/resilience.rs` | Behaviour on difficult machines: ones behind a web proxy, ones that were asleep, ones with no route to the hub. |
 | `tests/server.rs` | The hub over real sockets. |
 | `tests/store.rs` | Storage tests: history, saving and restoring the core, crash safety, and rolling old history into compressed files. |

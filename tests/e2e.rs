@@ -1,11 +1,13 @@
 //! Everything together, on one machine: a real hub, a real device daemon, and a stand-in agent (a shell script named
 //! `claude` that prints the ready line and echoes each line it is given). A person's message goes in through the hub and
 //! must come out in the agent's terminal; the agent's own commands must come out in the hub.
+#![cfg(unix)]
 
 use claudecord::device::config::Config;
 use claudecord::device::daemon::{self, Options};
-use claudecord::device::ipc::{self, Req};
+use claudecord::device::ipc::{self, Req, UpOpts};
 use claudecord::device::link::LinkOpts;
+use claudecord::device::terminal::Backend;
 use claudecord::hub::*;
 use claudecord::protocol::AgentStatus;
 use claudecord::server::{self, Config as ServerConfig};
@@ -63,6 +65,8 @@ fn fast(extra: Vec<PathBuf>, max_agents: usize, labels: Vec<String>) -> Options 
         extra_path: extra,
         max_agents,
         labels,
+        backend: Backend::Pty,
+        auto_startup: false,
     }
 }
 
@@ -131,8 +135,9 @@ async fn rig_full(name: &str, script: &str, max_agents: usize, labels: Vec<Strin
     Rig { hub, dir, project }
 }
 
-async fn up(r: &Rig, name: &str) {
-    let resp = ipc::call(
+/// Starts an agent with the given options and returns the answer.
+async fn up_with(r: &Rig, name: &str, opts: UpOpts) -> claudecord::device::ipc::Resp {
+    ipc::call(
         &r.dir,
         &Req::Up {
             project: "demo".into(),
@@ -144,18 +149,25 @@ async fn up(r: &Rig, name: &str) {
             policy: "autonomous".into(),
             rows: 24,
             cols: 80,
+            opts,
         },
     )
     .await
-    .unwrap();
+    .unwrap()
+}
+
+/// Starts an agent the plain way and returns its secret key.
+async fn up(r: &Rig, name: &str) -> String {
+    let resp = up_with(r, name, UpOpts::default()).await;
     assert!(resp.ok, "{}", resp.msg);
+    resp.data.unwrap()["key"].as_str().unwrap().to_string()
 }
 
 #[tokio::test]
 async fn a_persons_message_reaches_the_agents_terminal_and_the_agent_speaks_back() {
     let r = rig("flow").await;
     let mut chat = r.hub.chat();
-    up(&r, "otter").await;
+    let key = up(&r, "otter").await;
     eventually("registered", async || {
         r.hub
             .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
@@ -208,8 +220,9 @@ async fn a_persons_message_reaches_the_agents_terminal_and_the_agent_speaks_back
     assert_eq!(confirmed, Ok(true));
 
     // The agent runs a command in its shell, and it shows up in the chat.
-    let resp = ipc::call(
+    let resp = ipc::call_as(
         &r.dir,
+        Some(&key),
         &Req::Say {
             agent: "demo/otter".into(),
             text: "added retries".into(),
@@ -251,7 +264,7 @@ async fn a_persons_message_reaches_the_agents_terminal_and_the_agent_speaks_back
 #[tokio::test]
 async fn an_ask_returns_at_once_and_the_answer_comes_back_as_input() {
     let r = rig("ask").await;
-    up(&r, "otter").await;
+    let key = up(&r, "otter").await;
     eventually("registered", async || {
         r.hub
             .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
@@ -259,8 +272,9 @@ async fn an_ask_returns_at_once_and_the_answer_comes_back_as_input() {
             .unwrap()
     })
     .await;
-    let resp = ipc::call(
+    let resp = ipc::call_as(
         &r.dir,
+        Some(&key),
         &Req::Ask {
             agent: "demo/otter".into(),
             question: "which db?".into(),
@@ -369,7 +383,16 @@ async fn a_file_sent_from_chat_lands_in_the_agents_inbox_and_the_agent_is_told_w
 #[tokio::test]
 async fn an_agent_that_dies_is_started_again_and_keeps_working() {
     let r = rig_with("revive", DIES_ONCE).await;
-    up(&r, "otter").await;
+    let resp = up_with(
+        &r,
+        "otter",
+        UpOpts {
+            restart: 3,
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(resp.ok);
     eventually("registered", async || {
         r.hub
             .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
@@ -407,7 +430,16 @@ async fn an_agent_that_dies_is_started_again_and_keeps_working() {
 #[tokio::test]
 async fn an_agent_that_keeps_dying_is_given_up_on_instead_of_restarted_forever() {
     let r = rig_with("giveup", ALWAYS_DIES).await;
-    up(&r, "otter").await;
+    let resp = up_with(
+        &r,
+        "otter",
+        UpOpts {
+            restart: 3,
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(resp.ok);
     eventually("registered", async || {
         r.hub
             .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
@@ -443,6 +475,7 @@ async fn a_machine_at_its_limit_refuses_more_agents_and_tells_the_hub_what_it_ca
             policy: "autonomous".into(),
             rows: 24,
             cols: 80,
+            opts: UpOpts::default(),
         },
     )
     .await
@@ -476,7 +509,23 @@ async fn a_second_agent_in_the_same_git_folder_gets_its_own_worktree() {
     git(&["add", "."]);
     git(&["commit", "-q", "-m", "init"]);
     up(&r, "otter").await;
-    up(&r, "heron").await;
+    // Without asking for a worktree, a second agent in the same folder is refused.
+    let refused = up_with(&r, "heron", UpOpts::default()).await;
+    assert!(
+        !refused.ok && refused.msg.contains("--worktree"),
+        "{}",
+        refused.msg
+    );
+    let resp = up_with(
+        &r,
+        "heron",
+        UpOpts {
+            worktree: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(resp.ok, "{}", resp.msg);
     let tree = r.project.join(".claudecord/worktrees/demo-heron");
     assert!(
         tree.join("a.txt").exists(),
@@ -539,6 +588,41 @@ async fn the_hub_can_start_an_agent_in_a_folder_the_machine_already_knows() {
         .await
         .unwrap();
     assert_eq!(node.as_deref(), Some("mac"), "the only machine was chosen");
+    // otter still works in that folder, so the daemon refuses to put a second agent there.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        r.hub
+            .call(|c, _| (c.agent("demo/wren").is_none(), vec![]))
+            .await
+            .unwrap()
+    );
+    // Once the folder is free, the same request works.
+    assert!(
+        ipc::call(
+            &r.dir,
+            &Req::Stop {
+                agent: "demo/otter".into()
+            }
+        )
+        .await
+        .unwrap()
+        .ok
+    );
+    eventually("otter is gone", async || {
+        r.hub
+            .call(|c, _| (c.agent("demo/otter").is_none(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    r.hub
+        .call(move |c, _| {
+            let (_, fx) = c
+                .spawn_auto(&kd(), "demo", spec("demo", "wren"), None)
+                .unwrap();
+            ((), fx)
+        })
+        .await;
     eventually("the new agent registered", async || {
         r.hub
             .call(|c, _| (c.agent("demo/wren").is_some(), vec![]))
@@ -591,5 +675,291 @@ async fn a_raw_command_reaches_the_terminal_exactly_as_typed_without_a_header() 
     .await;
     let log = std::fs::read_to_string(r.project.join("fake.log")).unwrap();
     assert!(!log.contains("[kd"), "no sender header was added: {log}");
+    r.hub.shutdown().await;
+}
+
+// Nothing happens by itself, and agents cannot act as each other.
+
+/// Shows a start-up trust dialog and waits for Enter before going on.
+const TRUST_DIALOG: &str = "#!/bin/sh\necho 'Do you trust the files in this folder?'\necho '> 1. Yes, proceed'\necho '  2. No, exit'\nIFS= read -r line\necho \"got:[$line]\" >> trust.log\necho 'fake claude'\nprintf '? for shortcuts\\n'\nsleep 30\n";
+
+async fn second_agent_elsewhere(r: &Rig, name: &str) -> (String, std::path::PathBuf) {
+    let other = r.project.parent().unwrap().join(format!("other-{name}"));
+    std::fs::create_dir_all(&other).unwrap();
+    let resp = ipc::call(
+        &r.dir,
+        &Req::Up {
+            project: "demo".into(),
+            name: Some(name.into()),
+            adapter: "claude".into(),
+            model: None,
+            role: None,
+            cwd: other.to_string_lossy().into(),
+            policy: "autonomous".into(),
+            rows: 24,
+            cols: 80,
+            opts: UpOpts::default(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(resp.ok, "{}", resp.msg);
+    (
+        resp.data.unwrap()["key"].as_str().unwrap().to_string(),
+        other,
+    )
+}
+
+#[tokio::test]
+async fn an_agents_commands_need_its_own_key_so_no_agent_can_speak_for_another() {
+    let r = rig("keys").await;
+    let key_otter = up(&r, "otter").await;
+    let (key_heron, _) = second_agent_elsewhere(&r, "heron").await;
+    eventually("both registered", async || {
+        r.hub
+            .call(|c, _| (c.agents_of_project("demo").len() == 2, vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    let say = |agent: &str, text: &str| Req::Say {
+        agent: agent.into(),
+        text: text.into(),
+        thread: None,
+    };
+    // Nothing, a wrong key, and another agent's key are all refused.
+    for key in [None, Some("nonsense"), Some(key_heron.as_str())] {
+        let resp = ipc::call_as(&r.dir, key, &say("demo/otter", "I am otter"))
+            .await
+            .unwrap();
+        assert!(
+            !resp.ok && resp.msg.contains("by the agent itself"),
+            "{key:?}: {}",
+            resp.msg
+        );
+    }
+    // The right key works.
+    assert!(
+        ipc::call_as(&r.dir, Some(&key_otter), &say("demo/otter", "really otter"))
+            .await
+            .unwrap()
+            .ok
+    );
+    // Other agents' keys never appear in what a person can list.
+    let list = ipc::call(&r.dir, &Req::List).await.unwrap();
+    assert!(!list.data.unwrap().to_string().contains(&key_otter));
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn nothing_is_handed_over_unless_asked_for() {
+    let r = rig("pickup").await;
+    // A saved handoff exists for the agent from an earlier session.
+    r.hub
+        .call(|c, now| {
+            let mut fx = c.on_node_frame(
+                "mac",
+                claudecord::protocol::NodeFrame::AgentRegister {
+                    agent: claudecord::protocol::AgentSpec {
+                        agent_id: "demo/otter".into(),
+                        name: "otter".into(),
+                        project: "demo".into(),
+                        adapter: claudecord::protocol::AdapterId::Claude,
+                        model: None,
+                        role: None,
+                    },
+                    cwd: "/x".into(),
+                },
+                now,
+            );
+            fx.extend(c.on_node_frame(
+                "mac",
+                claudecord::protocol::NodeFrame::AgentHandoff {
+                    agent_id: "demo/otter".into(),
+                    text: "goal: finish the parser".into(),
+                },
+                now,
+            ));
+            ((), fx)
+        })
+        .await;
+    up(&r, "otter").await;
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    let log = std::fs::read_to_string(r.project.join("fake.log")).unwrap_or_default();
+    assert!(
+        !log.contains("finish the parser"),
+        "a plain start does not pick anything up: {log}"
+    );
+    r.hub.shutdown().await;
+    // Asked for, it is handed over.
+    let r = rig("pickup2").await;
+    r.hub
+        .call(|c, now| {
+            let mut fx = c.on_node_frame(
+                "mac",
+                claudecord::protocol::NodeFrame::AgentRegister {
+                    agent: claudecord::protocol::AgentSpec {
+                        agent_id: "demo/otter".into(),
+                        name: "otter".into(),
+                        project: "demo".into(),
+                        adapter: claudecord::protocol::AdapterId::Claude,
+                        model: None,
+                        role: None,
+                    },
+                    cwd: "/x".into(),
+                },
+                now,
+            );
+            fx.extend(c.on_node_frame(
+                "mac",
+                claudecord::protocol::NodeFrame::AgentHandoff {
+                    agent_id: "demo/otter".into(),
+                    text: "goal: finish the parser".into(),
+                },
+                now,
+            ));
+            ((), fx)
+        })
+        .await;
+    let resp = up_with(
+        &r,
+        "otter",
+        UpOpts {
+            pickup: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(resp.ok);
+    eventually("the handoff reaches the new session", async || {
+        std::fs::read_to_string(r.project.join("fake.log"))
+            .is_ok_and(|s| s.contains("finish the parser"))
+    })
+    .await;
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_crashed_agent_is_not_started_again_unless_asked() {
+    let r = rig_with("norestart", DIES_ONCE).await;
+    let resp = up_with(&r, "otter", UpOpts::default()).await;
+    assert!(resp.ok);
+    eventually("registered", async || {
+        r.hub
+            .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    eventually("removed once it ended", async || {
+        r.hub
+            .call(|c, _| (c.agent("demo/otter").is_none(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let starts = std::fs::read_to_string(r.project.join("starts.log")).unwrap();
+    assert_eq!(
+        starts.lines().count(),
+        1,
+        "it was started exactly once: {starts}"
+    );
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_start_up_dialog_goes_to_a_person_by_default_and_is_only_answered_for_them_when_told_to()
+{
+    // By default: a permission request reaches the hub, and nothing is typed into the dialog.
+    let r = rig_with("trust", TRUST_DIALOG).await;
+    let mut chat = r.hub.chat();
+    up(&r, "otter").await;
+    let asked = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(Chat::Permission { perm, .. }) = chat.recv().await {
+                return perm.action.contains("trust");
+            }
+        }
+    })
+    .await;
+    assert_eq!(asked, Ok(true), "the dialog was passed to a person");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !r.project.join("trust.log").exists(),
+        "nothing was typed into the dialog"
+    );
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_log_records_what_happened_with_secrets_removed_and_can_be_read_for_a_handoff() {
+    let r = rig("log").await;
+    let key = up(&r, "otter").await;
+    eventually("registered", async || {
+        r.hub
+            .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    let leak = format!("my token is ghp_{}", "a".repeat(36));
+    r.hub
+        .call(move |c, now| {
+            let fx = c
+                .human_message(&kd(), "demo", &leak, &MessageOpts::default(), now)
+                .unwrap()
+                .1;
+            ((), fx)
+        })
+        .await;
+    ipc::call_as(
+        &r.dir,
+        Some(&key),
+        &Req::Say {
+            agent: "demo/otter".into(),
+            text: "working on it".into(),
+            thread: None,
+        },
+    )
+    .await
+    .unwrap();
+    eventually("the message was delivered", async || {
+        std::fs::read_to_string(r.project.join("fake.log")).is_ok_and(|s| s.contains("my token is"))
+    })
+    .await;
+    let events = ipc::call(
+        &r.dir,
+        &Req::Logs {
+            agent: "demo/otter".into(),
+            lines: 50,
+            terminal: false,
+        },
+    )
+    .await
+    .unwrap();
+    let text = events.data.unwrap()["lines"].to_string();
+    for want in ["started", "delivered", "say", "working on it"] {
+        assert!(text.contains(want), "the event log lacks {want}: {text}");
+    }
+    assert!(
+        !text.contains("ghp_"),
+        "secrets are removed from the log: {text}"
+    );
+    // The terminal log shows what the terminal showed, as plain text.
+    eventually("the terminal log has the agent's reply", async || {
+        let t = ipc::call(
+            &r.dir,
+            &Req::Logs {
+                agent: "demo/otter".into(),
+                lines: 50,
+                terminal: true,
+            },
+        )
+        .await
+        .unwrap();
+        t.data.unwrap()["lines"].to_string().contains("ack:")
+    })
+    .await;
     r.hub.shutdown().await;
 }

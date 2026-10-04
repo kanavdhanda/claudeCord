@@ -1,13 +1,14 @@
 //! The terminal side, with real pseudo-terminals and a stand-in agent (`cat`, which echoes what it is given). Covers the
 //! paste rules, that a pasted message arrives as text and cannot escape the paste, and that the agent keeps running.
+#![cfg(unix)]
 
-use claudecord::device::agent::AgentProc;
 use claudecord::device::inject::Guard as G;
 use claudecord::device::inject::{Guard, Wait, paste_bytes};
+use claudecord::device::pty::PtyTerminal;
 use std::time::Duration;
 
-fn cat(now: i64) -> AgentProc {
-    AgentProc::spawn(
+fn cat(now: i64) -> PtyTerminal {
+    PtyTerminal::spawn(
         &["cat".into()],
         std::path::Path::new("/tmp"),
         &[],
@@ -19,7 +20,7 @@ fn cat(now: i64) -> AgentProc {
     .expect("start cat")
 }
 
-async fn screen_has(a: &AgentProc, needle: &str) -> bool {
+async fn screen_has(a: &PtyTerminal, needle: &str) -> bool {
     for _ in 0..100 {
         if a.screen_text().contains(needle) {
             return true;
@@ -95,7 +96,7 @@ async fn nothing_is_pasted_over_a_half_typed_line() {
 
 #[tokio::test]
 async fn the_agent_keeps_running_and_its_end_is_noticed() {
-    let a = AgentProc::spawn(
+    let a = PtyTerminal::spawn(
         &["sh".into(), "-c".into(), "sleep 0.3; echo done".into()],
         std::path::Path::new("/tmp"),
         &[],
@@ -120,7 +121,7 @@ async fn the_agent_keeps_running_and_its_end_is_noticed() {
 async fn secrets_are_removed_from_the_agents_environment() {
     // Safe enough here: set before the agent starts, and no other test reads this variable.
     unsafe { std::env::set_var("CC_TEST_SECRET_TOKEN", "hunter2") };
-    let a = AgentProc::spawn(
+    let a = PtyTerminal::spawn(
         &[
             "sh".into(),
             "-c".into(),

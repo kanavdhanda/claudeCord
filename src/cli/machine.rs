@@ -4,14 +4,13 @@
 use crate::device::config::{Config, home_dir};
 use crate::device::daemon::{self, Options};
 use crate::device::doctor;
-use crate::device::ipc::{self, Req, Resp};
+use crate::device::ipc::{self, Req, Resp, UpOpts};
 use crate::device::link::LinkOpts;
 use clap::Args;
-use std::path::PathBuf;
+use interprocess::local_socket::traits::tokio::Stream as _;
 use std::process::Command;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 
 #[derive(Args)]
 pub struct LoginArgs {
@@ -27,7 +26,7 @@ pub struct LoginArgs {
 }
 
 #[derive(Args)]
-pub struct UpArgs {
+pub struct StartArgs {
     /// Name of the project (default: this folder's name).
     #[arg(long)]
     pub project: Option<String>,
@@ -48,6 +47,18 @@ pub struct UpArgs {
     /// Start it and leave it running without opening its terminal.
     #[arg(long)]
     pub detach: bool,
+    /// If another agent here already works in this folder, give this one its own git worktree. Otherwise that start is refused.
+    #[arg(long)]
+    pub worktree: bool,
+    /// Ask the hub for a saved handoff to carry on from. Otherwise the agent starts clean.
+    #[arg(long)]
+    pub pickup: bool,
+    /// Start the agent again up to this many times (in ten minutes) if its program ends. Otherwise never.
+    #[arg(long, default_value_t = 0)]
+    pub restart: u32,
+    /// Run this command instead of the agent program (anything that runs in a terminal). Put it after `--`.
+    #[arg(last = true)]
+    pub command: Vec<String>,
 }
 
 /// Saves the hub address and token for this machine.
@@ -100,6 +111,10 @@ async fn ensure_daemon() -> Result<(), String> {
     }
     cmd.spawn()
         .map_err(|e| format!("could not start the daemon: {e}"))?;
+    println!(
+        "started the claudecord daemon (its log: {})",
+        dir.join("daemon.log").display()
+    );
     for _ in 0..50 {
         if ipc::call(&dir, &Req::Ping).await.is_ok() {
             return Ok(());
@@ -117,8 +132,9 @@ fn expect_ok(r: Resp) -> Result<Resp, String> {
     if r.ok { Ok(r) } else { Err(r.msg) }
 }
 
-/// Starts an agent in the current folder, then opens its terminal unless asked not to.
-pub async fn up(a: UpArgs) -> Result<(), String> {
+/// `claudecord start`: starts the daemon if it is not running (and says so), starts an agent in the current folder, and opens its
+/// terminal unless asked not to. It does exactly what was asked and nothing more: no handoff, no restarts, no shared folders.
+pub async fn start(a: StartArgs) -> Result<(), String> {
     ensure_daemon().await?;
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let project = a.project.unwrap_or_else(|| {
@@ -139,6 +155,12 @@ pub async fn up(a: UpArgs) -> Result<(), String> {
             policy: a.policy,
             rows,
             cols,
+            opts: UpOpts {
+                command: (!a.command.is_empty()).then_some(a.command),
+                worktree: a.worktree,
+                pickup: a.pickup,
+                restart: a.restart,
+            },
         },
     )
     .await
@@ -219,23 +241,9 @@ pub async fn doctor() -> Result<(), String> {
     }
 }
 
-/// The size of the person's terminal as (columns, rows), via `stty`, or a default.
+/// The size of the person's terminal as (columns, rows), or a default when it cannot be read (not a terminal).
 fn terminal_size() -> (u16, u16) {
-    let out = Command::new("stty")
-        .arg("size")
-        .stdin(std::process::Stdio::inherit())
-        .output()
-        .ok();
-    let text = out
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default();
-    let mut it = text
-        .split_whitespace()
-        .filter_map(|n| n.parse::<u16>().ok());
-    match (it.next(), it.next()) {
-        (Some(rows), Some(cols)) => (cols, rows),
-        _ => (100, 30),
-    }
+    crossterm::terminal::size().unwrap_or((100, 30))
 }
 
 /// Puts the person's terminal in raw mode and restores it when dropped, even if the program ends early.
@@ -243,28 +251,53 @@ struct RawMode;
 
 impl RawMode {
     fn enter() -> Self {
-        let _ = Command::new("stty")
-            .args(["raw", "-echo"])
-            .stdin(std::process::Stdio::inherit())
-            .status();
+        let _ = crossterm::terminal::enable_raw_mode();
         RawMode
     }
 }
 
 impl Drop for RawMode {
     fn drop(&mut self) {
-        let _ = Command::new("stty")
-            .arg("sane")
-            .stdin(std::process::Stdio::inherit())
-            .status();
+        let _ = crossterm::terminal::disable_raw_mode();
     }
 }
 
-/// Opens an agent's terminal in this window. Keys go to the agent, its output comes back, and the window size follows.
-/// Close the window or press Ctrl-] to leave; the agent keeps running.
+/// The frame that tells the daemon the window size: type 1, then rows and columns.
+fn resize_frame() -> Vec<u8> {
+    let (cols, rows) = terminal_size();
+    let mut f = vec![1u8, 0, 4];
+    f.extend_from_slice(&rows.to_be_bytes());
+    f.extend_from_slice(&cols.to_be_bytes());
+    f
+}
+
+/// The bytes a terminal program expects for a key press. Used on Windows, where the console reports key events rather than bytes.
+pub fn key_bytes(code: crossterm::event::KeyCode, mods: crossterm::event::KeyModifiers) -> Vec<u8> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    match code {
+        KeyCode::Char(c) if mods.contains(KeyModifiers::CONTROL) && c.is_ascii_alphabetic() => {
+            vec![(c.to_ascii_lowercase() as u8) - b'a' + 1]
+        }
+        KeyCode::Char(c) => c.to_string().into_bytes(),
+        KeyCode::Enter => vec![b'\r'],
+        KeyCode::Backspace => vec![0x7f],
+        KeyCode::Tab => vec![b'\t'],
+        KeyCode::Esc => vec![0x1b],
+        KeyCode::Up => b"\x1b[A".to_vec(),
+        KeyCode::Down => b"\x1b[B".to_vec(),
+        KeyCode::Right => b"\x1b[C".to_vec(),
+        KeyCode::Left => b"\x1b[D".to_vec(),
+        KeyCode::Home => b"\x1b[H".to_vec(),
+        KeyCode::End => b"\x1b[F".to_vec(),
+        KeyCode::Delete => b"\x1b[3~".to_vec(),
+        _ => vec![],
+    }
+}
+
+/// Opens an agent's terminal in this window. With tmux this runs `tmux attach`, so everything about tmux works as usual (detach
+/// with its own keys). Otherwise keys go to the agent, its output comes back, and the window size follows; Ctrl-] leaves.
 pub async fn attach(agent: &str) -> Result<(), String> {
-    let sock: PathBuf = ipc::socket_path(&home_dir());
-    let mut s = UnixStream::connect(&sock)
+    let mut s = ipc::connect(&home_dir())
         .await
         .map_err(|_| "no daemon is running here".to_string())?;
     let mut line = serde_json::to_string(&Req::Attach {
@@ -275,32 +308,43 @@ pub async fn attach(agent: &str) -> Result<(), String> {
     s.write_all(line.as_bytes())
         .await
         .map_err(|e| e.to_string())?;
-    let (rd, mut wr) = s.into_split();
+    let (rd, mut wr) = s.split();
     let mut rd = BufReader::new(rd);
     let mut reply = String::new();
     rd.read_line(&mut reply).await.map_err(|e| e.to_string())?;
     let resp: Resp = serde_json::from_str(&reply).map_err(|e| e.to_string())?;
-    expect_ok(resp)?;
+    let resp = expect_ok(resp)?;
+    if let Some(cmd) = resp.data.as_ref().and_then(|d| d["exec"].as_array()) {
+        let cmd: Vec<String> = cmd
+            .iter()
+            .filter_map(|c| c.as_str().map(String::from))
+            .collect();
+        let status = Command::new(&cmd[0])
+            .args(&cmd[1..])
+            .status()
+            .map_err(|e| format!("could not run {}: {e}", cmd[0]))?;
+        return if status.success() {
+            Ok(())
+        } else {
+            Err(format!("{} ended with {status}", cmd[0]))
+        };
+    }
     let _raw = RawMode::enter();
-    let (cols, rows) = terminal_size();
-    let mut frame = vec![1u8, 0, 4];
-    frame.extend_from_slice(&rows.to_be_bytes());
-    frame.extend_from_slice(&cols.to_be_bytes());
-    let _ = wr.write_all(&frame).await;
-    let mut stdin = tokio::io::stdin();
+    let _ = wr.write_all(&resize_frame()).await;
     let mut stdout = tokio::io::stdout();
-    let mut winch = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())
-        .map_err(|e| e.to_string())?;
-    let mut inbuf = [0u8; 1024];
+    let (keys_tx, mut keys) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    spawn_keys(keys_tx);
     let mut outbuf = [0u8; 8192];
+    let mut size = terminal_size();
+    let mut watch = tokio::time::interval(Duration::from_millis(400));
     loop {
         tokio::select! {
-            n = stdin.read(&mut inbuf) => {
-                let n = n.map_err(|e| e.to_string())?;
-                if n == 0 || inbuf[..n].contains(&0x1d) { break; }
+            k = keys.recv() => {
+                let Some(k) = k else { break };
+                if k.contains(&0x1d) { break; }
                 let mut f = vec![0u8];
-                f.extend_from_slice(&(n as u16).to_be_bytes());
-                f.extend_from_slice(&inbuf[..n]);
+                f.extend_from_slice(&(k.len() as u16).to_be_bytes());
+                f.extend_from_slice(&k);
                 if wr.write_all(&f).await.is_err() { break; }
             }
             n = rd.read(&mut outbuf) => {
@@ -309,15 +353,112 @@ pub async fn attach(agent: &str) -> Result<(), String> {
                 let _ = stdout.write_all(&outbuf[..n]).await;
                 let _ = stdout.flush().await;
             }
-            _ = winch.recv() => {
-                let (cols, rows) = terminal_size();
-                let mut f = vec![1u8, 0, 4];
-                f.extend_from_slice(&rows.to_be_bytes());
-                f.extend_from_slice(&cols.to_be_bytes());
-                let _ = wr.write_all(&f).await;
+            _ = watch.tick() => {
+                // The window was resized: tell the agent's terminal.
+                let now = terminal_size();
+                if now != size { size = now; let _ = wr.write_all(&resize_frame()).await; }
             }
         }
     }
     println!("\r\nleft {agent}; it is still running (claudecord attach {agent} to return)");
+    Ok(())
+}
+
+/// Reads the person's keys on a separate thread and sends the bytes along. On unix that is the raw bytes from standard input.
+/// On Windows it is the console's key events turned into the bytes a terminal program expects.
+fn spawn_keys(tx: tokio::sync::mpsc::Sender<Vec<u8>>) {
+    #[cfg(unix)]
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = [0u8; 1024];
+        while let Ok(n) = std::io::stdin().read(&mut buf) {
+            if n == 0 || tx.blocking_send(buf[..n].to_vec()).is_err() {
+                break;
+            }
+        }
+    });
+    #[cfg(not(unix))]
+    std::thread::spawn(move || {
+        use crossterm::event::{Event, KeyEventKind, read};
+        while let Ok(ev) = read() {
+            if let Event::Key(k) = ev
+                && k.kind != KeyEventKind::Release
+            {
+                let b = key_bytes(k.code, k.modifiers);
+                if !b.is_empty() && tx.blocking_send(b).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+}
+
+/// `claudecord logs`: prints the tail of an agent's log. By default what happened (what it was sent, what it said, decisions);
+/// with `--terminal` what its terminal showed.
+pub async fn logs(agent: &str, lines: usize, terminal: bool) -> Result<(), String> {
+    let r = expect_ok(
+        ipc::call(
+            &home_dir(),
+            &Req::Logs {
+                agent: agent.into(),
+                lines,
+                terminal,
+            },
+        )
+        .await
+        .map_err(|_| "no daemon is running here".to_string())?,
+    )?;
+    for l in r
+        .data
+        .and_then(|d| d["lines"].as_array().cloned())
+        .unwrap_or_default()
+    {
+        println!("{}", l.as_str().unwrap_or(""));
+    }
+    Ok(())
+}
+
+/// `claudecord handoff`: writes a note a person (or a fresh session) can read to carry an agent's work on: what happened lately and
+/// what its terminal last showed, with secrets removed. Prints it, or writes it to a file with `--out`.
+pub async fn handoff(agent: &str, out: Option<std::path::PathBuf>) -> Result<(), String> {
+    let get = |terminal: bool, lines: usize| {
+        let agent = agent.to_string();
+        async move {
+            let r = expect_ok(
+                ipc::call(
+                    &home_dir(),
+                    &Req::Logs {
+                        agent,
+                        lines,
+                        terminal,
+                    },
+                )
+                .await
+                .map_err(|_| "no daemon is running here".to_string())?,
+            )?;
+            Ok::<Vec<String>, String>(
+                r.data
+                    .and_then(|d| d["lines"].as_array().cloned())
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|l| l.as_str().map(String::from))
+                    .collect(),
+            )
+        }
+    };
+    let events = get(false, 200).await?;
+    let screen = get(true, 60).await?;
+    let note = format!(
+        "# Handoff: {agent}\n\n## What happened (newest last)\n\n{}\n\n## What its terminal last showed\n\n```\n{}\n```\n",
+        events.join("\n"),
+        screen.join("\n")
+    );
+    match out {
+        Some(p) => {
+            std::fs::write(&p, note).map_err(|e| e.to_string())?;
+            println!("wrote {}", p.display());
+        }
+        None => print!("{note}"),
+    }
     Ok(())
 }
