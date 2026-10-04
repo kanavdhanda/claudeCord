@@ -26,6 +26,18 @@ jobs:
       # Health checks last: every feature alive, then the shipped binary used the way a person would.
       - run: cargo run -q -- selftest
       - run: scripts/smoke.sh
+  # Windows is built and tested natively. The stand-in-agent tests need a Unix shell and skip themselves there.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo run -q -- selftest
   # The cost benchmarks spend real tokens, so they run only when asked, never on every change.
   cost:
     if: github.event_name == 'workflow_dispatch'

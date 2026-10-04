@@ -50,10 +50,38 @@ Cloudflare) in front and bind to 127.0.0.1; the hub refuses a public address wit
 **4. Start an agent in a project folder.**
 
     cd ~/code/myproject
-    claudecord up                                       # starts claude here and opens its terminal
+    claudecord start                                    # starts claude here in its own tmux session and opens it
 
-A channel named after the folder appears in Discord. Type there and the agent hears you. Ctrl-] leaves the terminal; the agent
-keeps running. `claudecord attach NAME` returns to it.
+A channel named after the folder appears in Discord. Type there and the agent hears you. Leave with the usual tmux detach
+(Ctrl-b d); the agent keeps running. `claudecord attach NAME` returns to it. Where tmux is not installed (native Windows) a
+built-in terminal is used instead, and Ctrl-] leaves it.
+
+`claudecord start` does exactly what you ask and nothing more. Every extra is a flag you choose:
+
+| Flag | Does |
+|---|---|
+| `--worktree` | gives the agent its own git worktree and branch (without it, a second agent in a busy folder is refused) |
+| `--pickup` | hands over the state the previous session saved |
+| `--restart N` | starts the agent again up to N times if it dies (default: never) |
+| `-- COMMAND...` | runs that program instead of the adapter's default |
+
+Start-up dialogs (such as a trust question) are never answered for you: they reach the chat as a permission request.
+
+## Agents cannot act as each other
+
+Each agent is started with its own secret key and works in its own folder. Its commands (`say`, `ask`, `done`, ...) are
+checked against that key by the daemon, so an agent cannot speak, ask or finish a task as another agent. This stops mistakes
+and confusion, not a hostile program running as the same user: such a program could read another agent's folder, and agents
+share one private tmux server, so an agent that runs `tmux` itself can reach other agents' sessions.
+
+## Logs and handoff
+
+Everything an agent does is written to a private log with secrets removed: an event log (messages delivered, said, asked,
+decisions, start, end) and a copy of its terminal.
+
+    claudecord logs otter                 # recent events
+    claudecord logs otter --terminal      # recent terminal text, control codes removed
+    claudecord handoff otter              # writes a markdown note of what happened, for the next session or person
 
 ## Who can do what
 
@@ -166,6 +194,9 @@ and macOS.
 - Typing into Claude Code, Codex and agy is done through the terminal. The screen-reading rules for agy and Codex are generic and
   unverified against the live programs; whether a pasted `/command` runs the same way in every program is also unverified.
 - The dashboard is read-only and uses a token; there is no browser sign-in with Discord yet.
-- There is no packaged install (pip or npm) yet, and no Windows support (the machine side uses unix sockets and terminals).
+- There is no packaged install (pip or npm) yet.
+- Windows is built in CI but has not been run by me. Use tmux inside WSL for the tested route; native Windows uses the
+  built-in ConPTY terminal, and the stand-in-agent tests skip themselves there.
+- tmux cannot see a half-typed line, only that someone was recently active, so messages wait for quiet instead.
 - Only the generic terminal driver exists. Structured drivers for Claude Code hooks, ACP and the Codex app server are not built.
 - Nothing has been load tested at the sizes the design is aimed at.
