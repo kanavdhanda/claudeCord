@@ -1040,3 +1040,64 @@ async fn a_frame_resent_after_the_hub_restarted_is_not_taken_twice() {
         "the restart forgot what it had taken"
     );
 }
+
+#[tokio::test]
+async fn the_dashboard_route_pages_back_into_the_compressed_files() {
+    let dir = tmp("pages");
+    let db = dir.join("t.db");
+    let seg = dir.join("history");
+    {
+        let mut s = Store::open(&db, Some(&seg)).unwrap();
+        let rows: Vec<_> = (0..300)
+            .map(|i| claudecord::store::HistoryRow {
+                id: 0,
+                at: (i / 100) * 86_400_000 + i,
+                project: "p".into(),
+                thread: None,
+                from: "kd".into(),
+                kind: "say".into(),
+                text: format!("line {i:03}"),
+            })
+            .collect();
+        s.append(&rows).unwrap();
+        s.rollover(2 * 86_400_000).unwrap();
+    }
+    let mut store = Store::open(&db, Some(&seg)).unwrap();
+    let token = store.create_token("web:viewer", 0).unwrap();
+    let hub = server::start(cfg(), HubCore::default(), store)
+        .await
+        .unwrap();
+    let http = reqwest::Client::new();
+    let get = |q: String| {
+        let (http, base, token) = (http.clone(), format!("http://{}", hub.addr), token.clone());
+        async move {
+            http.get(format!("{base}/api/v1/history?project=p&{q}"))
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap()
+                .json::<Vec<serde_json::Value>>()
+                .await
+                .unwrap()
+        }
+    };
+    // The newest page is from the database; the page before it starts in the compressed files.
+    let newest = get("latest=1&limit=50".into()).await;
+    assert_eq!(newest.last().unwrap()["text"], "line 299");
+    let mut oldest = newest[0]["id"].as_i64().unwrap();
+    let mut seen = newest.len();
+    loop {
+        let page = get(format!("before={oldest}&limit=50")).await;
+        if page.is_empty() {
+            break;
+        }
+        assert!(
+            page.iter().all(|r| r["id"].as_i64().unwrap() < oldest),
+            "a page holds only older rows"
+        );
+        oldest = page[0]["id"].as_i64().unwrap();
+        seen += page.len();
+    }
+    assert_eq!(seen, 300, "paging back reached every row exactly once");
+    hub.shutdown().await;
+}

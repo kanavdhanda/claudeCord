@@ -51,6 +51,31 @@ pub struct Segment {
     pub first_id: i64,
     pub last_id: i64,
     pub rows: i64,
+    /// The UTC day (days since 1970) the rows are from, or -1 for a file made before days were recorded.
+    pub day: i64,
+}
+
+const DAY_MS: i64 = 86_400_000;
+/// The most rows in one history file. A day with more is written as several files, so rolling over never needs much memory.
+const ROLLOVER_CHUNK: usize = 20_000;
+/// How many unpacked history files are kept for paging back.
+const SEGMENT_CACHE: usize = 8;
+
+/// The name of a history file: project, UTC day, and the id range it holds, so no two files ever have the same name.
+fn segment_name(project: &str, day: i64, first: i64, last: i64) -> String {
+    format!(
+        "{}-d{day}-{first}-{last}.jsonl.gz",
+        crate::agents::text::safe_name(project)
+    )
+}
+
+/// Rows as one compressed file of JSON lines, oldest first.
+fn encode_segment(rows: &[HistoryRow]) -> std::io::Result<Vec<u8>> {
+    let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+    for r in rows {
+        writeln!(enc, "{}", serde_json::to_string(r).expect("plain data"))?;
+    }
+    enc.finish()
 }
 
 pub struct Store {
@@ -61,6 +86,8 @@ pub struct Store {
     segments_dir: Option<PathBuf>,
     /// Where old history files go instead of staying on this machine's disk, if a bucket is set up.
     bucket: Option<bucket::Bucket>,
+    /// The last few old history files read, decoded, so paging back through the same day does not unpack it again for every page.
+    cache: std::sync::Mutex<std::collections::VecDeque<(String, std::sync::Arc<Vec<HistoryRow>>)>>,
 }
 
 impl Store {
@@ -101,11 +128,22 @@ impl Store {
              CREATE TABLE IF NOT EXISTS segments (
                  file TEXT PRIMARY KEY, project TEXT NOT NULL, first_id INTEGER NOT NULL, last_id INTEGER NOT NULL, rows INTEGER NOT NULL);",
         )?;
+        // A database made before history files were grouped by day gets the column, with -1 meaning "not known".
+        let has_day = conn
+            .prepare("SELECT 1 FROM pragma_table_info('segments') WHERE name = 'day'")?
+            .exists([])?;
+        if !has_day {
+            conn.execute(
+                "ALTER TABLE segments ADD COLUMN day INTEGER NOT NULL DEFAULT -1",
+                [],
+            )?;
+        }
         Ok(Self {
             conn,
             path: None,
             segments_dir: segments_dir.map(Path::to_path_buf),
             bucket: None,
+            cache: Default::default(),
         })
     }
 
@@ -396,84 +434,238 @@ impl Store {
             .query_row("SELECT COUNT(*) FROM history", [], |r| r.get(0))
     }
 
-    /// Moves history older than `before` out of the database into one gzip file per project, then deletes it from the
-    /// database. The file is written and synced before the rows are deleted, so a crash in between leaves duplicates
-    /// (harmless, and removed next time) and never a gap. Returns how many rows moved.
+    /// Moves history older than `before` out of the database into compressed files, one file per project per UTC day (and per
+    /// `ROLLOVER_CHUNK` rows if a day is huge, so memory stays small). A file is never changed once written. With a bucket set up, a
+    /// file is uploaded and verified before anything is deleted locally, so a failed upload leaves the history in the database and
+    /// reports the error: nothing is ever lost to a bad connection. Returns how many rows moved.
     pub fn rollover(&mut self, before: i64) -> std::io::Result<usize> {
+        self.rollover_chunked(before, ROLLOVER_CHUNK)
+    }
+
+    /// `rollover` with the largest file given (so tests can make small ones).
+    pub fn rollover_chunked(&mut self, before: i64, chunk: usize) -> std::io::Result<usize> {
         let Some(dir) = self.segments_dir.clone() else {
             return Ok(0);
         };
         std::fs::create_dir_all(&dir)?;
-        let projects: Vec<String> = {
+        let buckets: Vec<(String, i64)> = {
             let mut st = self
                 .conn
-                .prepare("SELECT DISTINCT project FROM history WHERE at < ?1")
+                .prepare(
+                    "SELECT DISTINCT project, at / ?2 FROM history WHERE at < ?1 ORDER BY 1, 2",
+                )
                 .map_err(io)?;
-            st.query_map(params![before], |r| r.get(0))
+            st.query_map(params![before, DAY_MS], |r| Ok((r.get(0)?, r.get(1)?)))
                 .map_err(io)?
                 .collect::<Result<_, _>>()
                 .map_err(io)?
         };
         let mut moved = 0;
-        for project in projects {
-            let rows: Vec<HistoryRow> = {
-                let mut st = self
-                    .conn
-                    .prepare("SELECT id, at, project, thread, sender, kind, body FROM history WHERE project = ?1 AND at < ?2 ORDER BY id")
-                    .map_err(io)?;
-                st.query_map(params![project, before], |r| {
-                    Ok(HistoryRow {
-                        id: r.get(0)?,
-                        at: r.get(1)?,
-                        project: r.get(2)?,
-                        thread: r.get(3)?,
-                        from: r.get(4)?,
-                        kind: r.get(5)?,
-                        text: r.get(6)?,
+        for (project, day) in buckets {
+            let (lo, hi) = (day * DAY_MS, (day + 1) * DAY_MS);
+            loop {
+                let rows: Vec<HistoryRow> = {
+                    let mut st = self
+                        .conn
+                        .prepare("SELECT id, at, project, thread, sender, kind, body FROM history WHERE project = ?1 AND at >= ?2 AND at < ?3 AND at < ?4 ORDER BY id LIMIT ?5")
+                        .map_err(io)?;
+                    st.query_map(params![project, lo, hi, before, chunk as i64], |r| {
+                        Ok(HistoryRow {
+                            id: r.get(0)?,
+                            at: r.get(1)?,
+                            project: r.get(2)?,
+                            thread: r.get(3)?,
+                            from: r.get(4)?,
+                            kind: r.get(5)?,
+                            text: r.get(6)?,
+                        })
                     })
-                })
-                .map_err(io)?
-                .collect::<Result<_, _>>()
-                .map_err(io)?
-            };
-            let (first, last) = (rows[0].id, rows[rows.len() - 1].id);
-            let file = format!(
-                "{}-{first}-{last}.jsonl.gz",
-                crate::agents::text::safe_name(&project)
-            );
-            let path = dir.join(&file);
-            let mut enc = GzEncoder::new(Vec::new(), Compression::default());
-            for r in &rows {
-                writeln!(enc, "{}", serde_json::to_string(r).expect("plain data"))?;
+                    .map_err(io)?
+                    .collect::<Result<_, _>>()
+                    .map_err(io)?
+                };
+                if rows.is_empty() {
+                    break;
+                }
+                let (first, last) = (rows[0].id, rows[rows.len() - 1].id);
+                let file = segment_name(&project, day, first, last);
+                let bytes = encode_segment(&rows)?;
+                self.store_file(&dir, &file, &bytes)?;
+                let tx = self.conn.transaction().map_err(io)?;
+                tx.execute("INSERT OR REPLACE INTO segments (file, project, first_id, last_id, rows, day) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![file, project, first, last, rows.len() as i64, day]).map_err(io)?;
+                tx.execute(
+                    "DELETE FROM history WHERE project = ?1 AND id BETWEEN ?2 AND ?3 AND at >= ?4 AND at < ?5 AND at < ?6",
+                    params![project, first, last, lo, hi, before],
+                )
+                .map_err(io)?;
+                tx.commit().map_err(io)?;
+                if self.bucket.is_some() {
+                    let _ = std::fs::remove_file(dir.join(&file));
+                }
+                moved += rows.len();
+                if rows.len() < chunk {
+                    break;
+                }
             }
-            let bytes = enc.finish()?;
-            let mut f = std::fs::File::create(&path)?;
-            f.write_all(&bytes)?;
-            f.sync_all()?;
-            // With a bucket, the file must be safely there before anything is deleted locally. A failed upload leaves the
-            // history in the database and the error is reported, so nothing is ever lost to a bad connection.
-            if let Some(b) = &self.bucket {
-                b.put(&file, &bytes)?;
-            }
-            let tx = self.conn.transaction().map_err(io)?;
-            tx.execute("INSERT OR REPLACE INTO segments (file, project, first_id, last_id, rows) VALUES (?1, ?2, ?3, ?4, ?5)", params![file, project, first, last, rows.len() as i64]).map_err(io)?;
-            tx.execute(
-                "DELETE FROM history WHERE project = ?1 AND id BETWEEN ?2 AND ?3 AND at < ?4",
-                params![project, first, last, before],
-            )
-            .map_err(io)?;
-            tx.commit().map_err(io)?;
-            if self.bucket.is_some() {
-                let _ = std::fs::remove_file(&path);
-            }
-            moved += rows.len();
         }
         Ok(moved)
     }
 
+    /// Writes an encoded history file to the folder, and to the bucket if there is one (which must succeed before the caller deletes
+    /// anything it replaces).
+    fn store_file(&self, dir: &Path, file: &str, bytes: &[u8]) -> std::io::Result<()> {
+        let mut f = std::fs::File::create(dir.join(file))?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        if let Some(b) = &self.bucket {
+            b.put(file, bytes)?;
+        }
+        Ok(())
+    }
+
+    /// Joins the several small files a day can end up in (one per rollover that found a few new rows) into one, so the number of files
+    /// grows with the number of days and not with how often the hub rolls over. Only days with at most `max_rows` rows in total are
+    /// joined, so a merge never needs much memory. The new file is written, and uploaded if there is a bucket, before the old ones are
+    /// removed. Returns how many files were removed.
+    pub fn compact(&mut self, max_rows: usize) -> std::io::Result<usize> {
+        let Some(dir) = self.segments_dir.clone() else {
+            return Ok(0);
+        };
+        let days: Vec<(String, i64)> = {
+            let mut st = self
+                .conn
+                .prepare("SELECT project, day FROM segments WHERE day >= 0 GROUP BY project, day HAVING COUNT(*) >= 2 AND SUM(rows) <= ?1")
+                .map_err(io)?;
+            st.query_map(params![max_rows as i64], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(io)?
+                .collect::<Result<_, _>>()
+                .map_err(io)?
+        };
+        let mut removed = 0;
+        for (project, day) in days {
+            let old: Vec<Segment> = self
+                .segments(&project)
+                .map_err(io)?
+                .into_iter()
+                .filter(|s| s.day == day)
+                .collect();
+            let mut rows = Vec::new();
+            for seg in &old {
+                rows.extend(self.read_segment(&seg.file)?);
+            }
+            rows.sort_by_key(|r| r.id);
+            rows.dedup_by_key(|r| r.id);
+            let (first, last) = (rows[0].id, rows[rows.len() - 1].id);
+            let file = segment_name(&project, day, first, last);
+            self.store_file(&dir, &file, &encode_segment(&rows)?)?;
+            let tx = self.conn.transaction().map_err(io)?;
+            for seg in &old {
+                tx.execute("DELETE FROM segments WHERE file = ?1", params![seg.file])
+                    .map_err(io)?;
+            }
+            tx.execute("INSERT OR REPLACE INTO segments (file, project, first_id, last_id, rows, day) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![file, project, first, last, rows.len() as i64, day]).map_err(io)?;
+            tx.commit().map_err(io)?;
+            // Only now, with the merged file safe and the index pointing at it, are the old files removed.
+            for seg in old.iter().filter(|s| s.file != file) {
+                let _ = std::fs::remove_file(dir.join(&seg.file));
+                if let Some(b) = &self.bucket {
+                    let _ = b.delete(&seg.file);
+                }
+                removed += 1;
+            }
+            if self.bucket.is_some() {
+                let _ = std::fs::remove_file(dir.join(&file));
+            }
+        }
+        self.cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        Ok(removed)
+    }
+
+    /// The newest `limit` rows of a project (optionally one thread) older than `before` (or the newest of all), oldest of them first, read
+    /// from the database and, when the database does not have enough, from the compressed files, newest file first. Paging back is
+    /// `before = the id of the oldest row seen`. Files are unpacked once and kept for a few reads, so paging through a day is cheap.
+    ///
+    /// ponytail: rows are taken newest file first and the database's rows are assumed newer than the files' (true while rows arrive in
+    /// order). A row stamped out of order could appear a page late; a merge by id across all sources fixes that if it ever matters.
+    pub fn history_before(
+        &self,
+        project: &str,
+        thread: Option<&str>,
+        before: Option<i64>,
+        limit: usize,
+    ) -> std::io::Result<Vec<HistoryRow>> {
+        let before = before.unwrap_or(i64::MAX);
+        let mut out: Vec<HistoryRow> = {
+            let mut st = self
+                .conn
+                .prepare_cached(
+                    "SELECT id, at, project, thread, sender, kind, body FROM history
+                     WHERE project = ?1 AND id < ?2 AND (?3 IS NULL OR thread = ?3) ORDER BY id DESC LIMIT ?4",
+                )
+                .map_err(io)?;
+            st.query_map(params![project, before, thread, limit as i64], |r| {
+                Ok(HistoryRow {
+                    id: r.get(0)?,
+                    at: r.get(1)?,
+                    project: r.get(2)?,
+                    thread: r.get(3)?,
+                    from: r.get(4)?,
+                    kind: r.get(5)?,
+                    text: r.get(6)?,
+                })
+            })
+            .map_err(io)?
+            .collect::<Result<_, _>>()
+            .map_err(io)?
+        };
+        if out.len() < limit {
+            let mut segs = self.segments(project).map_err(io)?;
+            segs.retain(|s| s.first_id < before);
+            segs.sort_by_key(|s| std::cmp::Reverse(s.first_id));
+            'files: for seg in segs {
+                for r in self.read_segment_cached(&seg.file)?.iter().rev() {
+                    if r.id < before && thread.is_none_or(|t| r.thread.as_deref() == Some(t)) {
+                        out.push(r.clone());
+                        if out.len() >= limit {
+                            break 'files;
+                        }
+                    }
+                }
+            }
+        }
+        out.reverse();
+        Ok(out)
+    }
+
+    /// `read_segment`, keeping the last few files unpacked.
+    fn read_segment_cached(&self, file: &str) -> std::io::Result<std::sync::Arc<Vec<HistoryRow>>> {
+        {
+            let cache = self
+                .cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some((_, rows)) = cache.iter().find(|(f, _)| f == file) {
+                return Ok(rows.clone());
+            }
+        }
+        let rows = std::sync::Arc::new(self.read_segment(file)?);
+        let mut cache = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cache.push_back((file.to_string(), rows.clone()));
+        while cache.len() > SEGMENT_CACHE {
+            cache.pop_front();
+        }
+        Ok(rows)
+    }
+
     /// The compressed files that hold part of a project's history.
     pub fn segments(&self, project: &str) -> rusqlite::Result<Vec<Segment>> {
-        let mut st = self.conn.prepare("SELECT file, project, first_id, last_id, rows FROM segments WHERE project = ?1 ORDER BY first_id")?;
+        let mut st = self.conn.prepare("SELECT file, project, first_id, last_id, rows, day FROM segments WHERE project = ?1 ORDER BY first_id")?;
         let rows = st.query_map(params![project], |r| {
             Ok(Segment {
                 file: r.get(0)?,
@@ -481,6 +673,7 @@ impl Store {
                 first_id: r.get(2)?,
                 last_id: r.get(3)?,
                 rows: r.get(4)?,
+                day: r.get(5)?,
             })
         })?;
         rows.collect()

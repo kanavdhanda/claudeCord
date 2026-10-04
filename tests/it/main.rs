@@ -20,6 +20,7 @@ mod resilience;
 mod robust;
 mod server;
 mod store;
+mod tiering;
 mod token_budget;
 mod uptime;
 mod web_login;

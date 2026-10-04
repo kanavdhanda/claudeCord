@@ -211,8 +211,21 @@ pub(crate) async fn run(
             _ = tick.tick() => { fx.extend(guard(&mut core, disk.reader(), &conns, &mut report, None, |c| c.tick(now)).unwrap_or_default()); }
             _ = rollover.tick() => {
                 if rolling.as_ref().is_none_or(|h| h.is_finished()) && let Some(mut s) = disk.reader().fork() {
+                    // With the usual window of days, only whole days move out of the database, so each project gets one file per day and
+                    // not one per hour (a window shorter than a day is only used to try this out in small tests); joining any small
+                    // files a day ends up with follows.
                     let cutoff = now - cfg.hot_window.as_millis() as i64;
-                    rolling = Some(tokio::task::spawn_blocking(move || { let _ = s.rollover(cutoff); }));
+                    let cutoff = if cfg.hot_window >= Duration::from_secs(86_400) { cutoff - cutoff.rem_euclid(86_400_000) } else { cutoff };
+                    rolling = Some(tokio::task::spawn_blocking(move || {
+                        match s.rollover(cutoff) {
+                            Ok(n) if n > 0 => crate::info!("hub", "moved {n} old history rows out of the database into files"),
+                            Ok(_) => {}
+                            Err(e) => crate::error!("hub", "moving old history out of the database failed: {e}"),
+                        }
+                        if let Err(e) = s.compact(100_000) {
+                            crate::error!("hub", "joining old history files failed: {e}");
+                        }
+                    }));
                 }
             }
             _ = backup.tick() => {

@@ -181,6 +181,12 @@ conversation. Finished work is never handed over again.
 
 ## History, old files and Obsidian
 
+Recent history is hot and old history is cold, the way large chat systems keep it: the newest messages live in the database; older days
+move out into immutable compressed files, one per project per day (a huge day is split so rolling over never needs much memory), which are
+joined if a day ends up with several and, with a bucket set up, uploaded and then removed from the disk. Reading goes the other way: the
+dashboard's "Load older" button pages back through the database and then the files, newest first, keeping the last few files unpacked. So the
+database stays small and fast however many messages there are.
+
 The last two weeks of conversation stay in the hub's database. Older history is compressed into files and moved to an
 S3-compatible bucket (Oracle Cloud's free tier first, Cloudflare R2 later), so a small free server never fills its disk:
 

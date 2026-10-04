@@ -354,3 +354,52 @@ async fn the_live_database_can_be_backed_up_and_brought_back_whole() {
     .await
     .unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn joining_a_days_small_files_replaces_them_in_the_bucket_too_and_paging_reads_from_the_bucket()
+ {
+    let (endpoint, objects) = fake_bucket("sekrit").await;
+    let dir = tmp("compact-bucket");
+    tokio::task::spawn_blocking(move || {
+        let mut s = Store::open(&dir.join("t.db"), Some(&dir.join("seg"))).unwrap();
+        s.set_bucket(Some(bucket(&endpoint, "sekrit")));
+        // Three rollovers within one day: three small files in the bucket.
+        for part in 0..3i64 {
+            let rows: Vec<HistoryRow> = (0..5)
+                .map(|i| row(part * 1000 + i, &format!("p{part}-{i}")))
+                .collect();
+            s.append(&rows).unwrap();
+            s.rollover((part + 1) * 1000).unwrap();
+        }
+        assert_eq!(
+            objects
+                .lock()
+                .unwrap()
+                .keys()
+                .filter(|k| k.ends_with(".jsonl.gz"))
+                .count(),
+            3
+        );
+        assert_eq!(s.compact(100_000).unwrap(), 3);
+        // One joined object is in the bucket, the three small ones are gone from it, and nothing is on the local disk.
+        let keys: Vec<String> = objects
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|k| k.ends_with(".jsonl.gz"))
+            .cloned()
+            .collect();
+        assert_eq!(keys.len(), 1, "{keys:?}");
+        assert!(
+            std::fs::read_dir(dir.join("seg")).map_or(true, |d| d.count() == 0),
+            "the local copy left once it was in the bucket"
+        );
+        // Paging back reads the joined file from the bucket.
+        let page = s.history_before("p", None, None, 100).unwrap();
+        assert_eq!(page.len(), 15);
+        assert_eq!(page[0].text, "p0-0");
+        assert_eq!(page[14].text, "p2-4");
+    })
+    .await
+    .unwrap();
+}

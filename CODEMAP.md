@@ -171,6 +171,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | `tests/it/robust.rs` | The hub as a real program, started and stopped the way an operator does it: a normal stop (SIGTERM, which is what `systemctl stop` and Docker send) saves everything and is recorded as a stop, while a kill is recorded as a crash from the last heartbeat. |
 | `tests/it/server.rs` | The hub over real sockets. |
 | `tests/it/store.rs` | Storage tests: history, saving and restoring the core, crash safety, and rolling old history into compressed files. |
+| `tests/it/tiering.rs` | Hot and cold history: recent messages live in the database, older ones in immutable compressed files, one per project per day, joined when a day ends up with several, and read back by paging. |
 | `tests/it/token_budget.rs` | Token budget, measured on a scripted chat. |
 | `tests/it/uptime.rs` | Uptime: the arithmetic, the log, crash recovery, the debounce a prober uses, and the hub's own endpoints. |
 | `tests/it/web_login.rs` | "Sign in with Discord" for the dashboard, against a stand-in Discord OAuth server and a real hub: the redirect, the state check, who may sign in, who sees which project, signing out, and that tokens still work and no-credentials is not a failure. |

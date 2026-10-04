@@ -86,7 +86,7 @@
     if (!project || names.indexOf(project) < 0) { project = names[0] || ""; }
     $("projects").replaceChildren.apply($("projects"), names.map(function (n) {
       var b = el("button", "", n); if (n === project) { b.setAttribute("aria-current", "true"); }
-      b.addEventListener("click", function () { project = n; page = 0; sessionStorage.setItem("cc-project", n); refresh(); });
+      b.addEventListener("click", function () { project = n; page = 0; olderRows = []; noMoreOlder = false; $("older-note").textContent = ""; sessionStorage.setItem("cc-project", n); refresh(); });
       return b;
     }));
     var p = state.projects[project] || { agents: [], asks: [], perms: [], tasks: [] };
@@ -121,8 +121,14 @@
     $("prev").disabled = page === 0; $("next").disabled = page >= pages - 1;
   }
 
+  // Older messages the person asked for, kept so the live refresh does not throw them away. Cleared when the project changes.
+  var olderRows = [], newestRows = [], noMoreOlder = false;
   function showHistory(rows) {
-    fill("history", rows.map(function (r) {
+    newestRows = rows;
+    var first = rows.length ? rows[0].id : Infinity;
+    var all = olderRows.filter(function (r) { return r.id < first; }).concat(rows);
+    $("older").hidden = noMoreOlder;
+    fill("history", all.map(function (r) {
       var d = el("div", "msg"); d.appendChild(el("b", "", r.from)); d.appendChild(el("span", "dim", " (" + r.kind + (r.thread ? ", " + r.thread : "") + ")  ")); d.appendChild(document.createTextNode(r.text)); return d;
     }), "No conversation yet.");
   }
@@ -167,6 +173,16 @@
     }).catch(function () {});
   }
   $("out").addEventListener("click", function () { fetch("/auth/logout", { method: "POST" }).then(function () { location.reload(); }); });
+  // Pages back through the conversation: the database first, then the compressed files, newest first.
+  $("older").addEventListener("click", function () {
+    var oldest = olderRows.length ? olderRows[0].id : (newestRows.length ? newestRows[0].id : 0);
+    if (!oldest || !project) { return; }
+    api("/api/v1/history?project=" + encodeURIComponent(project) + "&limit=60&before=" + oldest).then(function (rows) {
+      if (rows.length < 60) { noMoreOlder = true; $("older-note").textContent = "That is the start of the conversation."; }
+      olderRows = rows.concat(olderRows);
+      showHistory(newestRows);
+    }).catch(function () {});
+  });
   $("go").addEventListener("click", function () { token = $("token").value.trim(); sessionStorage.setItem("cc-token", token); refresh(); });
   ["logq", "loglevel"].forEach(function (id) { $(id).addEventListener("input", showLog); });
   ["search", "size"].forEach(function (id) { $(id).addEventListener("input", function () { page = 0; if (last) { showAgents(last.projects[project]); } }); });

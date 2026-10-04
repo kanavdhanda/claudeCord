@@ -221,15 +221,19 @@ pub(super) async fn history(
         q.contains_key("latest"),
         q.get("after").and_then(|a| a.parse().ok()).unwrap_or(0),
     );
+    let before: Option<i64> = q.get("before").and_then(|b| b.parse().ok());
     let rows = tokio::task::spawn_blocking(move || {
         let guard = reader.locked();
-        guard.as_ref().and_then(|s| {
-            if latest {
-                s.history_latest(&project, thread.as_deref(), limit).ok()
-            } else {
-                s.history(&project, thread.as_deref(), after, limit).ok()
-            }
-        })
+        let s = guard.as_ref()?;
+        if before.is_some() {
+            // Paging back: older than the oldest row the page has, from the database and then the compressed files.
+            s.history_before(&project, thread.as_deref(), before, limit)
+                .ok()
+        } else if latest {
+            s.history_latest(&project, thread.as_deref(), limit).ok()
+        } else {
+            s.history(&project, thread.as_deref(), after, limit).ok()
+        }
     })
     .await
     .ok()
