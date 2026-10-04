@@ -1,6 +1,6 @@
 import { createServer, type Socket } from "node:net";
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 import { meshDir, sockPath, type DaemonRequest, type DaemonResponse } from "@claudecord/agent-tools";
@@ -24,6 +24,7 @@ import {
   type NodeConfig,
   type Policy,
 } from "./config.js";
+import { FileReceiver, readChunks, resolveInside } from "./files.js";
 import { buildRules } from "./rules.js";
 import * as tmux from "./tmux.js";
 
@@ -51,6 +52,8 @@ export class Daemon {
   private askSeq = 0;
   private backoff = 1000;
   private closing = false;
+  private files = new FileReceiver();
+  private chain: Promise<void> = Promise.resolve();
 
   constructor() {
     this.cfg = loadNodeConfig();
@@ -78,12 +81,15 @@ export class Daemon {
     });
     ws.on("message", (d) => {
       const f = parseHubFrame(d.toString());
-      if (f) void this.onHub(f).catch((e) => console.error("hub frame error", e));
+      // Handled in order so file chunks and answers are never reordered.
+      if (f) this.chain = this.chain.then(() => this.onHub(f)).catch((e) => console.error("hub frame error", e));
     });
     ws.on("close", () => {
       if (this.closing) return;
-      console.log(`hub disconnected, retrying in ${this.backoff}ms`);
-      setTimeout(() => this.connect(), this.backoff);
+      // Full jitter, so many nodes do not reconnect in lockstep after a hub restart.
+      const delay = Math.round(this.backoff * (0.5 + Math.random()));
+      console.log(`hub disconnected, retrying in ${delay}ms`);
+      setTimeout(() => this.connect(), delay);
       this.backoff = Math.min(this.backoff * 2, 30_000);
     });
     ws.on("error", (e) => console.error("hub link error:", e.message));
@@ -118,6 +124,17 @@ export class Daemon {
             agentId: f.agentId,
             text: "I could not map that reply onto the prompt on screen. Reply with an option number.",
           });
+        }
+        return;
+      }
+      case "file.chunk": {
+        const rt = this.agents.get(f.agentId);
+        if (!rt) return;
+        const r = await this.files.receive(rt.cwd, f);
+        if (r) {
+          const kb = Math.max(1, Math.round(r.bytes / 1024));
+          const note = f.caption ? ` Note: ${f.caption}` : "";
+          rt.enqueue({ from: f.from, thread: f.thread, text: `sent you a file, saved at ${relative(rt.cwd, r.path)} (${kb} KB).${note}` });
         }
         return;
       }
@@ -300,6 +317,19 @@ export class Daemon {
         return this.send({ t: "agent.report", agentId: req.agentId, title: req.title, summary: req.summary, artifacts: req.artifacts })
           ? { ok: true }
           : { ok: false, error: "hub offline" };
+      case "send": {
+        const rt = this.agents.get(req.agentId);
+        if (!rt) return { ok: false, error: "unknown agent" };
+        const path = resolveInside(rt.cwd, req.path);
+        let name = "";
+        for await (const c of readChunks(path)) {
+          while ((this.ws?.bufferedAmount ?? 0) > 1 << 20) await new Promise((r) => setTimeout(r, 20));
+          name = c.name;
+          const ok = this.send({ t: "file.chunk", agentId: req.agentId, ...c, to: req.to, caption: req.caption, thread: req.thread });
+          if (!ok) return { ok: false, error: "hub offline" };
+        }
+        return { ok: true, data: `sent ${name}${req.to ? ` to ${req.to}` : ""}` };
+      }
       case "ask": {
         const rt = this.agents.get(req.agentId);
         if (!rt) return { ok: false, error: "unknown agent" };

@@ -7,12 +7,14 @@ export function buildRules(spec: AgentSpec, opts: { shimCmd: string; mcp: boolea
         "- say(message, thread?): post a chat message.",
         "- ask_human(question, options?, thread?): ask the engineer and wait for the answer.",
         "- report(title, summary, artifacts?): post the final report.",
+        "- send_file(path, to?, caption?, thread?): send a file from your project folder to the channel or to a peer.",
       ]
     : [
         "Commands (run in your shell):",
         `- ${opts.shimCmd} say "message" [--thread name]: post a chat message.`,
         `- ${opts.shimCmd} ask "question" [--option text]...: ask the engineer, prints their answer.`,
         `- ${opts.shimCmd} report --title "title" "summary" [--artifact text]...: post the final report.`,
+        `- ${opts.shimCmd} send path [--to agent] [--caption text]: send a file from your project folder to the channel or to a peer.`,
       ];
   return [
     `You are ${spec.name}, an engineer on a small team working in project "${spec.project}"${spec.role ? `, role: ${spec.role}` : ""}.`,
@@ -26,6 +28,7 @@ export function buildRules(spec: AgentSpec, opts: { shimCmd: string; mcp: boolea
     "- First discuss the approach briefly with peers, then execute. Do not narrate tool use.",
     "- Ask the engineer only when blocked or at a real decision point, and ask once.",
     "- When the task is finished, send exactly one final report. Coordinate so only one of you reports.",
+    "- Files from others are saved under .claudecord/inbox/ in your project folder and announced in your input. Send files only when asked or when a peer needs them.",
     "- Use your own subagents freely. Do not mention them in chat.",
     "- If you have nothing to add, stay silent.",
   ].join("\n");

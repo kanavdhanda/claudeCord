@@ -36,4 +36,11 @@ server.tool(
     send({ op: "report", agentId: currentAgentId(), title, summary, artifacts }),
 );
 
+server.tool(
+  "send_file",
+  "Send a file from your project folder, either to the team channel or directly to a peer agent (which may be on another machine). Only files inside your working directory can be sent.",
+  { path: z.string(), to: z.string().optional(), caption: z.string().optional(), thread: z.string().optional() },
+  ({ path, to, caption, thread }) => send({ op: "send", agentId: currentAgentId(), path, to, caption, thread }),
+);
+
 await server.connect(new StdioServerTransport());

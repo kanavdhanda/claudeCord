@@ -5,7 +5,7 @@ import { Hub, type NodeConn, type Outbound } from "../src/hub.js";
 
 function setup() {
   const db = new Db(":memory:");
-  const hub = new Hub(db);
+  const hub = new Hub(db, 12);
   const posts: string[] = [];
   const notices: string[] = [];
   const out: Outbound = {
@@ -13,6 +13,7 @@ function setup() {
     post: async (_p, a, text) => void posts.push(`${a.name}: ${text}`),
     postAsk: async () => {},
     postReport: async () => {},
+    postFile: async () => {},
     notice: async (_p, t) => void notices.push(t),
     refreshStatus: () => {},
   };
@@ -127,6 +128,71 @@ describe("hub routing", () => {
     expect(s.db.agentsOfProject("alpha").find((a) => a.is_lead)?.name).toBe("otter");
     s.db.setLead("alpha", "alpha/heron");
     expect(s.hub.humanMessage("alpha", "go")).toEqual(["heron"]);
+  });
+});
+
+describe("file transfer", () => {
+  const chunk = (agentId: string, o: Partial<Extract<import("@claudecord/protocol").NodeFrame, { t: "file.chunk" }>> = {}) => ({
+    t: "file.chunk" as const, transferId: "t1", agentId, name: "a.txt", seq: 0, last: true,
+    data: Buffer.from("hello").toString("base64"), ...o,
+  });
+
+  it("relays a peer transfer chunk by chunk to the right node", async () => {
+    const s = setup();
+    const a = s.conn("mac");
+    await s.reg(a, "otter");
+    await s.reg(s.conn("gpu"), "heron");
+    await s.hub.onNodeFrame(a, chunk("alpha/otter", { to: "heron", seq: 0, last: false }));
+    await s.hub.onNodeFrame(a, chunk("alpha/otter", { to: "heron", seq: 1, last: true }));
+    const got = s.sent.gpu!.filter((f) => f.t === "file.chunk");
+    expect(got).toHaveLength(2);
+    expect(got[0]).toMatchObject({ agentId: "alpha/heron", from: "otter", name: "a.txt" });
+    expect(s.sent.mac!.some((f) => f.t === "file.chunk")).toBe(false);
+  });
+
+  it("posts a transfer without a recipient to Discord once, reassembled", async () => {
+    const s = setup();
+    const files: string[] = [];
+    s.hub.out.postFile = async (_p, _a, name, data) => void files.push(`${name}:${data.toString()}`);
+    const a = s.conn("mac");
+    await s.reg(a, "otter");
+    await s.hub.onNodeFrame(a, chunk("alpha/otter", { seq: 0, last: false, data: Buffer.from("hel").toString("base64") }));
+    await s.hub.onNodeFrame(a, chunk("alpha/otter", { seq: 1, last: true, data: Buffer.from("lo").toString("base64") }));
+    expect(files).toEqual(["a.txt:hello"]);
+  });
+
+  it("rejects oversize uploads to Discord", async () => {
+    const s = setup();
+    const files: string[] = [];
+    s.hub.out.postFile = async (_p, _a, name) => void files.push(name);
+    const a = s.conn("mac");
+    await s.reg(a, "otter");
+    const big = Buffer.alloc(6 * 1024 * 1024).toString("base64");
+    await s.hub.onNodeFrame(a, chunk("alpha/otter", { seq: 0, last: false, data: big }));
+    await s.hub.onNodeFrame(a, chunk("alpha/otter", { seq: 1, last: true, data: big }));
+    expect(files).toEqual([]);
+    expect(s.notices.some((n) => n.includes("limit"))).toBe(true);
+  });
+
+  it("tells the room when the recipient does not exist", async () => {
+    const s = setup();
+    const a = s.conn("mac");
+    await s.reg(a, "otter");
+    await s.hub.onNodeFrame(a, chunk("alpha/otter", { to: "ghost" }));
+    expect(s.notices.some((n) => n.includes("ghost"))).toBe(true);
+  });
+
+  it("splits a human file into ordered chunks for the addressed agent only", async () => {
+    const s = setup();
+    await s.reg(s.conn("mac"), "otter");
+    await s.reg(s.conn("gpu"), "heron");
+    const data = Buffer.alloc(500 * 1024, 7);
+    expect(s.hub.sendFile("alpha", "@heron data set", "d.bin", data)).toEqual(["heron"]);
+    const got = s.sent.gpu!.filter((f) => f.t === "file.chunk") as Extract<HubFrame, { t: "file.chunk" }>[];
+    expect(got.map((c) => c.seq)).toEqual([0, 1, 2]);
+    expect(got.map((c) => c.last)).toEqual([false, false, true]);
+    expect(Buffer.concat(got.map((c) => Buffer.from(c.data, "base64"))).equals(data)).toBe(true);
+    expect(s.sent.mac!.some((f) => f.t === "file.chunk")).toBe(false);
   });
 });
 

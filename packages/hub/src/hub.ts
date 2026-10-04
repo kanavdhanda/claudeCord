@@ -1,4 +1,4 @@
-import type { AgentSpec, AgentStatus, HubFrame, NodeFrame } from "@claudecord/protocol";
+import { FILE_CHUNK_BYTES, MAX_FILE_BYTES, type AgentSpec, type AgentStatus, type HubFrame, type NodeFrame } from "@claudecord/protocol";
 import type { Db, AgentRow } from "./db.js";
 
 export interface NodeConn {
@@ -11,6 +11,7 @@ export interface Outbound {
   post(project: string, agent: AgentRow, text: string, thread?: string): Promise<void>;
   postAsk(project: string, agent: AgentRow, ask: PendingAsk): Promise<void>;
   postReport(project: string, agent: AgentRow, title: string, summary: string, artifacts?: string[]): Promise<void>;
+  postFile(project: string, agent: AgentRow, name: string, data: Buffer, caption?: string, thread?: string): Promise<void>;
   notice(project: string, text: string, mention?: boolean): Promise<void>;
   refreshStatus(project: string): void;
 }
@@ -23,7 +24,7 @@ export interface PendingAsk {
   thread?: string;
 }
 
-const STREAK_LIMIT = 12;
+const DEFAULT_STREAK_LIMIT = 20;
 
 /** Core state and routing. Discord-agnostic so it can be unit tested. */
 export class Hub {
@@ -31,9 +32,13 @@ export class Hub {
   status = new Map<string, { status: AgentStatus; detail?: string }>();
   asks = new Map<string, PendingAsk[]>();
   private streak = new Map<string, number>();
+  private uploads = new Map<string, { chunks: Buffer[]; bytes: number }>();
   out!: Outbound;
 
-  constructor(readonly db: Db) {}
+  constructor(
+    readonly db: Db,
+    private streakLimit = DEFAULT_STREAK_LIMIT,
+  ) {}
 
   // Node lifecycle
 
@@ -47,7 +52,7 @@ export class Hub {
     if (this.nodes.get(conn.nodeName) !== conn) return;
     this.nodes.delete(conn.nodeName);
     const projects = new Set<string>();
-    for (const a of this.db.allAgents().filter((a) => a.node_name === conn.nodeName)) {
+    for (const a of this.db.agentsOfNode(conn.nodeName)) {
       this.status.set(a.agent_id, { status: "offline" });
       projects.add(a.project);
     }
@@ -109,6 +114,8 @@ export class Hub {
         this.out.refreshStatus(a.project);
         return;
       }
+      case "file.chunk":
+        return this.onFileChunk(f);
       case "agent.gone": {
         const a = this.agent(f.agentId);
         if (!a) return;
@@ -150,10 +157,73 @@ export class Hub {
     }
   }
 
+  // Files
+
+  /** Peer transfers are relayed chunk by chunk. Transfers to Discord are buffered and posted once. */
+  private async onFileChunk(f: Extract<NodeFrame, { t: "file.chunk" }>): Promise<void> {
+    const a = this.agent(f.agentId);
+    if (!a) return;
+    if (f.to) {
+      const peer = this.findByName(a.project, f.to);
+      if (!peer) {
+        if (f.seq === 0) await this.out.notice(a.project, `${a.name} tried to send a file to ${f.to}, but no such agent is in this project.`);
+        return;
+      }
+      this.sendTo(peer, {
+        t: "file.chunk", transferId: f.transferId, agentId: peer.agent_id, from: a.name,
+        name: f.name, seq: f.seq, last: f.last, data: f.data, caption: f.caption, thread: f.thread,
+      });
+      if (f.last) await this.out.post(a.project, a, `Sent ${f.name} to @${peer.name}.${f.caption ? ` ${f.caption}` : ""}`, f.thread);
+      return;
+    }
+    let u = this.uploads.get(f.transferId);
+    if (!u) {
+      if (f.seq !== 0) return;
+      u = { chunks: [], bytes: 0 };
+      this.uploads.set(f.transferId, u);
+    }
+    const buf = Buffer.from(f.data, "base64");
+    u.bytes += buf.length;
+    if (u.bytes > MAX_FILE_BYTES) {
+      this.uploads.delete(f.transferId);
+      await this.out.notice(a.project, `${a.name} tried to send ${f.name}, which is over the ${MAX_FILE_BYTES / 1048576} MB limit.`);
+      return;
+    }
+    u.chunks.push(buf);
+    if (!f.last) return;
+    this.uploads.delete(f.transferId);
+    await this.out.postFile(a.project, a, f.name, Buffer.concat(u.chunks), f.caption, f.thread);
+  }
+
+  /** Sends a file from the human to the agents the message addresses (mentions, otherwise the lead). */
+  sendFile(project: string, text: string, name: string, data: Buffer, thread?: string): string[] {
+    const targets = this.pickTargets(project, text);
+    const transferId = `h-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const total = Math.max(1, Math.ceil(data.length / FILE_CHUNK_BYTES));
+    for (const t of targets) {
+      for (let seq = 0; seq < total; seq++) {
+        this.sendTo(t, {
+          t: "file.chunk", transferId, agentId: t.agent_id, from: "engineer", name, seq, last: seq === total - 1,
+          data: data.subarray(seq * FILE_CHUNK_BYTES, (seq + 1) * FILE_CHUNK_BYTES).toString("base64"),
+          caption: text || undefined, thread,
+        });
+      }
+    }
+    return targets.map((t) => t.name);
+  }
+
   // Routing
 
+  private pickTargets(project: string, text: string): AgentRow[] {
+    const agents = this.db.agentsOfProject(project);
+    const mentioned = agents.filter((a) => new RegExp(`(^|\\W)@${escapeRe(a.name)}(\\W|$)`, "i").test(text));
+    if (mentioned.length) return mentioned;
+    const lead = agents.find((a) => a.is_lead) ?? agents[0];
+    return lead ? [lead] : [];
+  }
+
   agent(id: string): AgentRow | undefined {
-    return this.db.allAgents().find((a) => a.agent_id === id);
+    return this.db.getAgent(id);
   }
 
   findByName(project: string, name: string): AgentRow | undefined {
@@ -188,11 +258,7 @@ export class Hub {
       }
     }
 
-    let targets = mentioned;
-    if (!targets.length) {
-      const lead = agents.find((a) => a.is_lead) ?? agents[0];
-      targets = lead ? [lead] : [];
-    }
+    const targets = mentioned.length ? mentioned : this.pickTargets(project, text);
     const clean = text.trim();
     for (const t of targets) {
       this.sendTo(t, { t: "deliver", agentId: t.agent_id, from: "engineer", text: clean, thread });
@@ -208,10 +274,10 @@ export class Hub {
     const mentioned = peers.filter((a) => new RegExp(`(^|\\W)@${escapeRe(a.name)}(\\W|$)`, "i").test(text));
     const n = (this.streak.get(from.project) ?? 0) + 1;
     this.streak.set(from.project, n);
-    if (n === STREAK_LIMIT) {
+    if (n === this.streakLimit) {
       void this.out.notice(from.project, "Agents have exchanged many messages without input. Pausing forwarding until you reply.", true);
     }
-    if (n >= STREAK_LIMIT || mentionsHuman) return;
+    if (n >= this.streakLimit || mentionsHuman) return;
     const targets = mentioned.length ? mentioned : peers;
     for (const t of targets) {
       this.sendTo(t, { t: "deliver", agentId: t.agent_id, from: from.name, text, thread });

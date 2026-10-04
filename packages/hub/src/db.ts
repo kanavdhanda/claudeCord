@@ -26,6 +26,9 @@ export interface AgentRow {
 
 export class Db {
   private db: DatabaseSyncType;
+  // Agents are read on every routed message, so they are served from memory and written through to SQLite.
+  private byId = new Map<string, AgentRow>();
+  private byProject = new Map<string, Map<string, AgentRow>>();
 
   constructor(path: string) {
     this.db = new DatabaseSync(path);
@@ -53,6 +56,27 @@ export class Db {
         is_lead INTEGER NOT NULL DEFAULT 0
       );
     `);
+    for (const a of this.db.prepare("SELECT * FROM agents").all() as unknown as AgentRow[]) this.cache(a);
+  }
+
+  private cache(a: AgentRow): void {
+    this.byId.set(a.agent_id, a);
+    let m = this.byProject.get(a.project);
+    if (!m) this.byProject.set(a.project, (m = new Map()));
+    m.set(a.agent_id, a);
+  }
+
+  private uncache(id: string): void {
+    const a = this.byId.get(id);
+    if (!a) return;
+    this.byId.delete(id);
+    const m = this.byProject.get(a.project);
+    m?.delete(id);
+    if (m && !m.size) this.byProject.delete(a.project);
+  }
+
+  getAgent(id: string): AgentRow | undefined {
+    return this.byId.get(id);
   }
 
   createToken(nodeName: string): string {
@@ -104,27 +128,37 @@ export class Db {
            node_name=excluded.node_name, adapter=excluded.adapter, model=excluded.model, role=excluded.role`,
       )
       .run(a.agent_id, a.name, a.project, a.node_name, a.adapter, a.model, a.role, a.is_lead);
+    const prev = this.byId.get(a.agent_id);
+    this.uncache(a.agent_id);
+    this.cache({ ...a, is_lead: prev?.is_lead ?? a.is_lead });
   }
 
   removeAgent(agentId: string): void {
     this.db.prepare("DELETE FROM agents WHERE agent_id=?").run(agentId);
+    this.uncache(agentId);
   }
 
   agentsOfProject(project: string): AgentRow[] {
-    return this.db.prepare("SELECT * FROM agents WHERE project=?").all(project) as unknown as AgentRow[];
+    return [...(this.byProject.get(project)?.values() ?? [])];
   }
 
   allAgents(): AgentRow[] {
-    return this.db.prepare("SELECT * FROM agents").all() as unknown as AgentRow[];
+    return [...this.byId.values()];
   }
 
   setLead(project: string, agentId: string): void {
     this.db.prepare("UPDATE agents SET is_lead=0 WHERE project=?").run(project);
     this.db.prepare("UPDATE agents SET is_lead=1 WHERE agent_id=?").run(agentId);
+    for (const a of this.byProject.get(project)?.values() ?? []) a.is_lead = a.agent_id === agentId ? 1 : 0;
   }
 
   clearAgentsOfNode(nodeName: string): void {
     this.db.prepare("DELETE FROM agents WHERE node_name=?").run(nodeName);
+    for (const a of this.allAgents()) if (a.node_name === nodeName) this.uncache(a.agent_id);
+  }
+
+  agentsOfNode(nodeName: string): AgentRow[] {
+    return this.allAgents().filter((a) => a.node_name === nodeName);
   }
 }
 

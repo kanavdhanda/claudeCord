@@ -4,3 +4,4 @@ dist
 .env
 *.db
 .claudecord.json
+packages/hub/bench/k6/tokens.json
