@@ -5,7 +5,9 @@ import { randomUUID } from "node:crypto";
 import { FILE_CHUNK_BYTES, MAX_FILE_BYTES, findSecretsInFile } from "@claudecord/protocol";
 
 export function safeName(name: string): string {
-  const base = basename(name).replace(/[\u0000-\u001f<>:"/\\|?*]/g, "_").replace(/^\.+/, "_");
+  const base = basename(name)
+    .replace(/[\u0000-\u001f<>:"/\\|?*]/g, "_")
+    .replace(/^\.+/, "_");
   return (base || "file").slice(0, 120);
 }
 
@@ -72,7 +74,13 @@ export async function* readChunks(path: string, maxBytes = MAX_FILE_BYTES): Asyn
     do {
       const { bytesRead } = await fh.read(buf, 0, FILE_CHUNK_BYTES, sent);
       sent += bytesRead;
-      yield { transferId, name, seq: seq++, last: sent >= st.size, data: buf.subarray(0, bytesRead).toString("base64") };
+      yield {
+        transferId,
+        name,
+        seq: seq++,
+        last: sent >= st.size,
+        data: buf.subarray(0, bytesRead).toString("base64"),
+      };
     } while (sent < st.size);
   } finally {
     await fh.close();

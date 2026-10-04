@@ -10,7 +10,16 @@ import { join } from "node:path";
 import { callDaemon } from "../../agent-tools/src/ipc.js";
 import { Daemon } from "../src/daemon.js";
 import { saveNodeConfig } from "../src/config.js";
-import { IPC, e2eReady, installFakeClaude, makeTmp, paneDump, sleep, startRecordingHub, waitFor as wait } from "./helpers/e2e.js";
+import {
+  IPC,
+  e2eReady,
+  installFakeClaude,
+  makeTmp,
+  paneDump,
+  sleep,
+  startRecordingHub,
+  waitFor as wait,
+} from "./helpers/e2e.js";
 
 vi.setConfig({ testTimeout: 90_000, hookTimeout: 90_000 });
 
@@ -30,14 +39,16 @@ describe.skipIf(!e2eReady)("end to end", () => {
   let notices: string[] = [];
   let confirms: string[] = [];
   let files: string[] = [];
-  const diagnostics = () => `${paneDump(sock)}\n--- posts: ${JSON.stringify(posts)}\n--- notices: ${JSON.stringify(notices)}`;
-  const waitFor = <T,>(what: string, fn: () => T | undefined | false, ms?: number) => wait(what, fn, ms, diagnostics);
+  const diagnostics = () =>
+    `${paneDump(sock)}\n--- posts: ${JSON.stringify(posts)}\n--- notices: ${JSON.stringify(notices)}`;
+  const waitFor = <T>(what: string, fn: () => T | undefined | false, ms?: number) => wait(what, fn, ms, diagnostics);
 
   const up = async (name: string) => {
     const r = await callDaemon({ op: "up", cwd, project, name });
     if (!r.ok) throw new Error(r.error);
   };
-  const say = (text: string, target?: string) => hub().humanMessage(project, target ? `@${target} ${text}` : text, undefined, `c:${Math.random()}`);
+  const say = (text: string, target?: string) =>
+    hub().humanMessage(project, target ? `@${target} ${text}` : text, undefined, `c:${Math.random()}`);
   const lastConfirm = () => confirms.length;
   const posted = (needle: string) => posts.some((p) => p.includes(needle));
 
@@ -58,7 +69,13 @@ describe.skipIf(!e2eReady)("end to end", () => {
     h = await startRecordingHub();
     ({ posts, notices, confirms, files } = h);
 
-    saveNodeConfig({ hubUrl: `ws://127.0.0.1:${h.port}`, token: h.token, nodeName: "e2e", adapter: "claude", policy: "ask" });
+    saveNodeConfig({
+      hubUrl: `ws://127.0.0.1:${h.port}`,
+      token: h.token,
+      nodeName: "e2e",
+      adapter: "claude",
+      policy: "ask",
+    });
     daemon = new Daemon({ handleSignals: false });
     await daemon.start();
     await up("lead1");
@@ -74,7 +91,9 @@ describe.skipIf(!e2eReady)("end to end", () => {
   });
 
   const status = (name: string) => {
-    const a = hub().db.agentsOfProject(project).find((x) => x.name === name);
+    const a = hub()
+      .db.agentsOfProject(project)
+      .find((x) => x.name === name);
     return a ? hub().status.get(a.agent_id)?.status : undefined;
   };
 
@@ -104,7 +123,9 @@ describe.skipIf(!e2eReady)("end to end", () => {
 
   it("relays a terminal permission menu to the human and types the choice back", async () => {
     say("perm:");
-    const ask = await waitFor("menu relayed", () => (hub().asks.get(project) ?? []).find((a) => a.question.includes("Do you want to proceed?")));
+    const ask = await waitFor("menu relayed", () =>
+      (hub().asks.get(project) ?? []).find((a) => a.question.includes("Do you want to proceed?")),
+    );
     expect(ask.options).toHaveLength(3);
     hub().humanMessage(project, "2");
     await waitFor("choice applied", () => posted("lead1: picked=2"));
@@ -117,7 +138,10 @@ describe.skipIf(!e2eReady)("end to end", () => {
 
     say("assign: work1 write the migration", "lead1");
     await waitFor("task created", () => hub().db.getTask(project, "T1"));
-    await waitFor("task accepted", () => hub().db.getTask(project, "T1")?.state === "accepted" || hub().db.getTask(project, "T1")?.state === "done");
+    await waitFor(
+      "task accepted",
+      () => hub().db.getTask(project, "T1")?.state === "accepted" || hub().db.getTask(project, "T1")?.state === "done",
+    );
     await waitFor("task done", () => hub().db.getTask(project, "T1")?.state === "done");
     expect(hub().db.getTask(project, "T1")?.summary).toBe("finished T1");
     expect(notices).toContain("work1 accepted T1.");
@@ -151,13 +175,20 @@ describe.skipIf(!e2eReady)("end to end", () => {
     expect(posted("work1: env E2E_PLAIN_SETTING -> visible")).toBe(true);
     say("env: ANTHROPIC_API_KEY", "work1");
     await waitFor("login query", () => posted("work1: env ANTHROPIC_API_KEY ->"));
-    expect(posts.filter((p) => p.includes("ANTHROPIC_API_KEY"))).toEqual(["work1: env ANTHROPIC_API_KEY -> the-agents-own-login"]);
+    expect(posts.filter((p) => p.includes("ANTHROPIC_API_KEY"))).toEqual([
+      "work1: env ANTHROPIC_API_KEY -> the-agents-own-login",
+    ]);
   });
 
   it("refuses to send an env file that was renamed to look harmless", async () => {
-    writeFileSync(join(cwd, "meeting-notes.md"), "DATABASE_PASSWORD=hunter2hunter2\nSTRIPE_SECRET_KEY=abcdefghijklmnop\n");
+    writeFileSync(
+      join(cwd, "meeting-notes.md"),
+      "DATABASE_PASSWORD=hunter2hunter2\nSTRIPE_SECRET_KEY=abcdefghijklmnop\n",
+    );
     say("sendfile-out: meeting-notes.md", "work1");
-    await waitFor("refusal", () => posts.some((p) => p.startsWith("work1: sent=false") && p.includes("environment variable dump")));
+    await waitFor("refusal", () =>
+      posts.some((p) => p.startsWith("work1: sent=false") && p.includes("environment variable dump")),
+    );
     expect(files.some((f) => f.endsWith("meeting-notes.md"))).toBe(false);
   });
 
@@ -199,6 +230,9 @@ describe.skipIf(!e2eReady)("end to end", () => {
   it("stops everything on killall", async () => {
     expect(hub().killall(project)).toBe(2);
     await waitFor("agents gone", () => hub().db.agentsOfProject(project).length === 0);
-    await waitFor("tmux session gone", () => spawnSync("tmux", ["-L", sock, "has-session", "-t", `=claude-${project}`]).status !== 0);
+    await waitFor(
+      "tmux session gone",
+      () => spawnSync("tmux", ["-L", sock, "has-session", "-t", `=claude-${project}`]).status !== 0,
+    );
   });
 });

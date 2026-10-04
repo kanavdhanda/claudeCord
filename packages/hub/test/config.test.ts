@@ -53,7 +53,11 @@ describe("hub config file", () => {
 
   it("lists every problem in a bad config", () => {
     const p = join(dir, "hub.json");
-    writeFileSync(p, JSON.stringify({ ...good, guildId: "abc", publicUrl: "http://example.com", discordToken: "short" }), { mode: 0o600 });
+    writeFileSync(
+      p,
+      JSON.stringify({ ...good, guildId: "abc", publicUrl: "http://example.com", discordToken: "short" }),
+      { mode: 0o600 },
+    );
     try {
       loadConfig(p);
       throw new Error("should have thrown");
@@ -85,13 +89,21 @@ describe("hub config file", () => {
 describe("hub config rules", () => {
   const parse = (o: object) => HubConfigSchema.safeParse({ ...good, ...o });
 
-  it.each(["https://hub.example.com", "https://hub.example.com:8443", "http://localhost:8787", "http://127.0.0.1:8787"])("accepts public url %s", (publicUrl) => {
+  it.each([
+    "https://hub.example.com",
+    "https://hub.example.com:8443",
+    "http://localhost:8787",
+    "http://127.0.0.1:8787",
+  ])("accepts public url %s", (publicUrl) => {
     expect(parse({ publicUrl }).success).toBe(true);
   });
 
-  it.each(["http://hub.example.com", "ftp://hub.example.com", "hub.example.com", "http://192.168.1.5:8787"])("rejects public url %s", (publicUrl) => {
-    expect(parse({ publicUrl }).success).toBe(false);
-  });
+  it.each(["http://hub.example.com", "ftp://hub.example.com", "hub.example.com", "http://192.168.1.5:8787"])(
+    "rejects public url %s",
+    (publicUrl) => {
+      expect(parse({ publicUrl }).success).toBe(false);
+    },
+  );
 
   it.each(["", "12", "abc", "1".repeat(21), "12345678901234567x"])("rejects Discord id %j", (id) => {
     expect(parse({ guildId: id }).success).toBe(false);

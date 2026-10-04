@@ -9,7 +9,16 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { CLI, IPC, e2eReady, installFakeClaude, makeTmp, paneDump, startRecordingHub, waitFor as wait } from "./helpers/e2e.js";
+import {
+  CLI,
+  IPC,
+  e2eReady,
+  installFakeClaude,
+  makeTmp,
+  paneDump,
+  startRecordingHub,
+  waitFor as wait,
+} from "./helpers/e2e.js";
 
 vi.setConfig({ testTimeout: 90_000, hookTimeout: 90_000 });
 
@@ -32,7 +41,11 @@ describe.skipIf(!e2eReady)("packaged CLI", () => {
   /** Runs the CLI with its own environment, never blocking this process. */
   const exec = (args: string[], opts: { env?: NodeJS.ProcessEnv; cwd?: string; input?: string } = {}) =>
     new Promise<Result>((resolve) => {
-      const p = spawn(process.execPath, [CLI, ...args], { cwd: opts.cwd ?? dir, env: opts.env ?? env, stdio: ["pipe", "pipe", "pipe"] });
+      const p = spawn(process.execPath, [CLI, ...args], {
+        cwd: opts.cwd ?? dir,
+        env: opts.env ?? env,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
       let stdout = "";
       let stderr = "";
       p.stdout.on("data", (d: Buffer) => (stdout += d));
@@ -47,14 +60,20 @@ describe.skipIf(!e2eReady)("packaged CLI", () => {
     return r.stdout;
   };
   const withHome = (name: string): NodeJS.ProcessEnv => ({ ...env, CLAUDECORD_HOME: join(tmp, name) });
-  const waitFor = <T,>(what: string, fn: () => T | undefined | false) => wait(what, fn, 25_000, () => paneDump(sock));
+  const waitFor = <T>(what: string, fn: () => T | undefined | false) => wait(what, fn, 25_000, () => paneDump(sock));
   const agents = () => h.hub.db.agentsOfProject(project);
   const hubUrl = () => `http://127.0.0.1:${h.port}`;
 
   beforeAll(async () => {
     mkdirSync(dir, { recursive: true });
     const bin = installFakeClaude(tmp);
-    env = { ...process.env, CLAUDECORD_HOME: home, CLAUDECORD_TMUX_SOCKET: sock, FAKE_IPC: IPC, PATH: `${bin}:${process.env.PATH}` };
+    env = {
+      ...process.env,
+      CLAUDECORD_HOME: home,
+      CLAUDECORD_TMUX_SOCKET: sock,
+      FAKE_IPC: IPC,
+      PATH: `${bin}:${process.env.PATH}`,
+    };
     h = await startRecordingHub();
   });
 
@@ -69,7 +88,13 @@ describe.skipIf(!e2eReady)("packaged CLI", () => {
     const { code } = h.auth.createPairCode();
     const out = await ok("login", hubUrl(), code, "--name", "cli-node");
     expect(out).toContain('Connected as "cli-node"');
-    const cfg = JSON.parse(readFileSync(join(home, "config.json"), "utf8")) as { token: string; hubUrl: string; nodeName: string; policy: string; envPolicy: string };
+    const cfg = JSON.parse(readFileSync(join(home, "config.json"), "utf8")) as {
+      token: string;
+      hubUrl: string;
+      nodeName: string;
+      policy: string;
+      envPolicy: string;
+    };
     expect(cfg.hubUrl).toBe(`ws://127.0.0.1:${h.port}`);
     expect(cfg.nodeName).toBe("cli-node");
     expect(cfg.policy).toBe("ask");
@@ -93,7 +118,9 @@ describe.skipIf(!e2eReady)("packaged CLI", () => {
     const down = await exec(["login", "http://127.0.0.1:1", "AAAA-AAAA"], { env: other });
     expect(down.stderr).toMatch(/could not reach/);
     const { code } = h.auth.createPairCode();
-    const lower = await exec(["login", hubUrl(), code.toLowerCase().replace("-", " "), "--name", "typed"], { env: other });
+    const lower = await exec(["login", hubUrl(), code.toLowerCase().replace("-", " "), "--name", "typed"], {
+      env: other,
+    });
     expect(lower.status).toBe(0);
   });
 
@@ -116,13 +143,17 @@ describe.skipIf(!e2eReady)("packaged CLI", () => {
   });
 
   it("init still works for a token you already have, without prompting", async () => {
-    const r = await exec(["init", "--hub", `ws://127.0.0.1:${h.port}`, "--token", h.token, "--name", "manual"], { env: withHome("home-init") });
+    const r = await exec(["init", "--hub", `ws://127.0.0.1:${h.port}`, "--token", h.token, "--name", "manual"], {
+      env: withHome("home-init"),
+    });
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("Saved");
   });
 
   it("warns about an unencrypted hub and about the autonomous policy", async () => {
-    const r = await exec(["init", "--hub", "ws://hub.example.com", "--token", "t", "--policy", "autonomous"], { env: withHome("home2") });
+    const r = await exec(["init", "--hub", "ws://hub.example.com", "--token", "t", "--policy", "autonomous"], {
+      env: withHome("home2"),
+    });
     expect(r.stderr).toContain("not encrypted");
     expect(r.stderr).toContain("autonomous skips every permission prompt");
   });
@@ -176,7 +207,10 @@ describe.skipIf(!e2eReady)("packaged CLI", () => {
     await waitFor("peer gone", () => agents().length === 1);
     await ok("stop");
     await waitFor("daemon stopped", () => spawnSync(process.execPath, [CLI, "status"], { cwd: dir, env }).status !== 0);
-    await waitFor("tmux session gone", () => spawnSync("tmux", ["-L", sock, "has-session", "-t", `=claude-${project}`]).status !== 0);
+    await waitFor(
+      "tmux session gone",
+      () => spawnSync("tmux", ["-L", sock, "has-session", "-t", `=claude-${project}`]).status !== 0,
+    );
   });
 
   it("with no tmux the CLI explains how to fix it instead of failing obscurely", async () => {

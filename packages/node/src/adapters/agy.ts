@@ -1,4 +1,13 @@
-import { type Adapter, type LaunchCtx, type PromptInfo, detectLimit, detectRateLimit, menuKeys, parseMenu, tail } from "./types.js";
+import {
+  type Adapter,
+  type LaunchCtx,
+  type PromptInfo,
+  detectLimit,
+  detectRateLimit,
+  menuKeys,
+  parseMenu,
+  tail,
+} from "./types.js";
 
 // Screen heuristics are generic and must be verified against the live agy TUI.
 export const agy: Adapter = {
@@ -22,7 +31,9 @@ export const agy: Adapter = {
   },
 
   startupChoice(p: PromptInfo) {
-    return /trust/i.test(`${p.question} ${p.options.join(" ")}`) ? p.options.findIndex((o) => /^yes/i.test(o)) : undefined;
+    return /trust/i.test(`${p.question} ${p.options.join(" ")}`)
+      ? p.options.findIndex((o) => /^yes/i.test(o))
+      : undefined;
   },
 
   selectKeys: menuKeys,

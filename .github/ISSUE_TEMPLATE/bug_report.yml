@@ -1,0 +1,41 @@
+name: Bug report
+description: Something does not work
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: And what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. Run ...\n2. Then ...\n3. See ..."
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `npx claudecord --version`, or the commit.
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [macOS, Linux, Windows (WSL2), Windows (native)]
+    validations:
+      required: true
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Agent
+      options: [Claude Code, agy, Codex, Not agent specific]
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: "Remove anything secret first. The daemon log is in ~/.claude-mesh/daemon.log."
+      render: shell

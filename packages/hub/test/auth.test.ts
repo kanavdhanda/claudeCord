@@ -25,7 +25,8 @@ describe("pairing codes", () => {
 
   it("uses every symbol about equally, so the code has its full strength", () => {
     const counts = new Map<string, number>();
-    for (let i = 0; i < 4000; i++) for (const ch of auth.createPairCode().code.replace("-", "")) counts.set(ch, (counts.get(ch) ?? 0) + 1);
+    for (let i = 0; i < 4000; i++)
+      for (const ch of auth.createPairCode().code.replace("-", "")) counts.set(ch, (counts.get(ch) ?? 0) + 1);
     const values = [...counts.values()];
     expect(counts.size).toBe(31);
     // 32000 symbols over 31 values is about 1032 each. Modulo bias would put the first few near 1100.
@@ -49,7 +50,8 @@ describe("pairing codes", () => {
 
   it("rejects wrong, short and empty codes without spending a real one", () => {
     const { code } = auth.createPairCode();
-    for (const bad of ["", "ABCD", "AAAA-AAAA", "0000-0000", code.slice(0, 5)]) expect(auth.redeemPairCode(bad, "a")).toBeNull();
+    for (const bad of ["", "ABCD", "AAAA-AAAA", "0000-0000", code.slice(0, 5)])
+      expect(auth.redeemPairCode(bad, "a")).toBeNull();
     expect(auth.redeemPairCode(code, "a")).not.toBeNull();
   });
 
@@ -69,7 +71,11 @@ describe("pairing codes", () => {
 
   it("only keeps a hash, so the database never holds a usable code", () => {
     const { code } = auth.createPairCode();
-    const stored = JSON.stringify((db as unknown as { db: { prepare: (q: string) => { all: () => unknown[] } } }).db.prepare("SELECT * FROM pair_codes").all());
+    const stored = JSON.stringify(
+      (db as unknown as { db: { prepare: (q: string) => { all: () => unknown[] } } }).db
+        .prepare("SELECT * FROM pair_codes")
+        .all(),
+    );
     expect(stored).not.toContain(code.replace("-", ""));
   });
 
@@ -120,7 +126,10 @@ describe("dashboard sign in", () => {
     auth.createLoginToken();
     vi.advanceTimersByTime(13 * 60 * 60_000);
     db.pruneExpired();
-    const rows = (t: string) => (db as unknown as { db: { prepare: (q: string) => { all: () => unknown[] } } }).db.prepare(`SELECT * FROM ${t}`).all();
+    const rows = (t: string) =>
+      (db as unknown as { db: { prepare: (q: string) => { all: () => unknown[] } } }).db
+        .prepare(`SELECT * FROM ${t}`)
+        .all();
     expect(rows("pair_codes")).toHaveLength(0);
     expect(rows("login_tokens")).toHaveLength(0);
   });

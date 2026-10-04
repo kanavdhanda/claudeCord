@@ -7,7 +7,7 @@ import { createInterface } from "node:readline/promises";
 import { configPath } from "./config.js";
 import { existsSync } from "node:fs";
 import { callDaemon, currentAgentId, meshDir } from "@claudecord/agent-tools";
-import { AdapterId, Slug, ask as prompt, isInteractive } from "@claudecord/protocol";
+import { AdapterId, ask as prompt, isInteractive } from "@claudecord/protocol";
 import { cliPath, Daemon } from "./daemon.js";
 import {
   loadNodeConfig,
@@ -78,13 +78,16 @@ export function httpBase(input: string): string {
 async function login(a: Args): Promise<void> {
   let hub = a.pos[0] ?? flag(a, "hub");
   let code = a.pos[1] ?? flag(a, "code");
-  if ((!hub || !code) && !isInteractive()) throw new Error("usage: claudecord login <hub-url> <code>. Get the code with /connect in Discord.");
+  if ((!hub || !code) && !isInteractive())
+    throw new Error("usage: claudecord login <hub-url> <code>. Get the code with /connect in Discord.");
   if (!hub) hub = await prompt("Hub URL (shown by /connect)");
   if (!code) code = await prompt("Pairing code (from /connect in Discord)");
   if (!hub || !code) throw new Error("a hub URL and a pairing code are required");
   const base = httpBase(hub);
   if (base.startsWith("http://") && !/^http:\/\/(localhost|127\.|\[::1\])/.test(base)) {
-    console.warn("warning: this hub URL is not encrypted. Use https:// so the pairing code and your token are not sent in the clear.");
+    console.warn(
+      "warning: this hub URL is not encrypted. Use https:// so the pairing code and your token are not sent in the clear.",
+    );
   }
   const device = flag(a, "name") ?? projectSlug(hostname().split(".")[0] ?? "device");
   let res: Response;
@@ -96,9 +99,14 @@ async function login(a: Args): Promise<void> {
       signal: AbortSignal.timeout(15_000),
     });
   } catch (e) {
-    throw new Error(`could not reach ${base}: ${(e as Error).message}`);
+    throw new Error(`could not reach ${base}: ${(e as Error).message}`, { cause: e });
   }
-  const body = (await res.json().catch(() => ({}))) as { token?: string; device?: string; hub?: string; error?: string };
+  const body = (await res.json().catch(() => ({}))) as {
+    token?: string;
+    device?: string;
+    hub?: string;
+    error?: string;
+  };
   if (!res.ok || !body.token) throw new Error(body.error ?? `the hub answered ${res.status}`);
   const existing = existsSync(configPath()) ? loadNodeConfig() : undefined;
   saveNodeConfig({
@@ -116,7 +124,9 @@ async function login(a: Args): Promise<void> {
 /** Plain `claudecord` on a machine that has never been set up walks through pairing. */
 async function firstRun(): Promise<boolean> {
   if (existsSync(configPath()) || !isInteractive()) return false;
-  console.log("Welcome to claudecord. This machine is not connected yet.\nIn Discord, run /connect to get a code, then enter it here.\n");
+  console.log(
+    "Welcome to claudecord. This machine is not connected yet.\nIn Discord, run /connect to get a code, then enter it here.\n",
+  );
   await login({ pos: [], flags: new Map() });
   return true;
 }
@@ -145,7 +155,9 @@ async function init(a: Args): Promise<void> {
   if (!["autonomous", "plan", "ask"].includes(policy)) throw new Error(`unknown policy ${policy}`);
   if (!hubUrl || !token) throw new Error("hub URL and token are required");
   if (/^(ws|http):\/\//.test(hubUrl) && !/^(ws|http):\/\/(localhost|127\.|\[::1\])/.test(hubUrl)) {
-    console.warn("warning: this hub URL is not encrypted. Your device token and all chat would cross the network in the clear. Use wss://.");
+    console.warn(
+      "warning: this hub URL is not encrypted. Your device token and all chat would cross the network in the clear. Use wss://.",
+    );
   }
   if (policy === "autonomous") {
     console.warn(
@@ -188,9 +200,12 @@ async function ensureDaemon(): Promise<void> {
 
 async function requireTmux(): Promise<void> {
   if (process.platform === "win32") {
-    throw new Error("Running agents needs tmux, which is not available on native Windows. Use WSL2 and run claudecord inside it.");
+    throw new Error(
+      "Running agents needs tmux, which is not available on native Windows. Use WSL2 and run claudecord inside it.",
+    );
   }
-  if (!(await hasTmux())) throw new Error("tmux is required. Install it with `brew install tmux` or `sudo apt install tmux`.");
+  if (!(await hasTmux()))
+    throw new Error("tmux is required. Install it with `brew install tmux` or `sudo apt install tmux`.");
 }
 
 async function up(a: Args, forceNew: boolean): Promise<void> {
@@ -261,11 +276,14 @@ async function main(): Promise<void> {
       if (!r.ok) throw new Error(r.error);
       const rows = r.data as { name: string; project: string; adapter: string; model?: string; pane: string }[];
       if (!rows.length) console.log("No agents running.");
-      for (const x of rows) console.log(`${x.project}  ${x.name}  ${x.adapter}${x.model ? `/${x.model}` : ""}  ${x.pane}`);
+      for (const x of rows)
+        console.log(`${x.project}  ${x.name}  ${x.adapter}${x.model ? `/${x.model}` : ""}  ${x.pane}`);
       return;
     }
     case "down": {
-      const project = projectSlug(flag(a, "project") ?? loadProjectConfig(process.cwd())?.project ?? basename(process.cwd()));
+      const project = projectSlug(
+        flag(a, "project") ?? loadProjectConfig(process.cwd())?.project ?? basename(process.cwd()),
+      );
       const r = await callDaemon({ op: "down", agent: a.pos[0], project });
       if (!r.ok) throw new Error(r.error);
       console.log(`Stopped ${r.data} agent(s).`);
@@ -287,7 +305,11 @@ async function main(): Promise<void> {
       const question = a.pos.join(" ");
       if (!question) throw new Error('usage: claudecord ask "question" [--option text]...');
       const r = await callDaemon({
-        op: "ask", agentId: currentAgentId(), question, options: a.flags.get("option"), thread: flag(a, "thread"),
+        op: "ask",
+        agentId: currentAgentId(),
+        question,
+        options: a.flags.get("option"),
+        thread: flag(a, "thread"),
       });
       if (!r.ok) throw new Error(r.error);
       console.log(String(r.data));
@@ -297,14 +319,26 @@ async function main(): Promise<void> {
       const summary = a.pos.join(" ");
       const title = flag(a, "title");
       if (!summary || !title) throw new Error('usage: claudecord report --title t "summary" [--artifact text]...');
-      const r = await callDaemon({ op: "report", agentId: currentAgentId(), title, summary, artifacts: a.flags.get("artifact") });
+      const r = await callDaemon({
+        op: "report",
+        agentId: currentAgentId(),
+        title,
+        summary,
+        artifacts: a.flags.get("artifact"),
+      });
       if (!r.ok) throw new Error(r.error);
       return;
     }
     case "assign": {
       const [to, ...rest] = a.pos;
       if (!to || !rest.length) throw new Error('usage: claudecord assign agent "task" [--thread t]');
-      const r = await callDaemon({ op: "assign", agentId: currentAgentId(), to, task: rest.join(" "), thread: flag(a, "thread") });
+      const r = await callDaemon({
+        op: "assign",
+        agentId: currentAgentId(),
+        to,
+        task: rest.join(" "),
+        thread: flag(a, "thread"),
+      });
       if (!r.ok) throw new Error(r.error);
       console.log(String(r.data));
       return;
@@ -321,7 +355,14 @@ async function main(): Promise<void> {
       const path = a.pos[0];
       if (!path) throw new Error("usage: claudecord send path [--to agent] [--caption text] [--thread t]");
       const r = await callDaemon(
-        { op: "send", agentId: currentAgentId(), path, to: flag(a, "to"), caption: flag(a, "caption"), thread: flag(a, "thread") },
+        {
+          op: "send",
+          agentId: currentAgentId(),
+          path,
+          to: flag(a, "to"),
+          caption: flag(a, "caption"),
+          thread: flag(a, "thread"),
+        },
         120_000,
       );
       if (!r.ok) throw new Error(r.error);

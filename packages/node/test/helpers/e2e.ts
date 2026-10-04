@@ -17,11 +17,17 @@ export const IPC = join(ROOT, "packages/agent-tools/dist/ipc.js");
 export const FAKE = fileURLToPath(new URL("../fixtures/fake-claude.mjs", import.meta.url));
 
 /** True when real tmux is available and the workspace has been built, which the end-to-end tests need. */
-export const e2eReady = process.platform !== "win32" && spawnSync("tmux", ["-V"]).status === 0 && existsSync(CLI) && existsSync(IPC);
+export const e2eReady =
+  process.platform !== "win32" && spawnSync("tmux", ["-V"]).status === 0 && existsSync(CLI) && existsSync(IPC);
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-export async function waitFor<T>(what: string, fn: () => T | undefined | false, ms = 25_000, diagnostics: () => string = () => ""): Promise<T> {
+export async function waitFor<T>(
+  what: string,
+  fn: () => T | undefined | false,
+  ms = 25_000,
+  diagnostics: () => string = () => "",
+): Promise<T> {
   const end = Date.now() + ms;
   for (;;) {
     const v = fn();
@@ -52,10 +58,25 @@ export async function startRecordingHub(opts: { streakLimit?: number; acceptTime
   const auth = new Auth(db);
   let port = 0;
   // The HTTP side (pairing, dashboard) is on the same server and port as the node gateway, like the real hub.
-  const server: Server = startGateway(hub, 0, createHttpHandler({ hub, auth, publicUrl: () => `http://127.0.0.1:${port}` }));
+  const server: Server = startGateway(
+    hub,
+    0,
+    createHttpHandler({ hub, auth, publicUrl: () => `http://127.0.0.1:${port}` }),
+  );
   await new Promise((r) => server.once("listening", r));
   port = (server.address() as AddressInfo).port;
-  return { hub, db, auth, port, posts, notices, confirms, files, token: db.createToken("e2e"), close: () => void server.close() };
+  return {
+    hub,
+    db,
+    auth,
+    port,
+    posts,
+    notices,
+    confirms,
+    files,
+    token: db.createToken("e2e"),
+    close: () => void server.close(),
+  };
 }
 
 /** Puts a stand-in `claude` first on PATH. Returns the directory so it can be added to PATH. */
@@ -73,8 +94,17 @@ export function makeTmp(): string {
 
 /** Screens of every pane on a tmux socket, for failure messages. */
 export function paneDump(sock: string): string {
-  const panes = spawnSync("tmux", ["-L", sock, "list-panes", "-a", "-F", "#{pane_id}"], { encoding: "utf8" }).stdout.split("\n").filter(Boolean);
-  return panes.map((p) => `--- pane ${p}\n${spawnSync("tmux", ["-L", sock, "capture-pane", "-p", "-t", p], { encoding: "utf8" }).stdout}`).join("\n") || "(no panes)";
+  const panes = spawnSync("tmux", ["-L", sock, "list-panes", "-a", "-F", "#{pane_id}"], { encoding: "utf8" })
+    .stdout.split("\n")
+    .filter(Boolean);
+  return (
+    panes
+      .map(
+        (p) =>
+          `--- pane ${p}\n${spawnSync("tmux", ["-L", sock, "capture-pane", "-p", "-t", p], { encoding: "utf8" }).stdout}`,
+      )
+      .join("\n") || "(no panes)"
+  );
 }
 
 export function readIf(path: string): string {

@@ -23,9 +23,14 @@ export type AdapterId = z.infer<typeof AdapterId>;
  * Names end up in Discord channel names, tmux titles, file paths and prompts, and arrive from machines that may be
  * compromised, so they are validated here once rather than trusted at every use.
  */
-export const Slug = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/, "use letters, digits, dot, dash or underscore, up to 64 characters");
-const Model = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/@+\-\[\]]{0,79}$/, "invalid model name");
-const Role = z.string().max(120).regex(/^[^\x00-\x1f\x7f]*$/, "no control characters");
+export const Slug = z
+  .string()
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/, "use letters, digits, dot, dash or underscore, up to 64 characters");
+const Model = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/@+\-[\]]{0,79}$/, "invalid model name");
+const Role = z
+  .string()
+  .max(120)
+  .regex(/^[^\x00-\x1f\x7f]*$/, "no control characters");
 
 export const AgentSpec = z
   .object({

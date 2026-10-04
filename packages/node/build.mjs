@@ -17,7 +17,7 @@ const common = {
   logLevel: "info",
 };
 
-await build({ ...common, entryPoints: { cli: "src/cli.ts" }, });
+await build({ ...common, entryPoints: { cli: "src/cli.ts" } });
 await build({ ...common, entryPoints: { mcp: "../agent-tools/src/mcp.ts" } });
 chmodSync("dist/cli.js", 0o755);
 copyFileSync("../../README.md", "README.md");

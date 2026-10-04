@@ -18,7 +18,7 @@ vi.mock("../src/tmux.js", () => ({
 import { claude } from "../src/adapters/claude.js";
 import { AgentRuntime, type AgentEvents } from "../src/agent.js";
 
-const IDLE = "\n │ > Try \"fix the tests\"\n ? for shortcuts\n";
+const IDLE = '\n │ > Try "fix the tests"\n ? for shortcuts\n';
 const BUSY = "\n ✽ Thinking… (3s · esc to interrupt)\n ? for shortcuts\n";
 const PERMISSION = `
  Do you want to proceed?

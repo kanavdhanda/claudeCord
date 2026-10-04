@@ -125,9 +125,21 @@ export class Db {
     const num = Math.max(0, ...(this.tasks.get(project)?.keys() ?? [])) + 1;
     const now = Date.now();
     this.db
-      .prepare("INSERT INTO tasks(project,num,from_agent,to_agent,text,state,summary,created,updated) VALUES(?,?,?,?,?,?,?,?,?)")
+      .prepare(
+        "INSERT INTO tasks(project,num,from_agent,to_agent,text,state,summary,created,updated) VALUES(?,?,?,?,?,?,?,?,?)",
+      )
       .run(project, num, from, to, text, "assigned", null, now, now);
-    return this.cacheTask({ project, num, from_agent: from, to_agent: to, text, state: "assigned", summary: null, created: now, updated: now });
+    return this.cacheTask({
+      project,
+      num,
+      from_agent: from,
+      to_agent: to,
+      text,
+      state: "assigned",
+      summary: null,
+      created: now,
+      updated: now,
+    });
   }
 
   getTask(project: string, id: string): TaskRow | undefined {
@@ -196,7 +208,8 @@ export class Db {
   }
 
   hasSecret(table: "sessions", secret: string): boolean {
-    const row = this.db.prepare(`SELECT expires FROM ${table} WHERE hash=?`).get(hash(secret)) as { expires: number } | undefined;
+    const row = this.db.prepare(`SELECT expires FROM ${table} WHERE hash=?`).get(hash(secret)) as
+      { expires: number } | undefined;
     return !!row && row.expires > Date.now();
   }
 
@@ -206,7 +219,8 @@ export class Db {
 
   pruneExpired(): void {
     const now = Date.now();
-    for (const t of ["pair_codes", "login_tokens", "sessions"]) this.db.prepare(`DELETE FROM ${t} WHERE expires < ?`).run(now);
+    for (const t of ["pair_codes", "login_tokens", "sessions"])
+      this.db.prepare(`DELETE FROM ${t} WHERE expires < ?`).run(now);
   }
 
   deviceExists(nodeName: string): boolean {
@@ -214,7 +228,10 @@ export class Db {
   }
 
   listDevices(): { node_name: string; revoked: number }[] {
-    return this.db.prepare("SELECT node_name, revoked FROM tokens ORDER BY node_name").all() as unknown as { node_name: string; revoked: number }[];
+    return this.db.prepare("SELECT node_name, revoked FROM tokens ORDER BY node_name").all() as unknown as {
+      node_name: string;
+      revoked: number;
+    }[];
   }
 
   revokeToken(nodeName: string): boolean {
@@ -222,9 +239,8 @@ export class Db {
   }
 
   nodeForToken(token: string): string | null {
-    const row = this.db
-      .prepare("SELECT node_name FROM tokens WHERE hash=? AND revoked=0")
-      .get(hash(token)) as { node_name: string } | undefined;
+    const row = this.db.prepare("SELECT node_name FROM tokens WHERE hash=? AND revoked=0").get(hash(token)) as
+      { node_name: string } | undefined;
     return row?.node_name ?? null;
   }
 

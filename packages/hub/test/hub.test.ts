@@ -14,7 +14,7 @@ function setup() {
     postAsk: async () => {},
     postReport: async () => {},
     postFile: async () => {},
-  confirm: async () => {},
+    confirm: async () => {},
     notice: async (_p, t) => void notices.push(t),
     refreshStatus: () => {},
   };
@@ -95,7 +95,12 @@ describe("hub routing", () => {
     const s = setup();
     const a = s.conn("mac");
     await s.reg(a, "otter");
-    await s.hub.onNodeFrame(a, { t: "agent.ask", agentId: "alpha/otter", askId: "q1", question: "postgres or sqlite?" });
+    await s.hub.onNodeFrame(a, {
+      t: "agent.ask",
+      agentId: "alpha/otter",
+      askId: "q1",
+      question: "postgres or sqlite?",
+    });
     expect(s.hub.humanMessage("alpha", "postgres").targets).toEqual(["otter"]);
     const frames = s.sent.mac!;
     expect(frames.some((f) => f.t === "answer" && f.askId === "q1" && f.text === "postgres")).toBe(true);
@@ -133,8 +138,11 @@ describe("hub routing", () => {
 });
 
 describe("acceptance and task assignment", () => {
-  const systemTexts = (frames: HubFrame[] = []) => frames.filter((f) => f.t === "deliver" && f.from === "system").map((f) => (f as { text: string }).text);
-  const lastDeliver = (frames: HubFrame[] = []) => [...frames].reverse().find((f) => f.t === "deliver" && f.from !== "system") as Extract<HubFrame, { t: "deliver" }> | undefined;
+  const systemTexts = (frames: HubFrame[] = []) =>
+    frames.filter((f) => f.t === "deliver" && f.from === "system").map((f) => (f as { text: string }).text);
+  const lastDeliver = (frames: HubFrame[] = []) =>
+    [...frames].reverse().find((f) => f.t === "deliver" && f.from !== "system") as
+      Extract<HubFrame, { t: "deliver" }> | undefined;
 
   it("confirms a human message once the agent reports acceptance", async () => {
     const s = setup();
@@ -197,7 +205,11 @@ describe("acceptance and task assignment", () => {
       const a = s.conn("mac");
       await s.reg(a, "otter");
       s.hub.humanMessage("alpha", "go", undefined, "c:1");
-      await s.hub.onNodeFrame(a, { t: "agent.accepted", agentId: "alpha/otter", msgIds: [lastDeliver(s.sent.mac)!.msgId!] });
+      await s.hub.onNodeFrame(a, {
+        t: "agent.accepted",
+        agentId: "alpha/otter",
+        msgIds: [lastDeliver(s.sent.mac)!.msgId!],
+      });
       await vi.advanceTimersByTimeAsync(31_000);
       expect(s.notices.some((n) => n.includes("has not picked up"))).toBe(false);
     } finally {
@@ -220,7 +232,12 @@ describe("acceptance and task assignment", () => {
     const worker = s.conn("gpu");
     await s.reg(lead, "otter");
     await s.reg(worker, "heron");
-    await s.hub.onNodeFrame(lead, { t: "agent.assign", agentId: "alpha/otter", to: "heron", task: "write the migration" });
+    await s.hub.onNodeFrame(lead, {
+      t: "agent.assign",
+      agentId: "alpha/otter",
+      to: "heron",
+      task: "write the migration",
+    });
     const d = lastDeliver(s.sent.gpu)!;
     expect(d.from).toBe("otter");
     expect(d.text).toContain("Task T1: write the migration");
@@ -231,7 +248,12 @@ describe("acceptance and task assignment", () => {
     expect(s.db.getTask("alpha", "T1")?.state).toBe("accepted");
     expect(s.notices).toContain("heron accepted T1.");
 
-    await s.hub.onNodeFrame(worker, { t: "agent.taskdone", agentId: "alpha/heron", taskId: "T1", summary: "migration written" });
+    await s.hub.onNodeFrame(worker, {
+      t: "agent.taskdone",
+      agentId: "alpha/heron",
+      taskId: "T1",
+      summary: "migration written",
+    });
     expect(s.db.getTask("alpha", "T1")).toMatchObject({ state: "done", summary: "migration written" });
     const toLead = systemTexts(s.sent.mac).join("\n");
     expect(toLead).toMatch(/heron finished T1: migration written/);
@@ -307,7 +329,15 @@ describe("security: device ownership", () => {
     s.hub.out.postFile = async (_p, _a, name) => void files.push(name);
     await s.reg(s.conn("mac"), "otter");
     const evil = s.conn("evil");
-    await s.hub.onNodeFrame(evil, { t: "file.chunk", transferId: "t", agentId: "alpha/otter", name: "x.txt", seq: 0, last: true, data: "QQ==" });
+    await s.hub.onNodeFrame(evil, {
+      t: "file.chunk",
+      transferId: "t",
+      agentId: "alpha/otter",
+      name: "x.txt",
+      seq: 0,
+      last: true,
+      data: "QQ==",
+    });
     expect(files).toEqual([]);
   });
 
@@ -339,7 +369,11 @@ describe("security: secrets", () => {
     const a = s.conn("mac");
     await s.reg(a, "otter");
     await s.reg(s.conn("gpu"), "heron");
-    await s.hub.onNodeFrame(a, { t: "agent.say", agentId: "alpha/otter", text: `use this token ${secret} for the deploy` });
+    await s.hub.onNodeFrame(a, {
+      t: "agent.say",
+      agentId: "alpha/otter",
+      text: `use this token ${secret} for the deploy`,
+    });
     expect(s.posts.join("\n")).not.toContain(secret);
     expect(s.posts.join("\n")).toContain("[redacted github token]");
     const toPeer = s.sent.gpu!.filter((f) => f.t === "deliver" && f.from === "otter");
@@ -356,9 +390,24 @@ describe("security: secrets", () => {
     const lead = s.conn("mac");
     await s.reg(lead, "otter");
     await s.reg(s.conn("gpu"), "heron");
-    await s.hub.onNodeFrame(lead, { t: "agent.ask", agentId: "alpha/otter", askId: "q", question: `is ${secret} right?` });
-    await s.hub.onNodeFrame(lead, { t: "agent.report", agentId: "alpha/otter", title: "done", summary: `key ${secret}` });
-    await s.hub.onNodeFrame(lead, { t: "agent.assign", agentId: "alpha/otter", to: "heron", task: `deploy with ${secret}` });
+    await s.hub.onNodeFrame(lead, {
+      t: "agent.ask",
+      agentId: "alpha/otter",
+      askId: "q",
+      question: `is ${secret} right?`,
+    });
+    await s.hub.onNodeFrame(lead, {
+      t: "agent.report",
+      agentId: "alpha/otter",
+      title: "done",
+      summary: `key ${secret}`,
+    });
+    await s.hub.onNodeFrame(lead, {
+      t: "agent.assign",
+      agentId: "alpha/otter",
+      to: "heron",
+      task: `deploy with ${secret}`,
+    });
     expect(asks.join()).not.toContain(secret);
     expect(reports.join()).not.toContain(secret);
     expect(s.db.getTask("alpha", "T1")?.text).not.toContain(secret);
@@ -372,14 +421,30 @@ describe("security: secrets", () => {
     const a = s.conn("mac");
     await s.reg(a, "otter");
     const key = "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----";
-    await s.hub.onNodeFrame(a, { t: "file.chunk", transferId: "t", agentId: "alpha/otter", name: "notes.txt", seq: 0, last: true, data: Buffer.from(key).toString("base64") });
+    await s.hub.onNodeFrame(a, {
+      t: "file.chunk",
+      transferId: "t",
+      agentId: "alpha/otter",
+      name: "notes.txt",
+      seq: 0,
+      last: true,
+      data: Buffer.from(key).toString("base64"),
+    });
     expect(files).toEqual([]);
     expect(s.notices.some((n) => n.includes("Blocked notes.txt") && n.includes("private key"))).toBe(true);
   });
 });
 
 describe("security: upload bounds", () => {
-  const start = (id: string) => ({ t: "file.chunk" as const, transferId: id, agentId: "alpha/otter", name: `${id}.bin`, seq: 0, last: false, data: "QUJD" });
+  const start = (id: string) => ({
+    t: "file.chunk" as const,
+    transferId: id,
+    agentId: "alpha/otter",
+    name: `${id}.bin`,
+    seq: 0,
+    last: false,
+    data: "QUJD",
+  });
 
   it("refuses new uploads once too many are in flight", async () => {
     const s = setup();
@@ -407,9 +472,18 @@ describe("security: upload bounds", () => {
 });
 
 describe("file transfer", () => {
-  const chunk = (agentId: string, o: Partial<Extract<import("@claudecord/protocol").NodeFrame, { t: "file.chunk" }>> = {}) => ({
-    t: "file.chunk" as const, transferId: "t1", agentId, name: "a.txt", seq: 0, last: true,
-    data: Buffer.from("hello").toString("base64"), ...o,
+  const chunk = (
+    agentId: string,
+    o: Partial<Extract<import("@claudecord/protocol").NodeFrame, { t: "file.chunk" }>> = {},
+  ) => ({
+    t: "file.chunk" as const,
+    transferId: "t1",
+    agentId,
+    name: "a.txt",
+    seq: 0,
+    last: true,
+    data: Buffer.from("hello").toString("base64"),
+    ...o,
   });
 
   it("relays a peer transfer chunk by chunk to the right node", async () => {
@@ -431,8 +505,14 @@ describe("file transfer", () => {
     s.hub.out.postFile = async (_p, _a, name, data) => void files.push(`${name}:${data.toString()}`);
     const a = s.conn("mac");
     await s.reg(a, "otter");
-    await s.hub.onNodeFrame(a, chunk("alpha/otter", { seq: 0, last: false, data: Buffer.from("hel").toString("base64") }));
-    await s.hub.onNodeFrame(a, chunk("alpha/otter", { seq: 1, last: true, data: Buffer.from("lo").toString("base64") }));
+    await s.hub.onNodeFrame(
+      a,
+      chunk("alpha/otter", { seq: 0, last: false, data: Buffer.from("hel").toString("base64") }),
+    );
+    await s.hub.onNodeFrame(
+      a,
+      chunk("alpha/otter", { seq: 1, last: true, data: Buffer.from("lo").toString("base64") }),
+    );
     expect(files).toEqual(["a.txt:hello"]);
   });
 

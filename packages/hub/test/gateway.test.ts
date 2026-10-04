@@ -22,7 +22,7 @@ beforeAll(async () => {
     postAsk: async () => {},
     postReport: async () => {},
     postFile: async () => {},
-  confirm: async () => {},
+    confirm: async () => {},
     notice: async () => {},
     refreshStatus: () => {},
   } satisfies Outbound;
@@ -54,7 +54,9 @@ describe("node gateway", () => {
     expect(ok).toBe(true);
     await new Promise((r) => setTimeout(r, 50));
     expect(frames[0]).toEqual({ t: "welcome", nodeId: "mac" });
-    ws.send(encode({ t: "agent.register", cwd: "/x", agent: { agentId: "p/a", name: "a", project: "p", adapter: "claude" } }));
+    ws.send(
+      encode({ t: "agent.register", cwd: "/x", agent: { agentId: "p/a", name: "a", project: "p", adapter: "claude" } }),
+    );
     ws.send(encode({ t: "agent.say", agentId: "p/a", text: "hello" }));
     await new Promise((r) => setTimeout(r, 150));
     expect(posts).toContain("a: hello");

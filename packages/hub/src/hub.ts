@@ -1,4 +1,13 @@
-import { FILE_CHUNK_BYTES, MAX_FILE_BYTES, findSecretsInFile, redact, type AgentSpec, type AgentStatus, type HubFrame, type NodeFrame } from "@claudecord/protocol";
+import {
+  FILE_CHUNK_BYTES,
+  MAX_FILE_BYTES,
+  findSecretsInFile,
+  redact,
+  type AgentSpec,
+  type AgentStatus,
+  type HubFrame,
+  type NodeFrame,
+} from "@claudecord/protocol";
 import type { Db, AgentRow } from "./db.js";
 
 export interface NodeConn {
@@ -11,7 +20,14 @@ export interface Outbound {
   post(project: string, agent: AgentRow, text: string, thread?: string): Promise<void>;
   postAsk(project: string, agent: AgentRow, ask: PendingAsk): Promise<void>;
   postReport(project: string, agent: AgentRow, title: string, summary: string, artifacts?: string[]): Promise<void>;
-  postFile(project: string, agent: AgentRow, name: string, data: Buffer, caption?: string, thread?: string): Promise<void>;
+  postFile(
+    project: string,
+    agent: AgentRow,
+    name: string,
+    data: Buffer,
+    caption?: string,
+    thread?: string,
+  ): Promise<void>;
   notice(project: string, text: string, mention?: boolean): Promise<void>;
   /** Marks a human message as accepted by an agent, for example with a reaction. */
   confirm(project: string, ref: string, agentName: string): Promise<void>;
@@ -146,7 +162,13 @@ export class Hub {
       case "agent.report": {
         const a = this.agent(f.agentId);
         if (!a) return;
-        await this.out.postReport(a.project, a, await this.scrub(a, f.title), await this.scrub(a, f.summary), f.artifacts);
+        await this.out.postReport(
+          a.project,
+          a,
+          await this.scrub(a, f.title),
+          await this.scrub(a, f.summary),
+          f.artifacts,
+        );
         return;
       }
       case "agent.limit": {
@@ -198,7 +220,10 @@ export class Hub {
     });
     this.status.set(spec.agentId, { status: "idle" });
     const a = this.agent(spec.agentId)!;
-    await this.out.notice(spec.project, `${a.name} joined (${a.adapter}${a.model ? `, ${a.model}` : ""}, ${a.node_name}).`);
+    await this.out.notice(
+      spec.project,
+      `${a.name} joined (${a.adapter}${a.model ? `, ${a.model}` : ""}, ${a.node_name}).`,
+    );
     this.out.refreshStatus(spec.project);
     await this.briefOnJoin(a);
   }
@@ -211,7 +236,10 @@ export class Hub {
       this.system(a, this.leadBrief(a, peers));
     } else if (lead) {
       this.system(a, this.workerBrief(a, lead, peers));
-      this.system(lead, `${a.name} joined (${a.adapter}${a.model ? `, ${a.model}` : ""}${a.role ? `, ${a.role}` : ""}). You can assign work to them.`);
+      this.system(
+        lead,
+        `${a.name} joined (${a.adapter}${a.model ? `, ${a.model}` : ""}${a.role ? `, ${a.role}` : ""}). You can assign work to them.`,
+      );
     }
   }
 
@@ -253,7 +281,12 @@ export class Hub {
   // Acceptance and tasks
 
   /** Sends a delivery and, when something should be confirmed, tracks it until the node reports acceptance. */
-  private deliver(a: AgentRow, from: string, text: string, o: { thread?: string; ref?: string; taskId?: string } = {}): boolean {
+  private deliver(
+    a: AgentRow,
+    from: string,
+    text: string,
+    o: { thread?: string; ref?: string; taskId?: string } = {},
+  ): boolean {
     let msgId: string | undefined;
     if (o.ref || o.taskId) {
       msgId = `m${++this.seq}`;
@@ -289,12 +322,26 @@ export class Hub {
     }
     const to = this.findByName(from.project, toName);
     if (!to || to.agent_id === from.agent_id) {
-      this.system(from, `Cannot assign to ${toName}. Peers: ${this.db.agentsOfProject(from.project).filter((p) => p.agent_id !== from.agent_id).map((p) => p.name).join(", ") || "none"}.`);
+      this.system(
+        from,
+        `Cannot assign to ${toName}. Peers: ${
+          this.db
+            .agentsOfProject(from.project)
+            .filter((p) => p.agent_id !== from.agent_id)
+            .map((p) => p.name)
+            .join(", ") || "none"
+        }.`,
+      );
       return;
     }
     task = await this.scrub(from, task);
     const t = this.db.createTask(from.project, from.agent_id, to.agent_id, task);
-    const sent = this.deliver(to, from.name, `Task ${t.id}: ${task}\nWhen finished, call task_done with id ${t.id} and a short summary.`, { thread, taskId: t.id });
+    const sent = this.deliver(
+      to,
+      from.name,
+      `Task ${t.id}: ${task}\nWhen finished, call task_done with id ${t.id} and a short summary.`,
+      { thread, taskId: t.id },
+    );
     await this.out.post(from.project, from, `@${to.name} ${t.id}: ${task}`, thread);
     if (!sent) this.system(from, `${to.name} is offline, so ${t.id} was not delivered.`);
   }
@@ -315,7 +362,10 @@ export class Hub {
       this.system(lead, `${a.name} finished ${t.id}: ${summary}`);
       const all = this.db.tasksOfProject(a.project);
       if (all.length && all.every((x) => x.state === "done")) {
-        this.system(lead, `All ${all.length} task(s) are done. Integrate the results and send the single final report.`);
+        this.system(
+          lead,
+          `All ${all.length} task(s) are done. Integrate the results and send the single final report.`,
+        );
         await this.out.notice(a.project, `All ${all.length} task(s) are done.`);
       }
     }
@@ -326,7 +376,10 @@ export class Hub {
     const r = redact(text);
     if (r.found.length) {
       const kinds = [...new Set(r.found)].join(", ");
-      await this.out.notice(a.project, `Removed ${r.found.length} possible secret(s) (${kinds}) from a message by ${a.name}.`);
+      await this.out.notice(
+        a.project,
+        `Removed ${r.found.length} possible secret(s) (${kinds}) from a message by ${a.name}.`,
+      );
     }
     return r.text;
   }
@@ -340,14 +393,32 @@ export class Hub {
     if (f.to) {
       const peer = this.findByName(a.project, f.to);
       if (!peer) {
-        if (f.seq === 0) await this.out.notice(a.project, `${a.name} tried to send a file to ${f.to}, but no such agent is in this project.`);
+        if (f.seq === 0)
+          await this.out.notice(
+            a.project,
+            `${a.name} tried to send a file to ${f.to}, but no such agent is in this project.`,
+          );
         return;
       }
       this.sendTo(peer, {
-        t: "file.chunk", transferId: f.transferId, agentId: peer.agent_id, from: a.name,
-        name: f.name, seq: f.seq, last: f.last, data: f.data, caption: f.caption, thread: f.thread,
+        t: "file.chunk",
+        transferId: f.transferId,
+        agentId: peer.agent_id,
+        from: a.name,
+        name: f.name,
+        seq: f.seq,
+        last: f.last,
+        data: f.data,
+        caption: f.caption,
+        thread: f.thread,
       });
-      if (f.last) await this.out.post(a.project, a, `Sent ${f.name} to @${peer.name}.${f.caption ? ` ${f.caption}` : ""}`, f.thread);
+      if (f.last)
+        await this.out.post(
+          a.project,
+          a,
+          `Sent ${f.name} to @${peer.name}.${f.caption ? ` ${f.caption}` : ""}`,
+          f.thread,
+        );
       return;
     }
     this.pruneUploads();
@@ -356,7 +427,10 @@ export class Hub {
       if (f.seq !== 0) return;
       const held = [...this.uploads.values()].reduce((n, x) => n + x.bytes, 0);
       if (this.uploads.size >= MAX_ACTIVE_UPLOADS || held >= MAX_UPLOAD_MEMORY) {
-        await this.out.notice(a.project, `Too many files in flight, so ${f.name} from ${a.name} was refused. Try again shortly.`);
+        await this.out.notice(
+          a.project,
+          `Too many files in flight, so ${f.name} from ${a.name} was refused. Try again shortly.`,
+        );
         return;
       }
       u = { chunks: [], bytes: 0, at: Date.now() };
@@ -367,7 +441,10 @@ export class Hub {
     u.bytes += buf.length;
     if (u.bytes > MAX_FILE_BYTES) {
       this.uploads.delete(f.transferId);
-      await this.out.notice(a.project, `${a.name} tried to send ${f.name}, which is over the ${MAX_FILE_BYTES / 1048576} MB limit.`);
+      await this.out.notice(
+        a.project,
+        `${a.name} tried to send ${f.name}, which is over the ${MAX_FILE_BYTES / 1048576} MB limit.`,
+      );
       return;
     }
     u.chunks.push(buf);
@@ -376,7 +453,11 @@ export class Hub {
     const data = Buffer.concat(u.chunks);
     const secrets = findSecretsInFile(data);
     if (secrets.length) {
-      await this.out.notice(a.project, `Blocked ${f.name} from ${a.name}: it appears to contain ${secrets.join(", ")}.`, true);
+      await this.out.notice(
+        a.project,
+        `Blocked ${f.name} from ${a.name}: it appears to contain ${secrets.join(", ")}.`,
+        true,
+      );
       return;
     }
     await this.out.postFile(a.project, a, f.name, data, f.caption, f.thread);
@@ -394,9 +475,16 @@ export class Hub {
     for (const t of targets) {
       for (let seq = 0; seq < total; seq++) {
         this.sendTo(t, {
-          t: "file.chunk", transferId, agentId: t.agent_id, from: "engineer", name, seq, last: seq === total - 1,
+          t: "file.chunk",
+          transferId,
+          agentId: t.agent_id,
+          from: "engineer",
+          name,
+          seq,
+          last: seq === total - 1,
           data: data.subarray(seq * FILE_CHUNK_BYTES, (seq + 1) * FILE_CHUNK_BYTES).toString("base64"),
-          caption: text || undefined, thread,
+          caption: text || undefined,
+          thread,
         });
       }
     }
@@ -436,7 +524,9 @@ export class Hub {
 
     // An open question gets answered first.
     const pending = this.asks.get(project) ?? [];
-    const answerTargets = mentioned.length ? mentioned : agents.filter((a) => pending.some((p) => p.agentId === a.agent_id));
+    const answerTargets = mentioned.length
+      ? mentioned
+      : agents.filter((a) => pending.some((p) => p.agentId === a.agent_id));
     if (answerTargets.length === 1 || (answerTargets.length && pending.length === 1)) {
       const target = answerTargets[0]!;
       const ask = pending.find((p) => p.agentId === target.agent_id && (!thread || p.thread === thread || !p.thread));
@@ -445,7 +535,9 @@ export class Hub {
         this.status.set(target.agent_id, { status: "thinking" });
         const ok = this.sendTo(target, { t: "answer", agentId: target.agent_id, askId: ask.askId, text });
         this.out.refreshStatus(project);
-        return ok ? { targets: [target.name], offline: [], held: [] } : { targets: [target.name], offline: [target.name], held: [] };
+        return ok
+          ? { targets: [target.name], offline: [], held: [] }
+          : { targets: [target.name], offline: [target.name], held: [] };
       }
     }
 
@@ -470,7 +562,10 @@ export class Hub {
       const waiting = [...this.pending.values()].some((p) => p.agentId === a.agent_id && p.ref === ref);
       if (!waiting) return;
       const st = this.status.get(a.agent_id)?.status ?? "offline";
-      void this.out.notice(a.project, `${a.name} has not picked up your message yet (${HOLD_REASONS[st] ?? st}). It stays queued.`);
+      void this.out.notice(
+        a.project,
+        `${a.name} has not picked up your message yet (${HOLD_REASONS[st] ?? st}). It stays queued.`,
+      );
     }, this.acceptTimeoutMs);
     timer.unref();
   }
@@ -484,7 +579,11 @@ export class Hub {
     const n = (this.streak.get(from.project) ?? 0) + 1;
     this.streak.set(from.project, n);
     if (n === this.streakLimit) {
-      void this.out.notice(from.project, "Agents have exchanged many messages without input. Pausing forwarding until you reply.", true);
+      void this.out.notice(
+        from.project,
+        "Agents have exchanged many messages without input. Pausing forwarding until you reply.",
+        true,
+      );
     }
     if (n >= this.streakLimit || mentionsHuman) return;
     const targets = mentioned.length ? mentioned : peers;
@@ -494,11 +593,17 @@ export class Hub {
   }
 
   private dropAsk(project: string, askId: string): void {
-    this.asks.set(project, (this.asks.get(project) ?? []).filter((a) => a.askId !== askId));
+    this.asks.set(
+      project,
+      (this.asks.get(project) ?? []).filter((a) => a.askId !== askId),
+    );
   }
 
   private dropAsks(project: string, agentId: string): void {
-    this.asks.set(project, (this.asks.get(project) ?? []).filter((a) => a.agentId !== agentId));
+    this.asks.set(
+      project,
+      (this.asks.get(project) ?? []).filter((a) => a.agentId !== agentId),
+    );
   }
 
   // Controls

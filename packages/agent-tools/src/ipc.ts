@@ -32,7 +32,12 @@ export function callDaemon(req: DaemonRequest, timeoutMs?: number): Promise<Daem
   return new Promise((resolve, reject) => {
     const sock = createConnection(sockPath());
     let buf = "";
-    const timer = timeoutMs ? setTimeout(() => { sock.destroy(); reject(new Error("timeout")); }, timeoutMs) : undefined;
+    const timer = timeoutMs
+      ? setTimeout(() => {
+          sock.destroy();
+          reject(new Error("timeout"));
+        }, timeoutMs)
+      : undefined;
     sock.on("connect", () => sock.write(JSON.stringify(req) + "\n"));
     sock.on("data", (d) => {
       buf += d.toString();
@@ -47,8 +52,14 @@ export function callDaemon(req: DaemonRequest, timeoutMs?: number): Promise<Daem
         }
       }
     });
-    sock.on("error", (e) => { clearTimeout(timer); reject(e); });
-    sock.on("close", () => { clearTimeout(timer); if (!buf.includes("\n")) reject(new Error("daemon closed connection")); });
+    sock.on("error", (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
+    sock.on("close", () => {
+      clearTimeout(timer);
+      if (!buf.includes("\n")) reject(new Error("daemon closed connection"));
+    });
   });
 }
 

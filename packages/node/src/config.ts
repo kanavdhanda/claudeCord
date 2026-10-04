@@ -50,7 +50,11 @@ export function saveNodeConfig(c: NodeConfig): void {
 
 /** Turns a folder name into a valid project name. */
 export function projectSlug(name: string): string {
-  const s = name.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[^A-Za-z0-9]+/, "").replace(/-+$/, "").slice(0, 64);
+  const s = name
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^[^A-Za-z0-9]+/, "")
+    .replace(/-+$/, "")
+    .slice(0, 64);
   return s || "project";
 }
 

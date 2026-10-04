@@ -41,7 +41,7 @@ interface ChildResult {
 
 function rng(seed: number) {
   let s = seed >>> 0;
-  return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 2 ** 32);
+  return () => (s = (s * 1664525 + 1013904223) >>> 0) / 2 ** 32;
 }
 
 async function runClient(): Promise<void> {
@@ -62,7 +62,8 @@ async function runClient(): Promise<void> {
       const node = plan.nodes[idx]!;
       const ws = new WebSocket(plan.url, { headers: { Authorization: `Bearer ${node.token}` } });
       ws.on("error", () => {
-        if (ws.readyState !== ws.OPEN && attempt < 5) setTimeout(() => connect(idx, e, attempt + 1).then(resolve), 100 + Math.random() * 400 * (attempt + 1));
+        if (ws.readyState !== ws.OPEN && attempt < 5)
+          setTimeout(() => connect(idx, e, attempt + 1).then(resolve), 100 + Math.random() * 400 * (attempt + 1));
         else if (ws.readyState !== ws.OPEN) resolve();
       });
       ws.on("open", () => {
@@ -70,7 +71,13 @@ async function runClient(): Promise<void> {
         sockets.push(ws);
         ws.send(encode({ t: "hello", nodeName: node.name, version: "bench" }));
         for (const a of e.agents) {
-          ws.send(encode({ t: "agent.register", cwd: "/bench", agent: { agentId: `${a.project}/${a.name}`, name: a.name, project: a.project, adapter: "claude" } }));
+          ws.send(
+            encode({
+              t: "agent.register",
+              cwd: "/bench",
+              agent: { agentId: `${a.project}/${a.name}`, name: a.name, project: a.project, adapter: "claude" },
+            }),
+          );
         }
         resolve();
       });
@@ -85,7 +92,11 @@ async function runClient(): Promise<void> {
       });
     });
   let n = 0;
-  await Promise.all([...byNode.entries()].map(([idx, e]) => new Promise<void>((r) => setTimeout(r, 4 * n++)).then(() => connect(idx, e))));
+  await Promise.all(
+    [...byNode.entries()].map(([idx, e]) =>
+      new Promise<void>((r) => setTimeout(r, 4 * n++)).then(() => connect(idx, e)),
+    ),
+  );
   process.send!({ ready: true });
   await new Promise((r) => process.once("message", r));
 
@@ -191,15 +202,34 @@ async function runStage(agentCount: number, sizes: number[], opts: StageOpts): P
   while (agents.length < agentCount) {
     const size = Math.min(sizes[Math.floor(rand() * sizes.length)]!, agentCount - agents.length);
     const names = Array.from({ length: size }, (_, i) => `a${p}_${i}`);
-    names.forEach((name) => agents.push({ node: Math.floor(rand() * nodeCount), project: `p${p}`, name, peers: names.filter((n) => n !== name) }));
+    names.forEach((name) =>
+      agents.push({
+        node: Math.floor(rand() * nodeCount),
+        project: `p${p}`,
+        name,
+        peers: names.filter((n) => n !== name),
+      }),
+    );
     p++;
   }
 
   dbg("topology built, forking clients");
-  const kids = Array.from({ length: opts.children }, () => fork(new URL(import.meta.url), ["--client"], { execArgv: process.execArgv }));
+  const kids = Array.from({ length: opts.children }, () =>
+    fork(new URL(import.meta.url), ["--client"], { execArgv: process.execArgv }),
+  );
   kids.forEach((k, i) => k.on("exit", (code, sig) => dbg(`client ${i} exited code=${code} signal=${sig}`)));
   const results: ChildResult[] = [];
-  const done = kids.map((k) => new Promise<void>((r) => k.on("message", (m: { result?: ChildResult }) => { if (m.result) { results.push(m.result); r(); } })));
+  const done = kids.map(
+    (k) =>
+      new Promise<void>((r) =>
+        k.on("message", (m: { result?: ChildResult }) => {
+          if (m.result) {
+            results.push(m.result);
+            r();
+          }
+        }),
+      ),
+  );
   const ready = kids.map((k) => new Promise<void>((r) => k.on("message", (m: { ready?: boolean }) => m.ready && r())));
 
   // Nodes are partitioned across children so one node's frames stay on one connection.
@@ -270,19 +300,46 @@ async function runStage(agentCount: number, sizes: number[], opts: StageOpts): P
 }
 
 async function abortStage(
-  agents: number, projects: number, nodes: number, why: string,
-  kids: ReturnType<typeof fork>[], closeHub: () => Promise<void>,
+  agents: number,
+  projects: number,
+  nodes: number,
+  why: string,
+  kids: ReturnType<typeof fork>[],
+  closeHub: () => Promise<void>,
 ): Promise<StageResult> {
   kids.forEach((k) => k.kill());
   await closeHub();
-  return { agents, projects, nodes, sentPerSec: 0, deliveredPct: 0, p50: 0, p95: 0, p99: 0, loopP99: 0, cpuPct: 0, rssMb: 0, registerSec: 0, failed: why };
+  return {
+    agents,
+    projects,
+    nodes,
+    sentPerSec: 0,
+    deliveredPct: 0,
+    p50: 0,
+    p95: 0,
+    p99: 0,
+    loopP99: 0,
+    cpuPct: 0,
+    rssMb: 0,
+    registerSec: 0,
+    failed: why,
+  };
 }
 
 function table(rows: StageResult[]): void {
   const cols: [string, keyof StageResult][] = [
-    ["agents", "agents"], ["projects", "projects"], ["nodes", "nodes"], ["msg/s", "sentPerSec"],
-    ["deliv%", "deliveredPct"], ["p50ms", "p50"], ["p95ms", "p95"], ["p99ms", "p99"],
-    ["loop p99", "loopP99"], ["cpu%", "cpuPct"], ["rssMB", "rssMb"], ["reg s", "registerSec"],
+    ["agents", "agents"],
+    ["projects", "projects"],
+    ["nodes", "nodes"],
+    ["msg/s", "sentPerSec"],
+    ["deliv%", "deliveredPct"],
+    ["p50ms", "p50"],
+    ["p95ms", "p95"],
+    ["p99ms", "p99"],
+    ["loop p99", "loopP99"],
+    ["cpu%", "cpuPct"],
+    ["rssMB", "rssMb"],
+    ["reg s", "registerSec"],
   ];
   console.log(cols.map(([h]) => h.padStart(9)).join(""));
   for (const r of rows) {
@@ -311,7 +368,13 @@ async function main(): Promise<void> {
     if (!opts.tier) throw new Error(`unknown tier ${tierName}. Choose from: ${Object.keys(TIERS).join(", ")}`);
   }
   const untilFail = process.argv.includes("--until-fail");
-  const isOk = (r: StageResult) => !r.failed && r.deliveredPct >= 99 && r.p99 <= 250;
+  // Budgets. The defaults are the pass bar used in the docs. CI passes tighter ones with --assert.
+  const maxP99 = Number(arg("max-p99", "250"));
+  const minDelivered = Number(arg("min-delivered", "99"));
+  const maxRss = Number(arg("max-rss", "0"));
+  const assertBudgets = process.argv.includes("--assert");
+  const isOk = (r: StageResult) =>
+    !r.failed && r.deliveredPct >= minDelivered && r.p99 <= maxP99 && (!maxRss || r.rssMb <= maxRss);
   const sizes = [2, 3, 4, 6, 8];
   const rows: StageResult[] = [];
   const random = Number(arg("random", "0"));
@@ -322,10 +385,14 @@ async function main(): Promise<void> {
   } else stages = arg("stages", "50,100,200,400,800,1600,3200").split(",").map(Number);
 
   if (opts.tier) {
-    const q = Number.isFinite(opts.tier.vcpu) ? `${(Math.min(opts.tier.vcpu, 1) / opts.derate * 100).toFixed(1)}% of a core (derate ${opts.derate})` : "unthrottled";
+    const q = Number.isFinite(opts.tier.vcpu)
+      ? `${((Math.min(opts.tier.vcpu, 1) / opts.derate) * 100).toFixed(1)}% of a core (derate ${opts.derate})`
+      : "unthrottled";
     console.log(`tier ${opts.tier.name}: ${opts.tier.note}\n  simulated CPU ${q}, RAM ${opts.tier.ramMb} MB\n`);
   }
-  console.log(`agents send ~${opts.rate} msg/s each, ${opts.broadcast * 100}% broadcast, ${opts.durationMs / 1000}s per stage, ${opts.children} client processes\n`);
+  console.log(
+    `agents send ~${opts.rate} msg/s each, ${opts.broadcast * 100}% broadcast, ${opts.durationMs / 1000}s per stage, ${opts.children} client processes\n`,
+  );
   for (const n of stages) {
     const r = await runStage(n, sizes, { ...opts, seed: opts.seed + n });
     rows.push(r);
@@ -336,7 +403,23 @@ async function main(): Promise<void> {
   table(rows);
   const ok = rows.filter(isOk);
   const max = ok.length ? Math.max(...ok.map((r) => r.agents)) : 0;
-  console.log(`\nlargest stage meeting delivery >= 99% and p99 <= 250ms: ${max} agents`);
+  console.log(`\nlargest stage meeting delivery >= ${minDelivered}% and p99 <= ${maxP99}ms: ${max} agents`);
+  if (assertBudgets) {
+    const bad = rows.filter((r) => !isOk(r));
+    if (bad.length) {
+      console.error(
+        `\nBUDGET EXCEEDED in ${bad.length} stage(s): ` +
+          bad
+            .map(
+              (r) =>
+                `${r.agents} agents (delivered ${r.deliveredPct}%, p99 ${r.p99}ms, rss ${r.rssMb}MB${r.failed ? `, ${r.failed}` : ""})`,
+            )
+            .join("; "),
+      );
+      process.exit(1);
+    }
+    console.log("all stages within budget");
+  }
   process.exit(0);
 }
 

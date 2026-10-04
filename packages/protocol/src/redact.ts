@@ -14,7 +14,11 @@ interface Rule {
 }
 
 const RULES: Rule[] = [
-  { kind: "private key", re: /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[\s\S]*?(?:-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----|$)/g, strong: true },
+  {
+    kind: "private key",
+    re: /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[\s\S]*?(?:-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----|$)/g,
+    strong: true,
+  },
   { kind: "aws key", re: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, strong: true },
   { kind: "github token", re: /\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,})\b/g, strong: true },
   { kind: "api key", re: /\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}\b/g, strong: true },
@@ -54,7 +58,8 @@ export function redact(text: string): Redaction {
 }
 
 /** A line that assigns a value to a secret-looking name, such as `export DB_PASSWORD=...`. */
-const ENV_LINE = /^\s*(?:export\s+)?[A-Za-z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|PRIVATE_?KEY|CREDENTIALS?|ACCESS_?KEY)[A-Za-z0-9_]*\s*[=:]\s*['"]?[^\s'"]{8,}/i;
+const ENV_LINE =
+  /^\s*(?:export\s+)?[A-Za-z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|PRIVATE_?KEY|CREDENTIALS?|ACCESS_?KEY)[A-Za-z0-9_]*\s*[=:]\s*['"]?[^\s'"]{8,}/i;
 
 /**
  * Detects a dump of environment variables or credentials, however the file is named. Renaming `.env` to `notes.md`

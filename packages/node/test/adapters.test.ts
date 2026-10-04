@@ -69,10 +69,15 @@ describe("claude adapter", () => {
   });
 
   it("builds argv per policy", () => {
-    const base = { spec: { agentId: "p/a", name: "a", project: "p", adapter: "claude" as const, model: "sonnet" }, rules: "R" };
+    const base = {
+      spec: { agentId: "p/a", name: "a", project: "p", adapter: "claude" as const, model: "sonnet" },
+      rules: "R",
+    };
     expect(claude.argv({ ...base, policy: "autonomous" })).toContain("--dangerously-skip-permissions");
     expect(claude.argv({ ...base, policy: "plan" })).toEqual(expect.arrayContaining(["--permission-mode", "plan"]));
-    expect(claude.argv({ ...base, policy: "ask" })).toEqual(expect.arrayContaining(["--model", "sonnet", "--append-system-prompt", "R"]));
+    expect(claude.argv({ ...base, policy: "ask" })).toEqual(
+      expect.arrayContaining(["--model", "sonnet", "--append-system-prompt", "R"]),
+    );
   });
 });
 

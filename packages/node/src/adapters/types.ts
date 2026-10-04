@@ -64,7 +64,11 @@ export function parseMenu(screen: string): PromptInfo | undefined {
   });
   // Take the last run of consecutively numbered options starting at 1.
   let start = -1;
-  for (let i = opts.length - 1; i >= 0; i--) if (opts[i]!.n === 1) { start = i; break; }
+  for (let i = opts.length - 1; i >= 0; i--)
+    if (opts[i]!.n === 1) {
+      start = i;
+      break;
+    }
   if (start < 0) return undefined;
   const run: typeof opts = [];
   for (let i = start; i < opts.length; i++) {
@@ -76,14 +80,20 @@ export function parseMenu(screen: string): PromptInfo | undefined {
   let question = "";
   for (let i = first - 1; i >= 0 && i >= first - 8; i--) {
     const t = lines[i]!.replace(/[│╭╮╰╯─]/g, "").trim();
-    if (t) { question = t; break; }
+    if (t) {
+      question = t;
+      break;
+    }
   }
   const options = run.map((o) => o.text);
   return {
     signature: `${question}|${options.join("|")}`,
     question,
     options,
-    cursor: Math.max(0, run.findIndex((o) => o.cur)),
+    cursor: Math.max(
+      0,
+      run.findIndex((o) => o.cur),
+    ),
   };
 }
 
