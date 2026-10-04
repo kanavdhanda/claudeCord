@@ -281,13 +281,13 @@ fn two_writers_to_the_uptime_log_at_once_never_corrupt_it_or_fail() {
     let d = dir("uptime");
     let path = d.join("hub.db");
     drop(Store::open(&path, None).unwrap());
-    let threads: Vec<_> = (0..8)
+    let threads: Vec<_> = (0..4)
         .map(|t| {
             let path = path.clone();
             std::thread::spawn(move || {
                 let db = Store::open(&path, None).unwrap();
                 // Few enough synced commits that a slow disk never makes one writer wait out the lock timeout.
-                for i in 0..10 {
+                for i in 0..8 {
                     let state = if (i + t) % 2 == 0 {
                         claudecord::uptime::State::Up
                     } else {

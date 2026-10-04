@@ -108,7 +108,8 @@ impl Store {
     fn init(conn: Connection, segments_dir: Option<&Path>) -> rusqlite::Result<Self> {
         // The wait for a lock comes FIRST: switching to WAL itself needs a lock, and two connections opening the same file at once
         // (the hub opens several) would otherwise fail on the very first statement instead of waiting their turn.
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // Thirty seconds: a write queued behind a slow disk sync is not an error, and a lock held this long really is stuck.
+        conn.busy_timeout(std::time::Duration::from_secs(30))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
         conn.execute_batch(
