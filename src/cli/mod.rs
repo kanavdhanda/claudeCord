@@ -10,6 +10,7 @@ pub mod export;
 pub mod hub;
 pub mod machine;
 pub mod storage;
+pub mod uptime;
 pub mod verbs;
 
 use clap::{Parser, Subcommand};
@@ -34,6 +35,12 @@ pub enum Cmd {
     Export(export::ExportArgs),
     /// Make a token for a machine (run on the hub's host).
     Token(hub::TokenArgs),
+    /// Show how much of the time the hub and Discord were working, and the error budget left.
+    Uptime(uptime::UptimeArgs),
+    /// Check a hub from the outside (run on another machine) and keep a record of what was seen.
+    Probe(uptime::ProbeArgs),
+    /// Make many machine tokens at once into a private file, for the k6 load test.
+    LoadTokens(hub::LoadTokensArgs),
     /// Make a token that opens the dashboard in a browser (run on the hub's host).
     WebToken(hub::TokenArgs),
     /// Run the daemon on this machine (started for you by `up`).
@@ -110,6 +117,9 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         Cmd::Hub(a) => hub::run_hub(a).await,
         Cmd::Token(a) => hub::make_token(a),
         Cmd::WebToken(a) => hub::make_web_token(a),
+        Cmd::LoadTokens(a) => hub::make_load_tokens(a),
+        Cmd::Uptime(a) => uptime::show(a),
+        Cmd::Probe(a) => uptime::probe(a).await,
         Cmd::Discord(a) => discord::run(a),
         Cmd::Storage(a) => storage::run(a),
         Cmd::Export(a) => export::run(a),

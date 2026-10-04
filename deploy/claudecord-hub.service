@@ -1,0 +1,22 @@
+# Runs the hub at boot and restarts it if it dies. Install:
+#   sudo cp claudecord-hub.service /etc/systemd/system/ && sudo systemctl enable --now claudecord-hub
+# The hub's own uptime log counts a restart as a short outage, which is the honest number.
+[Unit]
+Description=claudeCord hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=claudecord
+ExecStart=/usr/local/bin/claudecord hub --data /var/lib/claudecord --bind 127.0.0.1:8787 --owner YOUR_DISCORD_USER_ID
+Restart=always
+RestartSec=2
+# The Discord token and bucket keys are files in the data folder (mode 0600), never environment variables.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/claudecord
+PrivateTmp=true
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

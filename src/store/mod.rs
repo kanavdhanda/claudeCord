@@ -7,6 +7,7 @@
 //! saved is still there after a crash or a power cut.
 
 pub mod bucket;
+mod uptime;
 
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -76,6 +77,8 @@ impl Store {
              CREATE TABLE IF NOT EXISTS tokens (hash TEXT PRIMARY KEY, node TEXT NOT NULL, at INTEGER NOT NULL);
              CREATE INDEX IF NOT EXISTS tokens_node ON tokens (node);
              CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS uptime (component TEXT NOT NULL, at INTEGER NOT NULL, state TEXT NOT NULL);
+             CREATE INDEX IF NOT EXISTS uptime_component ON uptime (component, at);
              CREATE TABLE IF NOT EXISTS segments (
                  file TEXT PRIMARY KEY, project TEXT NOT NULL, first_id INTEGER NOT NULL, last_id INTEGER NOT NULL, rows INTEGER NOT NULL);",
         )?;

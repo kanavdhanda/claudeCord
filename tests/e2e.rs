@@ -95,6 +95,16 @@ async fn rig_with(name: &str, script: &str) -> Rig {
 }
 
 async fn rig_full(name: &str, script: &str, max_agents: usize, labels: Vec<String>) -> Rig {
+    rig_backend(name, script, max_agents, labels, Backend::Pty).await
+}
+
+async fn rig_backend(
+    name: &str,
+    script: &str,
+    max_agents: usize,
+    labels: Vec<String>,
+    backend: Backend,
+) -> Rig {
     let root = tmp(name);
     let bin = fake_claude(&root, script);
     let mut store = Store::open(&root.join("hub.db"), None).unwrap();
@@ -122,9 +132,9 @@ async fn rig_full(name: &str, script: &str, max_agents: usize, labels: Vec<Strin
     };
     let d = dir.clone();
     tokio::spawn(async move {
-        daemon::run(cfg, d, fast(vec![bin], max_agents, labels))
-            .await
-            .unwrap()
+        let mut opts = fast(vec![bin], max_agents, labels);
+        opts.backend = backend;
+        daemon::run(cfg, d, opts).await.unwrap()
     });
     eventually("daemon socket", async || {
         ipc::call(&dir, &Req::Ping).await.is_ok()
@@ -961,5 +971,81 @@ async fn the_log_records_what_happened_with_secrets_removed_and_can_be_read_for_
         t.data.unwrap()["lines"].to_string().contains("ack:")
     })
     .await;
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_agent_the_hub_asks_for_runs_inside_tmux_where_a_person_can_attach() {
+    if !claudecord::device::tmux::TmuxTerminal::available() {
+        return;
+    }
+    let socket = format!("cc-spawn-{}", std::process::id());
+    let r = rig_backend(
+        "tmuxspawn",
+        NORMAL,
+        8,
+        vec![],
+        Backend::Tmux(socket.clone()),
+    )
+    .await;
+    // The folder becomes known when a person starts the first agent there; then it is free again.
+    up(&r, "otter").await;
+    eventually("registered", async || {
+        r.hub
+            .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    assert!(
+        ipc::call(
+            &r.dir,
+            &Req::Stop {
+                agent: "demo/otter".into()
+            }
+        )
+        .await
+        .unwrap()
+        .ok
+    );
+    eventually("otter is gone", async || {
+        r.hub
+            .call(|c, _| (c.agent("demo/otter").is_none(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    // This is what /spawn does: the hub asks the machine, and the machine starts the agent.
+    let spec = claudecord::protocol::AgentSpec {
+        agent_id: "demo/wren".into(),
+        name: "wren".into(),
+        project: "demo".into(),
+        adapter: claudecord::protocol::AdapterId::Claude,
+        model: None,
+        role: None,
+    };
+    r.hub
+        .call(move |c, _| {
+            let (_, fx) = c.spawn_auto(&kd(), "demo", spec, None).unwrap();
+            ((), fx)
+        })
+        .await;
+    eventually("the spawned agent registered", async || {
+        r.hub
+            .call(|c, _| (c.agent("demo/wren").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    let sessions = std::process::Command::new("tmux")
+        .args(["-L", &socket, "list-sessions", "-F", "#{session_name}"])
+        .output()
+        .unwrap();
+    let names = String::from_utf8_lossy(&sessions.stdout).to_string();
+    assert!(
+        names.contains("wren"),
+        "the agent has its own tmux session: {names:?}"
+    );
+    claudecord::device::tmux::stop_server(&socket);
     r.hub.shutdown().await;
 }

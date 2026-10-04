@@ -127,6 +127,17 @@ what is waiting on a person, tasks, and the conversation. Make a token and open 
 A dashboard token opens the page and nothing else, and a machine's token never opens it. The page draws everything as text and
 is served with a strict content policy.
 
+## Is it up?
+
+The hub records its own state and the Discord bridge's (a crash counts as down from the last heartbeat), answers `/healthz` (the
+process is there) and `/readyz` (it can do its job, including Discord), and serves Prometheus text at `/metrics`.
+
+    claudecord uptime --target 99.9       # availability over 1 hour, 1 day, 1 week, 1 month, and the error budget left
+    claudecord probe https://hub.example.com --name eu    # on ANOTHER machine: an outside check with its own record
+
+A scheduled GitHub Actions check (`.github/workflows/uptime.yml`, set the repository variable `HUB_URL`) is the free safety net.
+`deploy/` has a Caddyfile (automatic TLS) and a systemd unit.
+
 ## Keeping cost down
 
 For an agent, the cost of a message is the turn it causes, because every turn rereads the whole conversation. So:
@@ -193,10 +204,12 @@ and macOS.
 - The Discord side is tested against a stand-in Discord, not against the real service yet.
 - Typing into Claude Code, Codex and agy is done through the terminal. The screen-reading rules for agy and Codex are generic and
   unverified against the live programs; whether a pasted `/command` runs the same way in every program is also unverified.
-- The dashboard is read-only and uses a token; there is no browser sign-in with Discord yet.
+- The dashboard is read-only. Sign in with Discord (`claudecord discord oauth`) shows each person only the projects they have a
+  role in; it is tested against a stand-in Discord, not the real one. A dashboard token still shows everything.
+- A load test exists (`scripts/load/`, k6, users with three bots each); it was run only up to about 9,000 users on a laptop, where k6
+  itself ran out of threads. The 10,000-user runs on free-server sizes are a CI job (`load.yml`) that has not been run yet.
 - There is no packaged install (pip or npm) yet.
 - Windows is built in CI but has not been run by me. Use tmux inside WSL for the tested route; native Windows uses the
   built-in ConPTY terminal, and the stand-in-agent tests skip themselves there.
 - tmux cannot see a half-typed line, only that someone was recently active, so messages wait for quiet instead.
 - Only the generic terminal driver exists. Structured drivers for Claude Code hooks, ACP and the Codex app server are not built.
-- Nothing has been load tested at the sizes the design is aimed at.

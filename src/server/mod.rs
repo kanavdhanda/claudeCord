@@ -11,6 +11,8 @@
 //! keeps what is waiting, and the device simply reconnects and registers again.
 
 pub mod actor;
+pub mod health;
+pub mod login;
 pub mod session;
 pub mod web;
 
@@ -25,6 +27,7 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -50,6 +53,22 @@ pub struct Config {
     pub hot_window: Duration,
     /// How often the live database is copied to the bucket (only if a bucket is set up). None never does.
     pub backup_every: Option<Duration>,
+    /// "Sign in with Discord" for the dashboard. None leaves only dashboard tokens.
+    pub oauth: Option<Oauth>,
+    /// Whether a Discord bridge is run with this hub, so readiness includes it.
+    pub discord_expected: bool,
+    /// The availability target the dashboard measures the error budget against.
+    pub uptime_target: f64,
+}
+
+/// Discord OAuth2 settings for the dashboard sign-in. `authorize_url` and `api_base` are Discord's, and are changed only by tests.
+#[derive(Clone)]
+pub struct Oauth {
+    pub client_id: String,
+    pub client_secret: String,
+    pub redirect_uri: String,
+    pub authorize_url: String,
+    pub api_base: String,
 }
 
 impl Default for Config {
@@ -65,6 +84,9 @@ impl Default for Config {
             rollover_every: Some(Duration::from_secs(3600)),
             hot_window: Duration::from_secs(14 * 24 * 3600),
             backup_every: Some(Duration::from_secs(6 * 3600)),
+            oauth: None,
+            discord_expected: false,
+            uptime_target: 0.999,
         }
     }
 }
@@ -143,6 +165,8 @@ pub struct Hub {
     chat: broadcast::Sender<Chat>,
     stop_server: Option<oneshot::Sender<()>>,
     server: Option<tokio::task::JoinHandle<()>>,
+    /// The uptime log and the task that keeps the hub's heartbeat (see `crate::uptime`). None for an in-memory store.
+    uptime: Option<(Store, tokio::task::JoinHandle<()>)>,
 }
 
 impl Hub {
@@ -192,6 +216,10 @@ impl Hub {
         if let Some(h) = self.server.take() {
             let _ = h.await;
         }
+        if let Some((log, beat)) = self.uptime.take() {
+            beat.abort();
+            crate::uptime::stopped(&log, now_ms());
+        }
     }
 }
 
@@ -204,6 +232,8 @@ pub(crate) struct AppState {
     pub(crate) failures: Arc<Mutex<FailureLimiter>>,
     cfg: Config,
     next_conn: Arc<std::sync::atomic::AtomicU64>,
+    /// Dashboard sign-ins by session id (see `login`).
+    pub(crate) sessions: login::Sessions,
 }
 
 /// Starts the hub: opens nothing on disk itself (the caller gives it a store and a core), binds the port, starts the
@@ -214,6 +244,11 @@ pub async fn start(cfg: Config, core: HubCore, store: Store) -> std::io::Result<
     let (to_actor, from_world) = mpsc::channel(4096);
     let (chat_tx, _) = broadcast::channel(1024);
     let reader = Arc::new(Mutex::new(store.fork()));
+    // Starting counts as up (and a crash since the last heartbeat counts as down until now).
+    let uptime = store.fork().zip(store.fork()).map(|(log, beat)| {
+        crate::uptime::recover(&log, now_ms());
+        (log, crate::uptime::heartbeat(beat))
+    });
     tokio::spawn(actor::run(
         core,
         store,
@@ -230,15 +265,23 @@ pub async fn start(cfg: Config, core: HubCore, store: Store) -> std::io::Result<
         failures: Arc::new(Mutex::new(FailureLimiter::new(10, 60_000.0))),
         cfg,
         next_conn: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        sessions: Arc::new(Mutex::new(HashMap::new())),
     };
     let app = Router::new()
         .route(NODE_CONNECT_PATH, get(connect))
         .route("/healthz", get(|| async { "ok" }))
+        .route("/readyz", get(health::readyz))
+        .route("/metrics", get(health::metrics))
+        .route("/api/v1/uptime", get(health::uptime))
         .route("/", get(web::index))
         .route("/app.js", get(web::script))
         .route("/app.css", get(web::style))
         .route("/api/v1/state", get(web::state))
         .route("/api/v1/history", get(web::history))
+        .route("/auth/login", get(login::start))
+        .route("/auth/callback", get(login::callback))
+        .route("/auth/me", get(login::me))
+        .route("/auth/logout", axum::routing::post(login::logout))
         .with_state(state);
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
     let server = tokio::spawn(async move {
@@ -257,6 +300,7 @@ pub async fn start(cfg: Config, core: HubCore, store: Store) -> std::io::Result<
         chat: chat_tx,
         stop_server: Some(stop_tx),
         server: Some(server),
+        uptime,
     })
 }
 

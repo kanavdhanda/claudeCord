@@ -15,6 +15,7 @@ pub mod protocol;
 pub mod security;
 pub mod server;
 pub mod store;
+pub mod uptime;
 
 // Short paths kept so callers and the conformance tests can say `claudecord::redact` instead of the folder path.
 pub use agents::{adapters, text};

@@ -91,6 +91,8 @@ async fn run(handle: HubHandle, mut chat: broadcast::Receiver<Chat>, cfg: Bridge
     {
         eprintln!("discord bridge: could not register slash commands: {e}");
     }
+    // Down until the gateway says READY, so a bridge that never connects shows as down.
+    let _ = kv.uptime_set("discord", crate::uptime::State::Down, crate::now_ms());
     let (ev_tx, mut events) = mpsc::channel(256);
     let _gateway = gateway::spawn(
         rest.clone(),
@@ -347,6 +349,15 @@ impl Bridge {
 
     /// Handles one event from Discord.
     async fn inward(&mut self, e: Event) {
+        // The gateway being connected is what "the Discord bridge is up" means; see `crate::uptime`.
+        let state = match e.name.as_str() {
+            "READY" | "RESUMED" => Some(crate::uptime::State::Up),
+            gateway::DISCONNECTED => Some(crate::uptime::State::Down),
+            _ => None,
+        };
+        if let Some(state) = state {
+            let _ = self.kv.uptime_set("discord", state, crate::now_ms());
+        }
         match e.name.as_str() {
             "MESSAGE_CREATE" => self.on_message(&e.data).await,
             "INTERACTION_CREATE" => self.on_interaction(&e.data).await,

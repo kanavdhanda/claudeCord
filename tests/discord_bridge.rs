@@ -27,6 +27,7 @@ struct Rig {
     hub: server::Hub,
     device: mpsc::Receiver<LinkEvent>,
     link: link::Link,
+    db: std::path::PathBuf,
 }
 
 impl Rig {
@@ -122,7 +123,7 @@ async fn rig(name: &str) -> Rig {
         token: "bottoken".into(),
         guild: "g1".into(),
         gateway_url: None,
-        db_path: db,
+        db_path: db.clone(),
         owners: vec![],
         backoff_max: Duration::from_millis(300),
     };
@@ -133,6 +134,7 @@ async fn rig(name: &str) -> Rig {
         hub,
         device,
         link,
+        db: db.clone(),
     };
     r.until("gateway identified", |l| {
         (l.identifies >= 1).then_some(json!(true))
@@ -683,6 +685,22 @@ async fn the_bridge_reconnects_to_discord_by_itself_and_keeps_working() {
         (l.resumes >= 1).then_some(json!(true))
     })
     .await;
+    // The drop and the recovery are both in the uptime log: up, then down, then up again.
+    let log = Store::open(&r.db, None).unwrap();
+    let mut states = vec![];
+    for _ in 0..100 {
+        states = log
+            .uptime_changes("discord", 0)
+            .unwrap()
+            .iter()
+            .map(|c| c.state.as_str())
+            .collect();
+        if states.ends_with(&["up", "down", "up"]) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(states.ends_with(&["up", "down", "up"]), "{states:?}");
     r.event("MESSAGE_CREATE", message(&ch, "m7", "1", "after the drop"));
     r.frame("a message after reconnecting", |f| {
         deliver_text(f, "after the drop")
