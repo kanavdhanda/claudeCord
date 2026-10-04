@@ -141,11 +141,23 @@
     api("/api/v1/state").then(function (s) {
       $("login").hidden = true; $("app").hidden = false; show(s);
       api("/api/v1/uptime").then(showUptime).catch(function () {});
+      showLog();
       if (project) { return api("/api/v1/history?project=" + encodeURIComponent(project) + "&limit=60&latest=1").then(showHistory); }
     }).catch(function (e) {
       $("conn").textContent = e.message === "denied" ? "sign in" : "offline";
       if (e.message === "denied") { sessionStorage.removeItem("cc-token"); token = ""; $("login").hidden = false; $("app").hidden = true; }
     });
+  }
+
+  // The hub's own log, for workspace owners (and dashboard tokens). Anyone else gets a refusal and the panel stays hidden.
+  function showLog() {
+    var url = "/api/v1/logs?lines=200&level=" + encodeURIComponent($("loglevel").value) + "&q=" + encodeURIComponent($("logq").value.trim());
+    api(url).then(function (r) {
+      var box = $("hublog"), atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
+      $("logbox").hidden = false;
+      box.textContent = r.lines && r.lines.length ? r.lines.join("\n") : "Nothing matches.";
+      if (atEnd) { box.scrollTop = box.scrollHeight; }
+    }).catch(function () { $("logbox").hidden = true; });
   }
 
   // Show who is signed in with Discord (if anyone) and let them sign out.
@@ -156,6 +168,7 @@
   }
   $("out").addEventListener("click", function () { fetch("/auth/logout", { method: "POST" }).then(function () { location.reload(); }); });
   $("go").addEventListener("click", function () { token = $("token").value.trim(); sessionStorage.setItem("cc-token", token); refresh(); });
+  ["logq", "loglevel"].forEach(function (id) { $(id).addEventListener("input", showLog); });
   ["search", "size"].forEach(function (id) { $(id).addEventListener("input", function () { page = 0; if (last) { showAgents(last.projects[project]); } }); });
   $("prev").addEventListener("click", function () { page--; if (last) { showAgents(last.projects[project]); } });
   $("next").addEventListener("click", function () { page++; if (last) { showAgents(last.projects[project]); } });

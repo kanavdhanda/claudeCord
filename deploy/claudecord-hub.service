@@ -5,8 +5,16 @@
 Description=claudeCord hub
 After=network-online.target
 Wants=network-online.target
+# Never give up restarting. systemd's default is to stop trying after 5 starts in 10 seconds.
+StartLimitIntervalSec=0
 
 [Service]
+# The hub says READY once it is serving, and pings systemd every few seconds while its core answers. If the pings stop for
+# WatchdogSec (a hung core), systemd kills the hub and starts it again, so a stuck hub is restarted, not only a dead one.
+Type=notify
+NotifyAccess=main
+WatchdogSec=30
+TimeoutStopSec=30
 User=claudecord
 ExecStart=/usr/local/bin/claudecord hub --data /var/lib/claudecord --bind 127.0.0.1:8787 --owner YOUR_DISCORD_USER_ID
 Restart=always

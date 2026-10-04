@@ -143,6 +143,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | `src/lib.rs` | claudeCord: run coding agents on any machine and manage them from a chat. |
 | `src/log.rs` | Logging: one line per event, `2026-10-04 14:05:09 UTC INFO  hub: message`, to stderr and, once a file is set, to a size-capped file as well. |
 | `src/main.rs` | The `claudecord` program. |
+| `src/notify.rs` | Telling systemd how the hub is doing, so it can restart a hub that is stuck and not only one that has died. |
 | `src/sync.rs` | A lock that survives a panic elsewhere. |
 | `src/task.rs` | Keeping long-running work alive: a supervisor that restarts a task if it panics, and the signal that means "stop now". |
 

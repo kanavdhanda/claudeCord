@@ -265,3 +265,78 @@ fn the_heartbeat_stops_at_once_when_dropped_and_does_not_wait_out_its_interval()
         t.elapsed()
     );
 }
+
+#[tokio::test]
+async fn the_log_route_is_off_without_a_log_file_and_reads_the_end_of_a_big_one_with_a_token() {
+    let d = dir("logroute");
+    // No log file: the route says so plainly.
+    let (hub, base, token) = hub_with(&d, false).await;
+    let http = reqwest::Client::new();
+    let r = http
+        .get(format!("{base}/api/v1/logs"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 404);
+    hub.shutdown().await;
+    // A log far bigger than the part a request reads: the newest lines come back, quickly, and a rotated file before it fills in.
+    let log = d.join("hub.log");
+    let mut big = String::new();
+    for i in 0..30_000 {
+        big.push_str(&format!("2026-10-04 12:00:00 UTC INFO  hub: line {i}\n"));
+    }
+    std::fs::write(&log, big).unwrap();
+    std::fs::write(
+        d.join("hub.log.1"),
+        "2026-10-04 11:00:00 UTC INFO  hub: from before the rotation\n",
+    )
+    .unwrap();
+    let mut store = Store::open(&d.join("hub2.db"), None).unwrap();
+    let token = store.create_token("web:reader", 0).unwrap();
+    let cfg = Config {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        log_path: Some(log),
+        ..Config::default()
+    };
+    let hub = server::start(cfg, claudecord::hub::HubCore::default(), store)
+        .await
+        .unwrap();
+    let base = format!("http://{}", hub.addr);
+    let started = std::time::Instant::now();
+    let body: serde_json::Value = http
+        .get(format!("{base}/api/v1/logs?lines=1000&format=json"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let lines = body["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 1000);
+    assert!(
+        lines
+            .last()
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .ends_with("line 29999"),
+        "the newest line is last"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "a big log is read from its end, not whole"
+    );
+    let text = http
+        .get(format!("{base}/api/v1/logs?lines=2&format=text"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(text.lines().count(), 2);
+    hub.shutdown().await;
+}

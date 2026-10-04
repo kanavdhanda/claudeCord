@@ -105,7 +105,7 @@ pub fn features() -> Vec<Feature> {
         },
         Feature {
             name: "logging, supervision and locks that survive a panic",
-            covers: &["log", "task", "sync"],
+            covers: &["log", "task", "sync", "notify"],
             probe: robustness_probe,
         },
         Feature {
@@ -1209,6 +1209,22 @@ fn robustness_probe() -> Probe {
             *lock.locked() == 1,
             "the lock did not survive its holder's panic"
         );
-        Ok("logged without the secret, restarted a panicking task twice, used a lock after its holder panicked".into())
+        // What systemd would hear: a state line arrives at the socket it listens on.
+        #[cfg(unix)]
+        {
+            let socket = scratch("notify").join("notify.sock");
+            let listener =
+                std::os::unix::net::UnixDatagram::bind(&socket).map_err(|e| e.to_string())?;
+            listener
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .map_err(|e| e.to_string())?;
+            crate::notify::send_to(&socket.to_string_lossy(), "WATCHDOG=1");
+            let mut buf = [0u8; 64];
+            let n = listener
+                .recv(&mut buf)
+                .map_err(|e| format!("systemd was not told: {e}"))?;
+            ensure!(&buf[..n] == b"WATCHDOG=1", "systemd heard something else");
+        }
+        Ok("logged without the secret, restarted a panicking task twice, used a lock after its holder panicked, told systemd it is alive".into())
     })
 }

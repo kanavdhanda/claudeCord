@@ -67,7 +67,14 @@ async fn rig(oauth: bool) -> (server::Hub, String) {
     let discord = fake_discord().await;
     let mut core = HubCore::default();
     core.add_owner("100");
+    let log = std::env::temp_dir().join(format!(
+        "cc-login-log-{}-{}",
+        std::process::id(),
+        NEXT.load(std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::write(&log, "2026-10-04 12:00:00 UTC INFO  hub: alpha connected\n2026-10-04 12:00:01 UTC WARN  hub: beta was slow\n2026-10-04 12:00:02 UTC ERROR hub: something broke\n").unwrap();
     let cfg = Config {
+        log_path: Some(log),
         bind: "127.0.0.1:0".parse().unwrap(),
         oauth: oauth.then(|| Oauth {
             client_id: "app1".into(),
@@ -469,6 +476,53 @@ async fn an_address_that_keeps_failing_to_sign_in_is_blocked_for_a_while() {
         sign_in(&base, "100").await,
         Err(429),
         "even a real sign-in waits once an address has failed too often"
+    );
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn only_a_workspace_owner_reads_the_hub_log_and_can_filter_it() {
+    let (hub, base) = rig(true).await;
+    let owner = sign_in(&base, "100").await.unwrap();
+    let operator = sign_in(&base, "200").await.unwrap();
+    let lines = |v: &Value| {
+        v["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l.as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+
+    let (status, all) = get_json(&base, "/api/v1/logs", &owner).await;
+    assert_eq!(status, 200);
+    assert_eq!(lines(&all).len(), 3, "the owner sees the log");
+    let (_, errors) = get_json(&base, "/api/v1/logs?level=error", &owner).await;
+    assert_eq!(lines(&errors).len(), 1, "only errors: {errors}");
+    let (_, warnings) = get_json(&base, "/api/v1/logs?level=warn", &owner).await;
+    assert_eq!(lines(&warnings).len(), 2, "warnings and errors");
+    let (_, found) = get_json(&base, "/api/v1/logs?q=SLOW", &owner).await;
+    assert_eq!(
+        lines(&found),
+        ["2026-10-04 12:00:01 UTC WARN  hub: beta was slow"],
+        "a case-insensitive search"
+    );
+    let (_, last) = get_json(&base, "/api/v1/logs?lines=1", &owner).await;
+    assert!(
+        lines(&last)[0].contains("something broke"),
+        "the newest line is the one kept"
+    );
+
+    // An operator, who may run projects but is not an owner, and a visitor with nothing, are both refused.
+    assert_eq!(get_json(&base, "/api/v1/logs", &operator).await.0, 403);
+    assert_eq!(
+        client()
+            .get(format!("{base}/api/v1/logs"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
     );
     hub.shutdown().await;
 }

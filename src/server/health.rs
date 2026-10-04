@@ -4,6 +4,7 @@
 //!             the Discord gateway is connected. 200 when all pass, 503 with the failing checks named otherwise.
 //!   /metrics  Prometheus text (needs a dashboard token): availability, machines, agents.
 //!   /api/v1/uptime  availability and error budget per component, for the dashboard (needs sign-in or a token).
+//!   /api/v1/logs    the end of the hub's log, filtered (a dashboard token, or a signed-in workspace owner; logs name machines and addresses).
 
 use super::AppState;
 use super::web::{Who, authorised, denied, secure};
@@ -182,6 +183,121 @@ pub(super) async fn metrics(
     secure(
         text.into_response(),
         "text/plain; version=0.0.4",
+        "no-store",
+    )
+}
+
+/// How far back from the end of a log file a request looks: enough for thousands of lines, never the whole of a big file.
+const LOG_TAIL_BYTES: u64 = 512 * 1024;
+
+/// The last lines of a log file that pass the filters, oldest first. `min` keeps lines at that level or worse.
+fn log_tail(
+    path: &std::path::Path,
+    min: crate::log::Level,
+    needle: &str,
+    max: usize,
+) -> Vec<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let read_end = |p: &std::path::Path| -> Vec<String> {
+        let Ok(mut f) = std::fs::File::open(p) else {
+            return Vec::new();
+        };
+        let len = f.metadata().map_or(0, |m| m.len());
+        let start = len.saturating_sub(LOG_TAIL_BYTES);
+        let _ = f.seek(SeekFrom::Start(start));
+        let mut bytes = Vec::new();
+        let _ = f.read_to_end(&mut bytes);
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let mut lines: Vec<String> = text.lines().map(String::from).collect();
+        // Starting in the middle of the file, the first line is probably a piece of one.
+        if start > 0 && !lines.is_empty() {
+            lines.remove(0);
+        }
+        lines
+    };
+    // The file before the last rotation comes first, so a rotation just now does not empty the view.
+    let mut all = read_end(&path.with_extension("log.1"));
+    all.extend(read_end(path));
+    let needle = needle.to_lowercase();
+    let level_of = |line: &str| {
+        line.split_whitespace()
+            .nth(3)
+            .and_then(crate::log::Level::parse)
+    };
+    let mut keep: Vec<String> = all
+        .into_iter()
+        .filter(|l| level_of(l).is_none_or(|lv| lv <= min))
+        .filter(|l| needle.is_empty() || l.to_lowercase().contains(&needle))
+        .collect();
+    let skip = keep.len().saturating_sub(max);
+    keep.drain(..skip);
+    keep
+}
+
+/// The end of the hub's log. Query: `lines` (default 200, at most 1000), `level` (error, warn, info or debug: that level and worse) and
+/// `q` (a word to look for). Lines are already scrubbed of secrets when written. Only a dashboard token or a workspace owner may read it.
+pub(super) async fn logs(
+    State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let Some(who) = authorised(&st, peer, &headers).await else {
+        return denied();
+    };
+    let allowed = match who {
+        Who::Everything => true,
+        Who::Account(id) => st
+            .handle
+            .call(move |c, _| (c.role_of("", &id) == Some(crate::hub::Role::Owner), vec![]))
+            .await
+            .unwrap_or(false),
+    };
+    if !allowed {
+        return secure(
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": "only a workspace owner may read the hub's log"})),
+            )
+                .into_response(),
+            "application/json",
+            "no-store",
+        );
+    }
+    let Some(path) = st.cfg.log_path.clone() else {
+        return secure(
+            (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "this hub is not writing a log file"})),
+            )
+                .into_response(),
+            "application/json",
+            "no-store",
+        );
+    };
+    let max = q
+        .get("lines")
+        .and_then(|l| l.parse::<usize>().ok())
+        .unwrap_or(200)
+        .clamp(1, 1000);
+    let level = q
+        .get("level")
+        .and_then(|l| crate::log::Level::parse(l))
+        .unwrap_or(crate::log::Level::Debug);
+    let needle = q.get("q").cloned().unwrap_or_default();
+    let lines = tokio::task::spawn_blocking(move || log_tail(&path, level, &needle, max))
+        .await
+        .unwrap_or_default();
+    if q.get("format").is_some_and(|f| f == "text") {
+        return secure(
+            lines.join("\n").into_response(),
+            "text/plain; charset=utf-8",
+            "no-store",
+        );
+    }
+    secure(
+        Json(json!({ "lines": lines })).into_response(),
+        "application/json",
         "no-store",
     )
 }

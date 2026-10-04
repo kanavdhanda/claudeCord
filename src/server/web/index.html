@@ -43,6 +43,14 @@
         <h2>Conversation</h2><div id="history" class="box pad convo"></div>
         <h2>Machines</h2><div id="devices" class="box pad"></div>
         <h2>Uptime</h2><div id="uptime" class="box pad"></div>
+        <div id="logbox" hidden>
+          <h2>Hub log</h2>
+          <div class="tools">
+            <input id="logq" placeholder="search the log" aria-label="search the log">
+            <select id="loglevel" aria-label="log level"><option value="info">info and worse</option><option value="warn">warnings and errors</option><option value="error">errors only</option><option value="debug">everything</option></select>
+          </div>
+          <pre id="hublog" class="box pad logview"></pre>
+        </div>
       </div>
     </div>
   </section>

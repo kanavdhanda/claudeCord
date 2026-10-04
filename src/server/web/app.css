@@ -57,3 +57,4 @@ td { padding: 4px 8px; border-bottom: 1px solid var(--dim); }
 [hidden] { display: none !important; }
 .row.on > span:first-child::before { content: "\25A0  "; }
 .row.off > span:first-child::before { content: "\25A1  "; }
+.logview { max-height: 360px; overflow: auto; margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 12px; }

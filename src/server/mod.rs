@@ -57,6 +57,8 @@ pub struct Config {
     pub backup_every: Option<Duration>,
     /// "Sign in with Discord" for the dashboard. None leaves only dashboard tokens.
     pub oauth: Option<Oauth>,
+    /// The hub's log file, for the dashboard's log view (`/api/v1/logs`). None leaves that route off.
+    pub log_path: Option<std::path::PathBuf>,
     /// Most device connections at once. More are refused with "try later" instead of running the hub out of file handles.
     pub max_devices: usize,
     /// Whether a Discord bridge is run with this hub, so readiness includes it.
@@ -87,8 +89,9 @@ impl Default for Config {
             tick_every: Duration::from_secs(5),
             rollover_every: Some(Duration::from_secs(3600)),
             hot_window: Duration::from_secs(14 * 24 * 3600),
-            backup_every: Some(Duration::from_secs(6 * 3600)),
+            backup_every: Some(Duration::from_secs(3600)),
             oauth: None,
+            log_path: None,
             max_devices: 20_000,
             discord_expected: false,
             uptime_target: 0.999,
@@ -283,6 +286,7 @@ pub async fn start(cfg: Config, core: HubCore, store: Store) -> std::io::Result<
         .route("/readyz", get(health::readyz))
         .route("/metrics", get(health::metrics))
         .route("/api/v1/uptime", get(health::uptime))
+        .route("/api/v1/logs", get(health::logs))
         .route("/", get(web::index))
         .route("/app.js", get(web::script))
         .route("/app.css", get(web::style))
@@ -415,6 +419,8 @@ fn watchdog(handle: HubHandle) {
                 .await
             {
                 Ok(Some(())) => {
+                    // Only a core that answers tells systemd the hub is alive, so a stuck one gets restarted.
+                    crate::notify::alive();
                     if stuck {
                         crate::info!("hub", "the core answers again");
                     }

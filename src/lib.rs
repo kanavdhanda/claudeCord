@@ -12,6 +12,7 @@ pub mod health;
 pub mod hub;
 pub mod log;
 pub mod metrics;
+pub mod notify;
 pub mod protocol;
 pub mod security;
 pub mod server;

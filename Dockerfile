@@ -16,5 +16,8 @@ FROM scratch
 COPY --from=build /src/target/release/claudecord /claudecord
 EXPOSE 8787
 VOLUME /data
+# The image holds only the program, so the check is the program itself asking the hub if it is ready. Run with `--restart unless-stopped`
+# so Docker also starts it again if it dies, and replaces it if this check keeps failing under an orchestrator that acts on it.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 CMD ["/claudecord", "probe", "http://127.0.0.1:8787", "--once"]
 ENTRYPOINT ["/claudecord"]
 CMD ["hub", "--data", "/data", "--bind", "0.0.0.0:8787", "--allow-plain"]

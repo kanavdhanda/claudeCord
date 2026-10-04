@@ -75,6 +75,7 @@ pub async fn run_hub(a: HubArgs) -> Result<(), String> {
         Config {
             bind,
             oauth,
+            log_path: Some(a.data.join("hub.log")),
             discord_expected: discord.is_some(),
             ..Config::default()
         },
@@ -107,6 +108,7 @@ pub async fn run_hub(a: HubArgs) -> Result<(), String> {
     );
     // Ctrl-C, and on Unix SIGTERM (what `systemctl stop` and Docker send): either way the hub saves everything and records a clean stop.
     crate::task::shutdown_signal().await;
+    crate::notify::stopping();
     crate::info!("hub", "told to stop; saving and closing connections");
     hub.shutdown().await;
     crate::info!("hub", "stopped cleanly");

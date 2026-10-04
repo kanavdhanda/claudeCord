@@ -140,6 +140,10 @@ is logged, and the hub or daemon carries on; the Discord bridge restarts itself 
 a bug caught inside the hub is reported to the affected projects' chats (owner pinged) before anything else; each agent on a machine is looked at on its own, so one agent's fault is reported and the others carry on, and one that keeps failing is stopped and reported; a device that misbehaves or stops reading is cut off with the reason in the log, and nobody else notices; a normal stop (Ctrl-C, or SIGTERM from
 `systemctl stop` or Docker) saves everything and is recorded as a stop, while a kill is counted as downtime from the last heartbeat.
 
+The log can also be read over HTTP, `GET /api/v1/logs?lines=200&level=warn&q=text` (a dashboard token or a signed-in workspace owner; the dashboard
+shows it as a panel for them), and the hub is set up for systemd to restart it if its core hangs, not only if it dies (`deploy/claudecord-hub.service`:
+never gives up restarting, `Type=notify` with a watchdog); the Docker image has a health check. Database backups to the bucket run hourly.
+
 Failures are also prevented where they can be: the hub checks before serving that its data folder is writable and its database is sound
 (and says what to do if not), explains a port already in use, warns if the process may open too few files, refuses devices past a limit
 instead of running out of file handles, caps agents per project, and logs when its core stops answering. A machine refuses an agent whose
