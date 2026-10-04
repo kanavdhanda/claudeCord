@@ -477,11 +477,14 @@ async fn many_devices_can_connect_at_once_and_all_leave_cleanly() {
     for t in &tokens {
         sockets.push(connect(&hub, t).await.unwrap());
     }
-    let n = hub
-        .call(|c, _| (c.connected_nodes(), vec![]))
-        .await
-        .unwrap();
-    assert_eq!(n, 150);
+    // The upgrade finishing and the hub's core hearing about it are two steps, so wait for the count to settle.
+    wait_for("all 150 counted", async || {
+        hub.call(|c, _| (c.connected_nodes(), vec![]))
+            .await
+            .unwrap()
+            == 150
+    })
+    .await;
     for mut s in sockets {
         s.close(None).await.ok();
     }

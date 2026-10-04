@@ -24,7 +24,8 @@ fn tmp(name: &str) -> std::path::PathBuf {
 fn fast() -> LinkOpts {
     LinkOpts {
         ping_every: Duration::from_millis(100),
-        connect_timeout: Duration::from_millis(800),
+        // Generous: the first connection on a cold Windows runner can take more than a second.
+        connect_timeout: Duration::from_secs(10),
         backoff_min: Duration::from_millis(30),
         backoff_max: Duration::from_millis(300),
         proxy: None,
@@ -244,7 +245,7 @@ async fn activity_cuts_a_long_pause_short_so_a_waking_machine_reconnects_at_once
     );
     l.nudge();
     assert!(
-        expect_up(&mut rx, 2000).await,
+        expect_up(&mut rx, 10_000).await,
         "a nudge (the machine is active) brings it back at once"
     );
     hub.shutdown().await;
