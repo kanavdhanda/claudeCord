@@ -12,6 +12,21 @@ export interface ProjectRow {
   webhook_id: string | null;
   webhook_token: string | null;
   status_message_id: string | null;
+  /** Name reserved for the lead agent when the project was created from the dashboard. */
+  lead_name?: string | null;
+  created?: number | null;
+}
+
+export interface LoginRow {
+  code_hash: string;
+  poll_hash: string;
+  expires: number;
+  state: "pending" | "approved" | "denied";
+  device: string;
+  folder: string | null;
+  trusted: number;
+  claimed: number;
+  decision: string | null;
 }
 
 export interface AgentRow {
@@ -49,6 +64,11 @@ export class Db {
 
   constructor(path: string) {
     this.db = new DatabaseSync(path);
+    if (path !== ":memory:") {
+      // The hub and the claudecord-hub command can both open this file, so wait for a lock instead of failing, and let
+      // readers and the writer work at the same time.
+      this.db.exec("PRAGMA busy_timeout = 3000; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
+    }
     // The database holds webhook tokens and task text. Keep it private to this user.
     if (path !== ":memory:" && existsSync(path)) chmodSync(path, 0o600);
     this.db.exec(`
@@ -73,6 +93,21 @@ export class Db {
         model TEXT,
         role TEXT,
         is_lead INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS login_sessions (
+        code_hash TEXT PRIMARY KEY,
+        poll_hash TEXT NOT NULL UNIQUE,
+        expires INTEGER NOT NULL,
+        state TEXT NOT NULL,
+        device TEXT NOT NULL,
+        folder TEXT,
+        trusted INTEGER NOT NULL,
+        claimed INTEGER NOT NULL DEFAULT 0,
+        decision TEXT
+      );
+      CREATE TABLE IF NOT EXISTS kv (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS pair_codes (
         hash TEXT PRIMARY KEY,
@@ -106,7 +141,12 @@ export class Db {
       CREATE INDEX IF NOT EXISTS idx_pair_expires ON pair_codes(expires);
       CREATE INDEX IF NOT EXISTS idx_login_expires ON login_tokens(expires);
       CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires);
+      CREATE INDEX IF NOT EXISTS idx_login_expires ON login_sessions(expires);
     `);
+    // Older databases predate these two columns.
+    const cols = (this.db.prepare("PRAGMA table_info(projects)").all() as { name: string }[]).map((c) => c.name);
+    if (!cols.includes("lead_name")) this.db.exec("ALTER TABLE projects ADD COLUMN lead_name TEXT");
+    if (!cols.includes("created")) this.db.exec("ALTER TABLE projects ADD COLUMN created INTEGER");
     for (const t of this.db.prepare("SELECT * FROM tasks").all() as unknown as Omit<TaskRow, "id">[]) this.cacheTask(t);
     for (const a of this.db.prepare("SELECT * FROM agents").all() as unknown as AgentRow[]) this.cache(a);
   }
@@ -250,6 +290,83 @@ export class Db {
 
   projectByChannel(channelId: string): ProjectRow | undefined {
     return this.db.prepare("SELECT * FROM projects WHERE channel_id=?").get(channelId) as ProjectRow | undefined;
+  }
+
+  listProjects(): ProjectRow[] {
+    return this.db.prepare("SELECT * FROM projects ORDER BY name").all() as unknown as ProjectRow[];
+  }
+
+  /** Records who made a project and what its lead is called. Keeps the first values if called again. */
+  setProjectMeta(name: string, leadName: string | null): void {
+    this.db
+      .prepare("UPDATE projects SET lead_name = COALESCE(lead_name, ?), created = COALESCE(created, ?) WHERE name = ?")
+      .run(leadName, Date.now(), name);
+  }
+
+  kvGet(key: string): string | undefined {
+    return (this.db.prepare("SELECT value FROM kv WHERE key=?").get(key) as { value: string } | undefined)?.value;
+  }
+
+  kvSet(key: string, value: string): void {
+    this.db
+      .prepare("INSERT INTO kv(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+      .run(key, value);
+  }
+
+  // Login sessions: a command line asks to be signed in, and the owner's browser approves it.
+
+  createLoginSession(
+    code: string,
+    poll: string,
+    o: { device: string; folder?: string; trusted: boolean; ttlMs: number },
+  ): void {
+    this.db
+      .prepare(
+        "INSERT INTO login_sessions(code_hash,poll_hash,expires,state,device,folder,trusted) VALUES(?,?,?,?,?,?,?)",
+      )
+      .run(hash(code), hash(poll), Date.now() + o.ttlMs, "pending", o.device, o.folder ?? null, o.trusted ? 1 : 0);
+  }
+
+  private live(row: LoginRow | undefined): LoginRow | undefined {
+    return row && row.expires > Date.now() ? row : undefined;
+  }
+
+  loginByCode(code: string): LoginRow | undefined {
+    return this.live(
+      this.db.prepare("SELECT * FROM login_sessions WHERE code_hash=?").get(hash(code)) as LoginRow | undefined,
+    );
+  }
+
+  loginByPoll(poll: string): LoginRow | undefined {
+    return this.live(
+      this.db.prepare("SELECT * FROM login_sessions WHERE poll_hash=?").get(hash(poll)) as LoginRow | undefined,
+    );
+  }
+
+  /** True only the first time, so a sign-in link mints a browser session once. */
+  claimLogin(code: string): boolean {
+    return (
+      Number(
+        this.db
+          .prepare("UPDATE login_sessions SET claimed=1 WHERE code_hash=? AND claimed=0 AND expires>?")
+          .run(hash(code), Date.now()).changes,
+      ) > 0
+    );
+  }
+
+  /** Moves a pending login to approved or denied. Returns false if it was not pending. */
+  decideLogin(code: string, state: "approved" | "denied", decision: object | null): boolean {
+    return (
+      Number(
+        this.db
+          .prepare("UPDATE login_sessions SET state=?, decision=? WHERE code_hash=? AND state='pending' AND expires>?")
+          .run(state, decision ? JSON.stringify(decision) : null, hash(code), Date.now()).changes,
+      ) > 0
+    );
+  }
+
+  deleteLoginByPoll(poll: string): void {
+    this.db.prepare("DELETE FROM login_sessions WHERE poll_hash=?").run(hash(poll));
   }
 
   saveProject(p: ProjectRow): void {

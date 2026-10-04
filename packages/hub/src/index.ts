@@ -1,22 +1,17 @@
 #!/usr/bin/env node
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { spawn } from "node:child_process";
 import { ask, isInteractive } from "@claudecord/protocol";
 import { Auth } from "./auth.js";
-import {
-  HubConfigSchema,
-  defaultConfigPath,
-  defaultDbPath,
-  loadConfig,
-  maskToken,
-  saveConfig,
-  type HubConfig,
-} from "./config.js";
+import { defaultConfigPath, defaultDbPath, loadConfig, maskToken, saveConfig, type HubConfig } from "./config.js";
 import { Db } from "./db.js";
 import { DiscordBridge } from "./discord.js";
+import { makeClient } from "./discover.js";
 import { startGateway } from "./gateway.js";
 import { Hub } from "./hub.js";
 import { createHttpHandler } from "./http.js";
+import { runSetup } from "./setup.js";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -26,8 +21,21 @@ const HELP = `claudecord-hub - the server that connects your machines to Discord
   claudecord-hub check [--config path]   Check the config and that the Discord bot is set up correctly
   claudecord-hub run   [--config path]   Start the hub (the default)
 
-The config is a private file, not environment variables. Default location: ${join(homedir(), ".claudecord", "hub.json")}
+Setup asks for one thing, the bot token. Everything else is found from it.\nThe config is a private file, not environment variables. Default location: ${join(homedir(), ".claudecord", "hub.json")}
 `;
+
+/** Best effort. The address is always printed as well. */
+function openInBrowser(url: string): void {
+  const [cmd, args] =
+    process.platform === "darwin"
+      ? ["open", [url]]
+      : process.platform === "win32"
+        ? ["cmd", ["/c", "start", "", url]]
+        : ["xdg-open", [url]];
+  spawn(cmd as string, args as string[], { stdio: "ignore", detached: true })
+    .on("error", () => {})
+    .unref();
+}
 
 function fail(msg: string): never {
   console.error(`error: ${msg}`);
@@ -48,25 +56,21 @@ function findSite(): string | undefined {
 
 async function setup(): Promise<void> {
   if (!isInteractive()) fail("setup needs a terminal, because it asks for the bot token without showing it.");
-  console.log("Creating the hub config. The bot token is not shown as you type.\n");
-  const discordToken = await ask("Discord bot token", { hidden: true });
-  const guildId = await ask("Discord server (guild) ID");
-  const ownerId = await ask("Your Discord user ID");
-  const publicUrl = await ask("Public URL of this hub (https://...)", { default: "http://localhost:8787" });
-  const port = Number(await ask("Port", { default: "8787" }));
-  const dbPath = await ask("Database file", { default: defaultDbPath() });
-  const parsed = HubConfigSchema.safeParse({
-    discordToken,
-    guildId,
-    ownerId,
-    publicUrl,
-    port,
-    dbPath,
-    categoryName: "claudecord",
-  });
-  if (!parsed.success) fail(parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("\n"));
-  saveConfig(configPath, parsed.data);
-  console.log(`\nSaved to ${configPath} (private to you). Next: claudecord-hub check`);
+  try {
+    await runSetup(
+      {
+        ask,
+        log: (l) => console.log(l),
+        makeClient,
+        save: (cfg) => saveConfig(configPath, cfg),
+        open: openInBrowser,
+      },
+      { dbPath: defaultDbPath(), owner: argv.includes("--owner") ? argv[argv.indexOf("--owner") + 1] : undefined },
+    );
+  } catch (e) {
+    fail((e as Error).message);
+  }
+  console.log(`\nSaved to ${configPath} (private to you). Next: claudecord-hub run`);
 }
 
 async function start(cfg: HubConfig, opts: { checkOnly?: boolean } = {}): Promise<void> {

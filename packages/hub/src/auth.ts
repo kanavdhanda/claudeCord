@@ -35,6 +35,15 @@ export function formatCode(code: string): string {
   return `${code.slice(0, 4)}-${code.slice(4)}`;
 }
 
+/** What the owner chose in the browser for the folder that asked to sign in. */
+export interface LoginDecision {
+  /** new makes a project, existing joins one, none only connects the machine. */
+  mode: "new" | "existing" | "none";
+  project?: string;
+  agentName?: string;
+  adapter?: string;
+}
+
 export class Auth {
   constructor(private db: Db) {}
 
@@ -51,17 +60,89 @@ export class Auth {
   redeemPairCode(rawCode: string, rawDevice: string): { token: string; device: string } | null {
     const code = normalizeCode(rawCode);
     if (code.length !== 8 || !this.db.takeSecret("pair_codes", code)) return null;
-    let device = Slug.safeParse(rawDevice).success ? rawDevice : "device";
-    // A second machine with the same name gets its own entry instead of replacing the first one's token.
-    if (this.db.deviceExists(device)) {
-      for (let i = 2; i < 100; i++) {
-        if (!this.db.deviceExists(`${device.slice(0, 58)}-${i}`)) {
-          device = `${device.slice(0, 58)}-${i}`;
-          break;
-        }
-      }
-    }
+    const device = this.uniqueDevice(rawDevice);
     return { token: this.db.createToken(device), device };
+  }
+
+  /** A second machine with the same name gets its own entry instead of replacing the first one's token. */
+  private uniqueDevice(raw: string): string {
+    const device = Slug.safeParse(raw).success ? raw : "device";
+    if (!this.db.deviceExists(device)) return device;
+    for (let i = 2; i < 100; i++) {
+      const candidate = `${device.slice(0, 58)}-${i}`;
+      if (!this.db.deviceExists(candidate)) return candidate;
+    }
+    return `${device.slice(0, 50)}-${randomBytes(4).toString("hex")}`;
+  }
+
+  // Browser login for a command line, like `claude login`
+
+  /**
+   * The command line asks to be signed in. It keeps `pollToken` secret and shows `code` in a link for the browser.
+   * `trusted` means the request came from the same machine as the hub, so opening the link may sign the browser in
+   * without anyone approving it. A request from anywhere else always needs the owner to approve.
+   */
+  startLogin(o: { device: string; folder?: string; trusted: boolean }): {
+    code: string;
+    pollToken: string;
+    expiresInMs: number;
+  } {
+    const code = randomCode(8);
+    const pollToken = randomBytes(24).toString("base64url");
+    const folder = o.folder && Slug.safeParse(o.folder).success ? o.folder : undefined;
+    this.db.createLoginSession(code, pollToken, {
+      device: Slug.safeParse(o.device).success ? o.device : "device",
+      folder,
+      trusted: o.trusted,
+      ttlMs: LOGIN_TTL_MS,
+    });
+    return { code: formatCode(code), pollToken, expiresInMs: LOGIN_TTL_MS };
+  }
+
+  describeLogin(rawCode: string) {
+    const row = this.db.loginByCode(normalizeCode(rawCode));
+    if (!row) return null;
+    return {
+      device: row.device,
+      folder: row.folder ?? undefined,
+      trusted: !!row.trusted,
+      state: row.state,
+      claimed: !!row.claimed,
+    };
+  }
+
+  /** True the first time only. A trusted link signs the browser in once, so a copy of it later is useless. */
+  claimBrowser(rawCode: string): boolean {
+    const code = normalizeCode(rawCode);
+    const row = this.db.loginByCode(code);
+    return !!row && !!row.trusted && row.state === "pending" && this.db.claimLogin(code);
+  }
+
+  approveLogin(rawCode: string, decision: LoginDecision): boolean {
+    return this.db.decideLogin(normalizeCode(rawCode), "approved", decision);
+  }
+
+  denyLogin(rawCode: string): boolean {
+    return this.db.decideLogin(normalizeCode(rawCode), "denied", null);
+  }
+
+  /**
+   * What the command line asks while it waits. The device token is made here, at the moment it is collected, and the
+   * session is deleted, so a token is never stored waiting to be picked up and can only be collected once.
+   */
+  pollLogin(
+    pollToken: string,
+  ):
+    | { state: "pending" | "denied" | "expired" }
+    | { state: "approved"; token: string; device: string; decision: LoginDecision } {
+    const row = this.db.loginByPoll(pollToken);
+    if (!row) return { state: "expired" };
+    if (row.state === "pending") return { state: "pending" };
+    this.db.deleteLoginByPoll(pollToken);
+    if (row.state === "denied") return { state: "denied" };
+    const device = this.uniqueDevice(row.device);
+    const decision = (row.decision ? JSON.parse(row.decision) : { mode: "none" }) as LoginDecision;
+    return { state: "approved", token: this.db.createToken(device), device, decision };
   }
 
   // Dashboard sign in

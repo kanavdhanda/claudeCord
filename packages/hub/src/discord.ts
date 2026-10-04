@@ -14,6 +14,7 @@ import {
 import { AdapterId, AgentSpec, MAX_FILE_BYTES, autoName } from "@claudecord/protocol";
 import type { HubConfig } from "./config.js";
 import type { Auth } from "./auth.js";
+import { REQUIRED_PERMISSIONS } from "./permissions.js";
 import type { Hub, Outbound, PendingAsk } from "./hub.js";
 import type { AgentRow } from "./db.js";
 
@@ -94,18 +95,7 @@ export class DiscordBridge implements Outbound {
     try {
       const guild = await this.guild();
       const me = await guild.members.fetchMe();
-      const need = {
-        ViewChannel: "View Channels",
-        ManageChannels: "Manage Channels",
-        ManageWebhooks: "Manage Webhooks",
-        SendMessages: "Send Messages",
-        AddReactions: "Add Reactions",
-        AttachFiles: "Attach Files",
-        CreatePublicThreads: "Create Public Threads",
-        SendMessagesInThreads: "Send Messages in Threads",
-        ReadMessageHistory: "Read Message History",
-        ManageMessages: "Manage Messages (to pin the status board)",
-      } as const;
+      const need = REQUIRED_PERMISSIONS;
       const missing = Object.entries(need)
         .filter(([k]) => !me.permissions.has(k as keyof typeof need))
         .map(([, label]) => label);
