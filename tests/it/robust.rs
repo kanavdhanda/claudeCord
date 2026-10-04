@@ -21,7 +21,7 @@ fn start_hub(data: &std::path::Path) -> (Child, u16) {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         l.local_addr().unwrap().port()
     };
-    let child = Command::new(env!("CARGO_BIN_EXE_claudecord"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_claudecord"))
         .args(["hub", "--data"])
         .arg(data)
         .args(["--bind", &format!("127.0.0.1:{port}")])
@@ -37,6 +37,9 @@ fn start_hub(data: &std::path::Path) -> (Child, u16) {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+    // Never leave the program running (or unreaped) when the test is about to fail.
+    let _ = child.kill();
+    let _ = child.wait();
     panic!("the hub never started");
 }
 
