@@ -472,7 +472,13 @@ async fn many_devices_can_connect_at_once_and_all_leave_cleanly() {
     let dir = tmp("many");
     let names: Vec<String> = (0..150).map(|i| format!("n{i}")).collect();
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    let (hub, tokens) = boot(cfg(), &dir.join("t.db"), &refs).await;
+    // These sockets are held but never read, so they would not answer pings; a long ping interval keeps the hub from
+    // dropping them as silent while the test is still counting.
+    let quiet = Config {
+        ping_every: Duration::from_secs(60),
+        ..cfg()
+    };
+    let (hub, tokens) = boot(quiet, &dir.join("t.db"), &refs).await;
     let mut sockets = Vec::new();
     for t in &tokens {
         sockets.push(connect(&hub, t).await.unwrap());
