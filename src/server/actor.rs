@@ -171,7 +171,9 @@ pub(crate) async fn run(
                         Input::Connected { node, conn, tx, queued, kill } => {
                             core.touch(&node, now);
                             conns.insert(conn, Conn { node: node.clone(), tx, queued, kill });
-                            fx.push(Effect::Send { conn, frame: HubFrame::Welcome { node_id: node.clone() } });
+                            // The welcome acknowledges nothing and promises nothing, so it is not held for the disk: a slow write must not make
+                            // a machine think the hub did not answer.
+                            carry_out(vec![Effect::Send { conn, frame: HubFrame::Welcome { node_id: node.clone() } }], &mut conns, &chat, cfg.max_out_bytes);
                             fx.extend(guard(&mut core, disk.reader(), &conns, &mut report, Some(&node), |c| c.node_connected(&node, conn)).unwrap_or_default());
                         }
                         Input::Disconnected { node, conn } => {

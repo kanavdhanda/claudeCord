@@ -199,3 +199,4 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | `scripts/smoke.sh` | End-to-end smoke test of the real binary, the way a person would use it: make a token, start the hub, log a machine in, and run the connection check. |
 | `scripts/test_packaging.py` | (no header comment) |
 | `scripts/tests_gate.py` | A diff line that adds a test. |
+| `scripts/tsan_filter.py` | (no header comment) |
