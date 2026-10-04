@@ -8,29 +8,41 @@
 </head>
 <body>
 <header>
-  <h1>claudeCord</h1>
-  <span id="conn">connecting</span>
-  <span id="who" class="dim"></span> <button id="out" type="button" hidden>Sign out</button>
+  <h1>claudecord</h1>
+  <nav id="projects" aria-label="projects"></nav>
+  <span class="right"><span id="who" class="dim"></span> <button id="out" type="button" hidden>sign out</button> <span id="conn" class="dim">connecting</span></span>
 </header>
 <main>
-  <section id="login" hidden>
-    <p><a id="discord" href="/auth/login">Sign in with Discord</a></p>
-    <p>Or paste a dashboard token (made with <code>claudecord web-token NAME</code>).</p>
+  <section id="login" class="box pad" hidden>
+    <p class="h">Sign in</p>
+    <p><a class="btn" id="discord" href="/auth/login">Sign in with Discord</a></p>
+    <p class="dim">Or paste a dashboard token (made with <code>claudecord web-token NAME</code>).</p>
     <input id="token" type="password" autocomplete="off" aria-label="dashboard token">
     <button id="go" type="button">Open</button>
   </section>
+
   <section id="app" hidden>
-    <nav id="projects" aria-label="projects"></nav>
+    <div class="counters" id="counters"></div>
+
+    <h2>Canvas</h2>
+    <div class="box canvas"><svg id="canvas" viewBox="0 0 1040 200" role="img" aria-label="how the project is wired: Discord, hub, machines, agents"></svg></div>
+
     <div class="columns">
       <div>
-        <h2>Machines</h2><div id="devices"></div>
-        <h2>Agents</h2><div id="agents"></div>
-        <h2>Waiting on a person</h2><div id="waiting"></div>
-        <h2>Tasks</h2><div id="tasks"></div>
-        <h2>Uptime</h2><div id="uptime"></div>
+        <h2>Waiting on a person</h2><div id="waiting" class="box pad"></div>
+        <h2>Agents</h2>
+        <div class="tools">
+          <input id="search" placeholder="search name or machine" aria-label="search agents">
+          <select id="size" aria-label="rows per page"><option>10</option><option>25</option><option>50</option></select>
+        </div>
+        <table id="agents"></table>
+        <div class="pager"><span id="range" class="dim"></span><span><button id="prev" type="button">&lt;</button><button id="next" type="button">&gt;</button></span></div>
+        <h2>Tasks</h2><table id="tasks"></table>
       </div>
       <div>
-        <h2>Conversation</h2><div id="history"></div>
+        <h2>Conversation</h2><div id="history" class="box pad convo"></div>
+        <h2>Machines</h2><div id="devices" class="box pad"></div>
+        <h2>Uptime</h2><div id="uptime" class="box pad"></div>
       </div>
     </div>
   </section>
