@@ -631,10 +631,11 @@ async fn get(
 #[tokio::test]
 async fn the_dashboard_page_is_served_with_a_strict_policy_and_holds_no_data() {
     let dir = tmp("dash-page");
-    let (hub, _) = boot(cfg(), &dir.join("t.db"), &["mac"]).await;
+    // A machine name that cannot appear in ordinary page text, so finding it would mean the page holds data.
+    let (hub, _) = boot(cfg(), &dir.join("t.db"), &["secret-box-7"]).await;
     let (code, headers, body) = get(&hub, "/", None).await;
     assert_eq!(code, 200);
-    assert!(body.contains("claudeCord") && !body.contains("mac"));
+    assert!(body.contains("claudeCord") && !body.contains("secret-box-7"));
     let csp = headers["content-security-policy"].to_str().unwrap();
     assert!(
         csp.contains("script-src 'self'")

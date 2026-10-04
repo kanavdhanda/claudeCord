@@ -123,6 +123,7 @@ impl PtyTerminal {
     }
 
     /// Whether the agent itself (and not a program it started) is the one reading the terminal.
+    #[cfg(unix)]
     fn foreground(&self) -> bool {
         let leader = self.master.lock().expect("lock").process_group_leader();
         let pid = self
@@ -136,6 +137,12 @@ impl PtyTerminal {
             // If the system cannot say, assume it is the agent rather than never delivering.
             _ => true,
         }
+    }
+
+    /// Which process reads the terminal is a Unix idea; on Windows the agent is assumed to be the reader.
+    #[cfg(not(unix))]
+    fn foreground(&self) -> bool {
+        true
     }
 
     /// Pastes a message into the agent's terminal if that is safe now. Returns what to wait for otherwise.
