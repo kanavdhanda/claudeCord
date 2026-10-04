@@ -1055,3 +1055,99 @@ async fn an_agent_the_hub_asks_for_runs_inside_tmux_where_a_person_can_attach() 
     claudecord::device::tmux::stop_server(&socket);
     r.hub.shutdown().await;
 }
+
+// Races at the machine's door: many callers at once.
+
+#[tokio::test]
+async fn starting_the_same_agent_twice_at_once_gives_one_agent_and_one_refusal() {
+    let r = rig("dupe").await;
+    let start = |r: &Rig| {
+        let dir = r.dir.clone();
+        let cwd = r.project.to_string_lossy().to_string();
+        tokio::spawn(async move {
+            ipc::call(
+                &dir,
+                &Req::Up {
+                    project: "demo".into(),
+                    name: Some("otter".into()),
+                    adapter: "claude".into(),
+                    model: None,
+                    role: None,
+                    cwd,
+                    policy: "autonomous".into(),
+                    rows: 24,
+                    cols: 80,
+                    opts: UpOpts::default(),
+                },
+            )
+            .await
+            .unwrap()
+        })
+    };
+    let all: Vec<_> = (0..6).map(|_| start(&r)).collect();
+    let mut ok = 0;
+    for t in all {
+        ok += usize::from(t.await.unwrap().ok);
+    }
+    assert_eq!(ok, 1, "exactly one start wins; the rest are told no");
+    eventually("registered", async || {
+        r.hub
+            .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    let list = ipc::call(&r.dir, &Req::List).await.unwrap();
+    assert_eq!(
+        list.data.unwrap().as_array().map_or(0, Vec::len),
+        1,
+        "one agent here"
+    );
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn many_says_at_once_all_arrive_and_wrong_keys_in_the_crowd_are_all_refused() {
+    let r = rig("crowd").await;
+    let key = up(&r, "otter").await;
+    eventually("registered", async || {
+        r.hub
+            .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    let mut tasks = Vec::new();
+    for i in 0..60 {
+        let dir = r.dir.clone();
+        let key = if i % 3 == 0 {
+            "wrong-key".to_string()
+        } else {
+            key.clone()
+        };
+        tasks.push(tokio::spawn(async move {
+            let resp = ipc::call_as(
+                &dir,
+                Some(&key),
+                &Req::Say {
+                    agent: "demo/otter".into(),
+                    text: format!("note {i}"),
+                    thread: None,
+                },
+            )
+            .await
+            .unwrap();
+            (i % 3 == 0, resp.ok)
+        }));
+    }
+    let (mut good, mut refused) = (0, 0);
+    for t in tasks {
+        match t.await.unwrap() {
+            (false, true) => good += 1,
+            (true, false) => refused += 1,
+            other => panic!("a wrong key got in, or a right one was refused: {other:?}"),
+        }
+    }
+    assert_eq!((good, refused), (40, 20));
+    r.hub.shutdown().await;
+}

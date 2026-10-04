@@ -254,8 +254,8 @@ async fn a_device_that_stops_reading_is_cut_off_instead_of_filling_the_hub() {
             .unwrap()
     })
     .await;
-    // Never read again. Push far more than the backlog cap.
-    for i in 0..8 {
+    // Never read again. Push far more than the backlog cap AND than the operating system will buffer (Windows buffers many MB).
+    for i in 0..40 {
         hub.call(move |c, _| {
             let (_, fx) = c
                 .send_file(
@@ -507,7 +507,12 @@ async fn many_devices_can_connect_at_once_and_all_leave_cleanly() {
 #[tokio::test]
 async fn a_bug_in_one_handler_does_not_take_the_hub_down() {
     let dir = tmp("panic");
-    let (hub, tokens) = boot(cfg(), &dir.join("t.db"), &["mac"]).await;
+    // The test holds the socket without reading between steps, so pings must not be what ends the connection.
+    let quiet = Config {
+        ping_every: Duration::from_secs(60),
+        ..cfg()
+    };
+    let (hub, tokens) = boot(quiet, &dir.join("t.db"), &["mac"]).await;
     let mut ws = connect(&hub, &tokens[0]).await.unwrap();
     register(&mut ws, "otter").await;
     wait_for("registered", async || {
