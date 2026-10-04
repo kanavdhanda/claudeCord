@@ -1,0 +1,27 @@
+# The pip package: `pip install claudecord` gives the `claudecord` command. maturin builds the Rust program and puts it in a
+# platform wheel (no Python code, no compiler needed by the person installing). The version is read from Cargo.toml.
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "claudecord"
+dynamic = ["version"]
+description = "Run Claude Code, agy and Codex agents on any machine as a Discord team"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.8"
+keywords = ["claude", "codex", "agents", "discord", "tmux", "orchestrator"]
+classifiers = [
+  "Programming Language :: Rust",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+]
+
+[project.urls]
+Repository = "https://github.com/kanavdhanda/claudeCord"
+
+[tool.maturin]
+bindings = "bin"
+strip = true

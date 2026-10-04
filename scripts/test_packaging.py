@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+"""Proves the packages work the way a person gets them: builds the real program, makes the npm packages and the pip wheel,
+installs each into a clean folder, and runs `claudecord --help` through the installed command. Also checks the version agrees
+everywhere and the launcher's platform choice and error messages.
+    python3 scripts/test_packaging.py [--skip-pip]"""
+import json
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
+import package_npm  # noqa: E402
+
+
+def run(*cmd, cwd=None):
+    r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    assert r.returncode == 0, f"{' '.join(map(str, cmd))} failed:\n{r.stdout}\n{r.stderr}"
+    return r.stdout
+
+
+def this_platform():
+    plat = {"Darwin": "macos", "Linux": "linux", "Windows": "windows"}[platform.system()]
+    cpu = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
+    return plat, cpu
+
+
+def test_npm(binary, tmp):
+    plat, cpu = this_platform()
+    bins = tmp / "bins"
+    bins.mkdir()
+    shutil.copy(binary, bins / f"claudecord-{plat}-{cpu}{'.exe' if plat == 'windows' else ''}")
+    version, made = package_npm.build(bins, tmp / "npm")
+    assert version == package_npm.cargo_version() and len(made) == 1, made
+    main = json.loads((tmp / "npm/claudecord/package.json").read_text())
+    assert main["version"] == version and set(main["optionalDependencies"]) == set(made)
+    plat_pkg = json.loads((tmp / "npm" / made[0] / "package.json").read_text())
+    assert plat_pkg["os"] and plat_pkg["cpu"], "a platform package says which machines it is for"
+    tars = tmp / "tars"
+    tars.mkdir()
+    for d in [*made, "claudecord"]:
+        run("npm", "pack", str(tmp / "npm" / d), "--pack-destination", str(tars))
+    site = tmp / "site"
+    site.mkdir()
+    run("npm", "init", "-y", cwd=site)
+    # The main package alone cannot fetch its platform package offline, so both tarballs are installed, as npm would.
+    run("npm", "install", "--no-audit", "--no-fund", *map(str, sorted(tars.glob("*.tgz"))), cwd=site)
+    out = run(str(site / "node_modules/.bin/claudecord"), "--help")
+    assert "hub" in out and "start" in out, out
+    # The exit code of the program comes through the launcher.
+    bad = subprocess.run([str(site / "node_modules/.bin/claudecord"), "no-such-command"], capture_output=True)
+    assert bad.returncode != 0
+    print("npm: installed from tarballs and ran claudecord --help")
+
+
+def test_launcher():
+    script = """
+const { find, PACKAGES } = require(%r);
+const none = () => { throw new Error('x'); };
+if (find('linux', 'x64', { CLAUDECORD_BINARY: '/x/y' }, none) !== '/x/y') throw new Error('override ignored');
+if (!(find('freebsd', 'x64', {}, none) instanceof Error)) throw new Error('unknown platform accepted');
+if (!/not installed/.test(find('linux', 'x64', {}, none).message)) throw new Error('missing package message');
+const p = find('win32', 'x64', {}, (n) => '/n/' + n);
+if (!p.endsWith('claudecord.exe') || !p.includes(PACKAGES['win32-x64'])) throw new Error('windows path ' + p);
+""" % str(ROOT / "npm/claudecord/bin/claudecord.js")
+    run("node", "-e", script)
+    print("npm launcher: platform choice, override and error messages")
+
+
+def test_pip(tmp):
+    wheels = tmp / "wheels"
+    run("uvx", "maturin", "build", "--release", "--out", str(wheels), cwd=ROOT)
+    wheel = next(wheels.glob("claudecord-*.whl"))
+    assert package_npm.cargo_version() in wheel.name, wheel.name
+    venv = tmp / "venv"
+    run("uv", "venv", str(venv))
+    py = venv / ("Scripts/python.exe" if platform.system() == "Windows" else "bin/python")
+    run("uv", "pip", "install", "--python", str(py), str(wheel))
+    cmd = venv / ("Scripts/claudecord.exe" if platform.system() == "Windows" else "bin/claudecord")
+    out = run(str(cmd), "--help")
+    assert "hub" in out and "start" in out, out
+    print(f"pip: built {wheel.name}, installed into a clean environment and ran claudecord --help")
+
+
+if __name__ == "__main__":
+    tmp = Path(tempfile.mkdtemp(prefix="cc-pack-"))
+    try:
+        run("cargo", "build", "--release", "--bin", "claudecord", cwd=ROOT)
+        exe = "claudecord.exe" if platform.system() == "Windows" else "claudecord"
+        test_launcher()
+        test_npm(ROOT / "target/release" / exe, tmp)
+        if "--skip-pip" not in sys.argv:
+            test_pip(tmp)
+        cargo = package_npm.cargo_version()
+        assert re.search(r'dynamic\s*=\s*\["version"\]', (ROOT / "pyproject.toml").read_text()), "pip takes its version from Cargo.toml"
+        print(f"packaging ok at version {cargo}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)

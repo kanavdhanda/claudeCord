@@ -26,6 +26,22 @@ jobs:
       # Health checks last: every feature alive, then the shipped binary used the way a person would.
       - run: cargo run -q -- selftest
       - run: scripts/smoke.sh
+  # The pip wheel and npm packages are built, installed into clean folders and run, on every platform, on every change.
+  packaging:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: python3 scripts/test_packaging.py
   # Windows is built and tested natively. The stand-in-agent tests need a Unix shell and skip themselves there.
   windows:
     runs-on: windows-latest

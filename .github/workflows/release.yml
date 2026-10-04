@@ -1,20 +1,42 @@
 name: release
 
-# Builds the program for each platform when a version tag is pushed, and attaches the files to a draft release.
+# Push a tag such as v0.2.0 to release. One tag builds the program for every platform and makes, from those same builds:
+#   - files on a draft GitHub release,
+#   - pip wheels (PyPI),
+#   - npm packages (one per platform, plus the main `claudecord` package).
+# Publishing to PyPI and npm only happens when it is set up (see learnings/ship.md): PyPI uses trusted publishing (no secret to
+# keep), npm uses the NPM_TOKEN secret. Without them the release still builds and the draft release holds every file.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # A tag that does not match Cargo.toml would publish packages with the wrong number, so stop here.
+      - run: |
+          v=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "v$v" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml version $v"; exit 1
+          fi
+
   build:
+    needs: version
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, name: linux-x64 }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, name: linux-arm64 }
-          - { os: macos-latest, target: aarch64-apple-darwin, name: macos-arm64 }
-          - { os: macos-13, target: x86_64-apple-darwin, name: macos-x64 }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc, name: windows-x64.exe }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, name: linux-x64, ext: "" }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, name: linux-arm64, ext: "" }
+          - { os: macos-latest, target: aarch64-apple-darwin, name: macos-arm64, ext: "" }
+          - { os: macos-13, target: x86_64-apple-darwin, name: macos-x64, ext: "" }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, name: windows-x64, ext: ".exe" }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -24,9 +46,103 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y musl-tools
         if: contains(matrix.target, 'musl')
       - run: cargo build --release --target ${{ matrix.target }} --bin claudecord
-      - run: cp target/${{ matrix.target }}/release/claudecord${{ contains(matrix.os, 'windows') && '.exe' || '' }} claudecord-${{ matrix.name }}
+      - run: cp target/${{ matrix.target }}/release/claudecord${{ matrix.ext }} claudecord-${{ matrix.name }}${{ matrix.ext }}
         shell: bash
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.name }}
+          path: claudecord-${{ matrix.name }}${{ matrix.ext }}
+
+  wheels:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, extra: "--manylinux musllinux_1_2" }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, extra: "--manylinux musllinux_1_2" }
+          - { os: macos-latest, target: aarch64-apple-darwin, extra: "" }
+          - { os: macos-13, target: x86_64-apple-darwin, extra: "" }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, extra: "" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist ${{ matrix.extra }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.target }}
+          path: dist
+
+  sdist:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+  publish-pypi:
+    needs: [build, wheels, sdist]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "{wheel-*,sdist}"
+          path: dist
+          merge-multiple: true
+      # Trusted publishing: PyPI is told once that this repository and workflow may publish, so there is no password to leak.
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        continue-on-error: true
+
+  publish-npm:
+    needs: [build, wheels, sdist]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "bin-*"
+          path: bins
+          merge-multiple: true
+      - run: python3 scripts/package_npm.py bins npm-out
+      - id: have
+        run: echo "token=${{ secrets.NPM_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
+      - if: steps.have.outputs.token == 'true'
+        run: scripts/publish_npm.sh npm-out
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - if: steps.have.outputs.token != 'true'
+        run: echo "NPM_TOKEN is not set, so nothing was published to npm (the packages were built and checked)."
+
+  github-release:
+    needs: [build, wheels, sdist]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: files
+          merge-multiple: true
       - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v')
         with:
           draft: true
-          files: claudecord-${{ matrix.name }}
+          files: files/*
