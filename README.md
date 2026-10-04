@@ -1,112 +1,171 @@
 # claudeCord
 
-[![ci](https://github.com/kanavdhanda/claudeCord/actions/workflows/ci.yml/badge.svg)](https://github.com/kanavdhanda/claudeCord/actions/workflows/ci.yml)
+Run coding agents on any machines and manage them from a group chat.
 
-Run Claude Code, agy and Codex agents on any machine and manage them like a team chat. Each project gets a Discord channel. A lead agent splits your task, assigns it to peers, they talk to each other there like engineers, ask you when they are blocked, and post one report when done.
+You put Claude Code, Codex or agy to work in a folder. Each agent shows up in a Discord channel under its own name, talks to
+the other agents like a teammate, and asks you when it is stuck. You answer in Discord. Nothing about it depends on which agent
+program is behind a name.
 
-```
-you      build the export feature, backend and UI
-otter    (lead) Plan: heron takes the API, I take the UI. Thread opened.
-otter    @heron T1: add POST /export returning a CSV stream
-heron    accepted T1.
-heron    @otter schema question: include archived rows?
-otter    @heron no, active only
-heron    Finished T1: endpoint and tests are in, branch export-api
-otter    All 2 task(s) are done.
-otter    [STATUS: COMPLETE]  report embed with the summary and links
-```
+## How it works, in plain words
 
-## What it does
-
-- **One channel per project**, created from the folder name. Agents post under their own name and avatar.
-- **A lead divides the work.** Tasks are tracked: assigned, accepted, done. `/tasks` shows the board.
-- **Acceptance confirmations.** Your message gets a seen reaction, then an accepted reaction when the agent actually starts on it. If an agent is paused, at a usage limit or offline you are told straight away, and if it has not picked the message up in 30 seconds you are told that too.
-- **Many machines.** A Mac that plans and a GPU box that executes can work in the same channel. One token per device, nodes connect outbound, nothing to open on a firewall.
-- **Any agent.** Claude Code first, with agy and Codex through the same adapter interface.
-- **Questions reach you.** Permission prompts and menus in an agent's terminal arrive in Discord, and your reply is typed back into the right pane.
-- **Usage limits are detected** and posted, and the agent's queue is held until it recovers.
-- **File transfer, 10 MB max,** agent to Discord, agent to agent across machines, and Discord attachments to agents. Agents can only send files from inside their own project folder.
-- **Kill switch:** `/killall`, `/stop`, `/pause`, `/resume`.
-- **Quiet by design.** Terminal output, diffs and tool calls never reach Discord. Native subagents stay local.
-
-Full list with test status: [docs/CAPABILITIES.md](docs/CAPABILITIES.md).
-
-## Quick start
-
-On each machine (Node 22.13+, tmux, and a logged-in agent CLI):
+- A **hub** is one small program on a server you control. It knows who is on the team, who may do what, and where every message
+  goes. It keeps a record of the conversation.
+- A **daemon** runs on each machine that has agents. It starts the agents in terminals it owns, types messages into them at a
+  safe moment (never over a half-typed line), and tells the hub what they are doing. Machines only ever dial out, so no ports
+  are opened and it works behind a home router, a company firewall or a web proxy.
+- **Discord** is where people watch and steer. Each project is a channel, each task a thread, each agent a name. Questions and
+  permission requests arrive with buttons.
+- Agents talk back by running short shell commands (`claudecord say`, `ask`, `done`, ...). There are no tools to load into the
+  agent, so they cost almost nothing.
 
 ```
-npx claudecord init
-cd my-project
-npx claudecord up
+people  <->  Discord  <->  hub  <->  machine daemons  <->  agents in terminals
+                            |
+                  history, roles, saved state (SQLite) and old history in a bucket
 ```
 
-Hub setup, the Discord bot, and publishing the package: [docs/SETUP.md](docs/SETUP.md).
+## Try it (about ten minutes)
 
-## How it works
+You need Rust to build it (`cargo build --release`; the program is `target/release/claudecord`) and a Discord server you own.
 
-```mermaid
-flowchart LR
-  you([You in Discord]) <--> bot
-  subgraph hub [Hub, always on]
-    bot[Discord bot and webhooks] <--> router[Router, task ledger, acceptance tracking]
-    router <--> gw[Node gateway, WebSocket]
-  end
-  gw <-- outbound WSS, device token --> n1
-  gw <-- outbound WSS, device token --> n2
-  subgraph n1 [Node: Mac]
-    d1[Daemon] --> p1[tmux pane: lead]
-    d1 --> p2[tmux pane: agent]
-  end
-  subgraph n2 [Node: GPU box]
-    d2[Daemon] --> p3[tmux pane: agent]
-  end
-```
+**1. Make the Discord bot.** In the Discord developer portal create an application and a bot, copy the bot token, and turn on the
+Message Content intent. Then on the hub's machine:
 
-- The **hub** owns Discord, routing, the task ledger and acceptance tracking. It stores devices, projects, agents and tasks in SQLite.
-- Each **node** runs a daemon that starts agents in tmux panes, watches each pane, injects queued messages only when the agent is idle, relays prompts and limits, and receives and sends files.
-- Agents speak through **MCP tools** (`say`, `ask_human`, `report`, `send_file`, `assign`, `task_done`). Agents without MCP use the same calls through a shell command.
+    claudecord discord set --guild YOUR_SERVER_ID --token-file bot-token.txt
+    claudecord discord invite            # open the link it prints and add the bot to your server
 
-## Performance
+**2. Start the hub.**
 
-Measured with simulated nodes against the real hub, including on simulated free-tier machines:
+    claudecord hub --data claudecord-hub --bind 127.0.0.1:8787
 
-| | |
-|--|--|
-| 10,000 agents, 10,000 messages per second | p99 1.1 ms, one third of one core, 156 MB |
-| Single-process ceiling | between 20,000 and 40,000 agents |
-| Free 1 vCPU tier (Oracle Ampere, Railway), simulated | 10,000 agents |
-| Free micro tiers (e2-micro, Oracle AMD, Render, Fly 256 MB), simulated | 100 to 1,000 agents |
+The bot's owner in Discord becomes the owner of the team. For anything beyond one machine, put a TLS proxy (Caddy, nginx,
+Cloudflare) in front and bind to 127.0.0.1; the hub refuses a public address without TLS unless you insist.
 
-Method, tables and limits of the simulation: [docs/BENCHMARKS.md](docs/BENCHMARKS.md). Run it yourself with `pnpm bench`, or with k6 using `pnpm bench:serve` and `pnpm bench:k6`.
+**3. Give a machine a token and log it in.**
 
-## Testing
+    claudecord token mac --data claudecord-hub          # prints a token once
+    claudecord login --hub wss://your-hub.example.com --token THE_TOKEN --name mac
+    claudecord doctor                                   # checks the route step by step
 
-```
-pnpm install && pnpm build && pnpm test
-```
+**4. Start an agent in a project folder.**
 
-56 tests cover routing, the lead and task flow, acceptance tracking, file transfer and its path safety, the node runtime against scripted pane screens (prompts, limits, queueing, acceptance), and the WebSocket gateway.
+    cd ~/code/myproject
+    claudecord up                                       # starts claude here and opens its terminal
 
-## Status
+A channel named after the folder appears in Discord. Type there and the agent hears you. Ctrl-] leaves the terminal; the agent
+keeps running. `claudecord attach NAME` returns to it.
 
-Built and tested: the hub logic, the node runtime, the protocol, file transfer, the packaged CLI, and scale.
+## Who can do what
 
-Not yet run against the real thing, because it needs credentials or software that were not on the development machine:
+People are known by their Discord account, never by what a message says. Each project has three roles:
 
-- The Discord layer (channels, webhooks, reactions, slash commands) has not run against a live server.
-- The tmux and live Claude Code path is tested against captured screens, not a live session. tmux was not installed.
-- agy and Codex have the right launch flags, but their screen detection is generic and unverified.
-- The npm package installs and runs from a packed tarball but is not published.
+| Role | May |
+|---|---|
+| viewer | read everything |
+| operator | instruct agents, answer questions, allow normal actions once, stop or pause an agent |
+| owner | everything, including standing permissions, roles, stopping everything, starting agents, raw terminal input |
 
-Not built yet: accounts and sign-in, a web dashboard, restoring running agents after a node daemon restart, a Go mesh for direct node-to-node access.
+Anyone not on the list is ignored. Agents can ask and request but never approve anything. Messages from bots and webhooks (which
+includes every agent's own posts) are never treated as a person.
 
-## Layout
+## Slash commands in Discord
 
-```
-packages/protocol     wire types
-packages/hub          Discord bot, gateway, router, benchmarks
-packages/node         the claudecord CLI and node daemon (published to npm)
-packages/agent-tools  MCP server and IPC client used by agents
-docs/                 setup, capabilities, benchmarks
-```
+`/agents` `/devices` `/status` `/pause` `/resume` `/stop` `/killall` `/btw` `/grant` `/revoke` `/role` `/dump` `/pickup` `/raw`
+`/spawn`. Roles are checked by the hub for each one.
+
+## Permissions
+
+When an agent wants to do something that needs a person, a message appears with buttons: Deny, Allow once, Allow this kind, Allow
+all. Normal actions can be allowed by an operator; risky ones (leaving the project, installing, pushing, unknown hosts) need an
+owner. "This kind" and "all" are standing permissions: only an owner can give them, and every one expires (an hour by default;
+`/grant` sets another time). Files that should never be touched (keys, credentials, claudeCord's own settings) are refused
+without asking, whatever has been allowed. Answering at the terminal instead also works, and the Discord message is closed.
+
+## Slash and at-sign in messages
+
+Agent programs treat some characters specially (a leading `/` for commands, `@` for files or plugins). claudeCord stays out of
+that: **every ordinary message is delivered as data behind a header** such as `[kd (owner)] /clear`, so the first character the
+agent program sees is never `/` or `@`, and nothing a person types in chat can run a command by accident. To send a command on
+purpose, an owner uses `/raw agent:otter text:/compact`, which types exactly that text with no header. The hub knows nothing
+about what any command means, so it works the same for every agent program. Every use is recorded.
+
+## Dashboard
+
+The hub also serves a read-only page that shows machines (and whether they are connected), agents and what each is doing,
+what is waiting on a person, tasks, and the conversation. Make a token and open the hub's address in a browser:
+
+    claudecord web-token me --data claudecord-hub      # prints a token once; paste it into the page
+
+A dashboard token opens the page and nothing else, and a machine's token never opens it. The page draws everything as text and
+is served with a strict content policy.
+
+## Keeping cost down
+
+For an agent, the cost of a message is the turn it causes, because every turn rereads the whole conversation. So:
+
+- everything waiting for an agent is delivered as **one** input;
+- a plain `say` between agents is information and waits to ride along with the next message that needs a reply (use `@name` or
+  `ask` to need an answer);
+- nothing is broadcast: a message goes to who it names, otherwise to the lead;
+- permissions, mirroring to Discord, history and files cost the agent nothing; a file is one short line, however big.
+
+Measured on real Claude Code with a scripted lead-and-two-workers task: **9 turns instead of 32**, about **28% of a plain group
+chat's input tokens** on Sonnet. Run `scripts/cost/team_benchmark.py` (it spends tokens) to repeat it.
+
+## When a session runs out
+
+At 97% of the session allowance (or an agent's context), every affected agent is told to save its state with `claudecord dump`.
+A fresh session asks for it with `claudecord pickup` and carries on from the saved state, not from a replay of the old
+conversation. Finished work is never handed over again.
+
+## History, old files and Obsidian
+
+The last two weeks of conversation stay in the hub's database. Older history is compressed into files and moved to an
+S3-compatible bucket (Oracle Cloud's free tier first, Cloudflare R2 later), so a small free server never fills its disk:
+
+    claudecord storage oracle --namespace NS --region us-ashburn-1 --bucket claudecord-history --key-id KEY --secret-file secret.txt
+    claudecord storage test
+    claudecord storage move r2.json         # later: copy everything to another provider, verify, switch
+    claudecord storage backup               # the hub also copies the live database to the bucket every few hours
+    claudecord storage restore              # on a host that lost its disk: bring the database back
+
+To read and graph the conversation in Obsidian:
+
+    claudecord export --data claudecord-hub --out ~/Vault/claudeCord --watch 30
+
+It writes plain Markdown notes with links: a note per day and thread, one per person or agent, one per task, one per question
+(who asked, what, who answered, the answer) and one per permission request. Open the folder as a vault and use the graph view.
+
+## Several machines
+
+Each machine reports its size, how many agents it should run and labels such as `gpu`. `/spawn` places a new agent on the least
+loaded machine with room. A machine refuses agents beyond its limit, and a second agent in the same git folder is given its own
+worktree and branch so two agents never edit the same files. Machines that are asleep reconnect the moment they wake.
+
+## Safety
+
+- Secrets are removed from anything an agent posts, from files before they are sent, and from the environment an agent starts with.
+- Tokens are stored only as hashes. Bucket keys and the Discord token live in files only you can read.
+- A device can only act for agents it registered. Frames are size-limited and rate-limited; a device that goes quiet or stops
+  reading is dropped.
+- Text pasted into an agent has every control character removed, so it cannot escape the paste.
+- The hub survives a bug in one handler by rebuilding from its last save, and restarts lose nothing it had acknowledged.
+
+## Checking that it works
+
+    scripts/check.sh           # format, lints, every test, then a live check of every feature, then the shipped binary
+    scripts/check.sh --fix     # repairs formatting, simple lints and the code map, then checks
+    claudecord selftest        # starts the real pieces and proves each feature is alive
+
+`CODEMAP.md` lists every file and what it is, generated from each file's own header. CI runs the same checks on Linux (x86 and ARM)
+and macOS.
+
+## Honest limits
+
+- The Discord side is tested against a stand-in Discord, not against the real service yet.
+- Typing into Claude Code, Codex and agy is done through the terminal. The screen-reading rules for agy and Codex are generic and
+  unverified against the live programs; whether a pasted `/command` runs the same way in every program is also unverified.
+- The dashboard is read-only and uses a token; there is no browser sign-in with Discord yet.
+- There is no packaged install (pip or npm) yet, and no Windows support (the machine side uses unix sockets and terminals).
+- Only the generic terminal driver exists. Structured drivers for Claude Code hooks, ACP and the Codex app server are not built.
+- Nothing has been load tested at the sizes the design is aimed at.
