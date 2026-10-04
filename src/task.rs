@@ -35,28 +35,62 @@ where
     })
 }
 
-/// Completes when the program is asked to stop: Ctrl-C everywhere, and on Unix also SIGTERM, which is what `systemctl stop`, Docker
-/// and most process managers send. Handling it means a normal stop saves everything and is recorded as a stop, not a crash.
-pub async fn shutdown_signal() {
+/// Listens for the request to stop: Ctrl-C everywhere, and on Unix also SIGTERM, which is what `systemctl stop`, Docker and most process
+/// managers send. Making it registers the handlers at once, so a stop asked for while the program is still starting is not lost to the
+/// default action (which would kill it without saving anything): it waits to be noticed. Handling it means a normal stop saves everything
+/// and is recorded as a stop, not a crash.
+pub struct StopListener {
+    #[cfg(unix)]
+    term: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    int: Option<tokio::signal::unix::Signal>,
+}
+
+/// Starts listening now. Call it first thing, inside the runtime.
+pub fn stop_listener() -> StopListener {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
-        match signal(SignalKind::terminate()) {
-            Ok(mut term) => {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {}
-                    _ = term.recv() => {}
-                }
-            }
-            Err(_) => {
-                let _ = tokio::signal::ctrl_c().await;
-            }
+        StopListener {
+            term: signal(SignalKind::terminate()).ok(),
+            int: signal(SignalKind::interrupt()).ok(),
         }
     }
     #[cfg(not(unix))]
     {
-        let _ = tokio::signal::ctrl_c().await;
+        StopListener {}
     }
+}
+
+impl StopListener {
+    /// Completes when the program has been asked to stop (possibly already, before this was called).
+    pub async fn wait(self) {
+        #[cfg(unix)]
+        {
+            let (mut term, mut int) = (self.term, self.int);
+            async fn on(s: &mut Option<tokio::signal::unix::Signal>) {
+                match s {
+                    Some(s) => {
+                        s.recv().await;
+                    }
+                    None => std::future::pending().await,
+                }
+            }
+            tokio::select! {
+                _ = on(&mut term) => {}
+                _ = on(&mut int) => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
+/// Completes when the program is asked to stop (see `StopListener`).
+pub async fn shutdown_signal() {
+    stop_listener().wait().await;
 }
 
 /// Runs one step and survives a panic in it: the panic is logged (with `what` was being done) and the result is None, so the caller

@@ -58,6 +58,8 @@ pub async fn run_hub(a: HubArgs) -> Result<(), String> {
     if !bind.ip().is_loopback() && !a.allow_plain {
         return Err("refusing to listen on a public address without TLS: put a TLS proxy in front and bind to 127.0.0.1, or pass --allow-plain if you really mean it".into());
     }
+    // First of all, so a stop asked for while the hub is still starting waits to be handled instead of killing it unsaved.
+    let stop = crate::task::stop_listener();
     std::fs::create_dir_all(&a.data).map_err(|e| e.to_string())?;
     // Everything the hub logs goes to the terminal and to `hub.log` in its data folder (kept to about 20 MB in two files).
     crate::log::init(Some(a.data.join("hub.log")));
@@ -107,7 +109,7 @@ pub async fn run_hub(a: HubArgs) -> Result<(), String> {
         a.data.display()
     );
     // Ctrl-C, and on Unix SIGTERM (what `systemctl stop` and Docker send): either way the hub saves everything and records a clean stop.
-    crate::task::shutdown_signal().await;
+    stop.wait().await;
     crate::notify::stopping();
     crate::info!("hub", "told to stop; saving and closing connections");
     hub.shutdown().await;

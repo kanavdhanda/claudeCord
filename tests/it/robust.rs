@@ -26,6 +26,10 @@ fn start_hub(data: &std::path::Path) -> (Child, u16) {
 
 /// The same, on a port that is already chosen (to start the hub again where it was).
 fn start_hub_on(data: &std::path::Path, port: u16) -> (Child, u16) {
+    let already = std::fs::read_to_string(data.join("hub.log"))
+        .unwrap_or_default()
+        .matches("listening on")
+        .count();
     let mut child = Command::new(env!("CARGO_BIN_EXE_claudecord"))
         .args(["hub", "--data"])
         .arg(data)
@@ -38,9 +42,12 @@ fn start_hub_on(data: &std::path::Path, port: u16) -> (Child, u16) {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
+    // Ready is when the hub says it is listening in its log, which it does after it has recovered from the last run, installed its
+    // stop handlers and opened its port, not merely when the port first accepts a connection.
     let up = Instant::now();
     while up.elapsed() < Duration::from_secs(20) {
-        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+        let log = std::fs::read_to_string(data.join("hub.log")).unwrap_or_default();
+        if log.matches("listening on").count() > already {
             return (child, port);
         }
         std::thread::sleep(Duration::from_millis(50));
