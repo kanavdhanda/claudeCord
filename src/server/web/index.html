@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claudeCord</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header>
+  <h1>claudeCord</h1>
+  <span id="conn">connecting</span>
+</header>
+<main>
+  <section id="login" hidden>
+    <p>Paste a dashboard token (made with <code>claudecord web-token NAME</code>).</p>
+    <input id="token" type="password" autocomplete="off" aria-label="dashboard token">
+    <button id="go" type="button">Open</button>
+  </section>
+  <section id="app" hidden>
+    <nav id="projects" aria-label="projects"></nav>
+    <div class="columns">
+      <div>
+        <h2>Machines</h2><div id="devices"></div>
+        <h2>Agents</h2><div id="agents"></div>
+        <h2>Waiting on a person</h2><div id="waiting"></div>
+        <h2>Tasks</h2><div id="tasks"></div>
+      </div>
+      <div>
+        <h2>Conversation</h2><div id="history"></div>
+      </div>
+    </div>
+  </section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>
