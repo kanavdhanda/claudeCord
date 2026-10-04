@@ -1,9 +1,0 @@
-dist
-.tsc
-coverage
-node_modules
-pnpm-lock.yaml
-*.svg
-*.md
-.changeset
-packages/node/test/fixtures

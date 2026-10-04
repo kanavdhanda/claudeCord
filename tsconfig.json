@@ -1,9 +1,0 @@
-{
-  "files": [],
-  "references": [
-    { "path": "packages/protocol" },
-    { "path": "packages/hub" },
-    { "path": "packages/node" },
-    { "path": "packages/agent-tools" }
-  ]
-}

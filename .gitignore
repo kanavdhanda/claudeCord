@@ -1,18 +1,13 @@
-node_modules
-dist
-*.tsbuildinfo
 .env
 *.db
 .claudecord.json
-packages/hub/bench/k6/tokens.json
-.tsc
-hub.json
 .claudecord/
-coverage/
-k6-summary.json
 
 # Personal learning notes
 learnings/
 
 # Rust
 target/
+
+# Local docs: never pushed
+docs/

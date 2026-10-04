@@ -1,6 +1,4 @@
-node_modules
-**/node_modules
-**/dist
+target
 .git
-.env
-*.db
+learnings
+docs
