@@ -88,7 +88,7 @@ fn saving_only_what_changed_always_rebuilds_exactly_the_state_in_memory() {
         now += rng.below(500) as i64;
         let (p, n) = (projects[rng.below(4)], names[rng.below(4)]);
         let node = format!("n{}", rng.below(4));
-        match rng.below(12) {
+        match rng.below(14) {
             0 | 1 => {
                 core.on_node_frame(
                     &node,
@@ -163,6 +163,12 @@ fn saving_only_what_changed_always_rebuilds_exactly_the_state_in_memory() {
             10 => {
                 core.node_disconnected(&node, rng.below(4) as u64);
                 core.node_connected(&node, rng.below(4) as u64);
+            }
+            11 => {
+                core.take_chat_message(&format!("c{}", rng.below(5)), rng.next() % 1000);
+            }
+            12 => {
+                core.accept_seq(&node, 1 + rng.below(2) as u64, 1 + rng.below(50) as u64);
             }
             _ => {
                 core.tick(now + 120_000);

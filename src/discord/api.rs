@@ -311,6 +311,18 @@ impl Rest {
         .map(|_| ())
     }
 
+    /// Up to 100 messages sent in a channel after message `after`, as Discord returns them (newest first, so callers sort).
+    pub async fn messages_after(&self, channel: &str, after: &str) -> Result<Vec<Value>> {
+        let v = self
+            .call(
+                Method::GET,
+                &format!("/channels/{channel}/messages?after={after}&limit=100"),
+                None,
+            )
+            .await?;
+        Ok(v.as_array().cloned().unwrap_or_default())
+    }
+
     /// Downloads a file (an attachment's address).
     pub async fn download(&self, url: &str) -> Result<Vec<u8>> {
         let resp = self

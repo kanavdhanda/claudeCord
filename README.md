@@ -128,6 +128,24 @@ what is waiting on a person, tasks, and the conversation. Make a token and open 
 A dashboard token opens the page and nothing else, and a machine's token never opens it. The page draws everything as text and
 is served with a strict content policy.
 
+## What is guaranteed about messages
+
+Nothing is acknowledged before it is on disk. Each batch of changes (the history rows and what changed in the saved state) is written to the
+database as one transaction, and only then are frames sent, chat posts made, reactions added or callers answered. So a message that was
+acknowledged survives a crash, and the saved state and the history always agree. This is tested by killing the real hub with SIGKILL at random
+moments while messages flow.
+
+- **Machine to hub:** every frame is numbered, acknowledged only once saved, kept by the machine until then (even while the hub is away) and sent
+  again after a reconnect. The hub takes each numbered frame once, also across its own restarts.
+- **Discord to hub:** the hub remembers the newest message taken from each channel, saved in the same commit as the message, so a message read
+  twice (a resumed connection, a restart) is taken once. After a fresh connection the bridge reads back what was said while it was away, oldest first.
+- **Hub to agent:** waiting messages are part of the saved state and are delivered again after a restart; the machine drops a message it already
+  has by its id (at-least-once, effectively once).
+
+What is not covered: if the machine's own program restarts, frames it had not yet had acknowledged are lost with it; answers, permission decisions
+and files the hub sends to a machine that is away are not queued for it; a post to Discord can be lost if the hub is killed between saving a message
+and posting it (the history has it); and a disk that fails leaves the hub carrying on without durability, which it logs loudly.
+
 ## Logs and what survives what
 
 The hub writes one line per event to the terminal and to `hub.log` in its data folder (kept to about 20 MB in two files; read it with

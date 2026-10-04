@@ -737,3 +737,86 @@ async fn a_discord_outage_at_start_up_only_delays_the_bridge_it_does_not_leave_i
         0
     );
 }
+
+/// A Discord message id for "now" plus `plus` (ids are numbers that rise with time; the bridge watches a channel from about a minute ago).
+fn snow(plus: u64) -> String {
+    ((((claudecord::now_ms() - 1_420_070_400_000).max(0)) as u64) << 22 | 1)
+        .wrapping_add(plus)
+        .to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_that_arrives_twice_is_taken_once() {
+    let mut r = rig("twice").await;
+    register(&r, "otter").await;
+    let ch = channel(&r).await;
+    let m = message(&ch, &snow(10), "1", "only once please");
+    r.event("MESSAGE_CREATE", m.clone());
+    r.frame("the message", |f| deliver_text(f, "only once please"))
+        .await;
+    // A resumed connection replays it, and Discord is read back the same message: it is not taken a second time.
+    r.event("MESSAGE_CREATE", m);
+    assert!(
+        r.quiet(|f| deliver_text(f, "only once please")).await,
+        "the same message was delivered twice"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_was_said_while_the_bridge_was_not_connected_is_read_back_once_and_in_order() {
+    let mut r = rig("backfill").await;
+    register(&r, "otter").await;
+    let ch = channel(&r).await;
+    // One message arrives live and is taken.
+    r.event("MESSAGE_CREATE", message(&ch, &snow(10), "1", "live one"));
+    r.frame("the live message", |f| deliver_text(f, "live one"))
+        .await;
+    // The connection drops and Discord has forgotten the session, so the bridge will have to start a new one. While it was away, two
+    // people spoke (and a bot, which is ignored); the live message is in Discord's record too, and must not be taken again.
+    r.fake
+        .reject_resume
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    {
+        let mut log = r.fake.log.lock().unwrap();
+        let mut bot = message(&ch, &snow(40), "9", "a bot says hi");
+        bot["author"]["bot"] = serde_json::json!(true);
+        log.history.insert(
+            ch.clone(),
+            vec![
+                message(&ch, &snow(10), "1", "live one"),
+                message(&ch, &snow(20), "1", "while away 1"),
+                message(&ch, &snow(30), "1", "while away 2"),
+                bot,
+            ],
+        );
+    }
+    let _ = r.fake.kick.send(());
+    r.until("a fresh session, not a resume", |l| {
+        (l.identifies >= 2).then_some(json!(true))
+    })
+    .await;
+    r.frame("first message sent while away", |f| {
+        deliver_text(f, "while away 1")
+    })
+    .await;
+    r.frame("second message sent while away", |f| {
+        deliver_text(f, "while away 2")
+    })
+    .await;
+    assert!(
+        r.quiet(|f| deliver_text(f, "live one") || deliver_text(f, "a bot says hi"))
+            .await,
+        "a message already taken, or a bot's, was delivered"
+    );
+    // And the read-back is itself safe to repeat: another fresh session takes nothing twice.
+    let _ = r.fake.kick.send(());
+    r.until("a third session", |l| {
+        (l.identifies >= 3).then_some(json!(true))
+    })
+    .await;
+    assert!(
+        r.quiet(|f| deliver_text(f, "while away 1") || deliver_text(f, "while away 2"))
+            .await,
+        "read-back took messages a second time"
+    );
+}

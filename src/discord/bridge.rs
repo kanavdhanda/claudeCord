@@ -41,6 +41,20 @@ pub struct BridgeConfig {
     pub backoff_max: Duration,
 }
 
+/// A Discord message id for a moment in time (ids are the time since 2015 in the high bits), a minute earlier than `now` to allow for the
+/// clocks of this machine and Discord not agreeing. Channels are watched from here on, so nothing said before they were known is ever replayed.
+fn snowflake_now() -> u64 {
+    ((crate::now_ms() - 1_420_070_400_000 - 60_000).max(0) as u64) << 22
+}
+
+/// Starts watching a channel: its messages are taken from now on, once each, and read back after an outage.
+async fn watch(handle: &HubHandle, channel: &str) {
+    let (c, from) = (channel.to_string(), snowflake_now());
+    handle
+        .call(move |core, _| (core.watch_chat(&c, from), vec![]))
+        .await;
+}
+
 const CHECK: &str = "\u{2705}";
 const REFUSED: &str = "\u{26D4}";
 
@@ -128,6 +142,7 @@ async fn run(handle: HubHandle, mut chat: broadcast::Receiver<Chat>, cfg: Bridge
         owner,
         status_shown: HashMap::new(),
     };
+    b.watch_known().await;
     loop {
         tokio::select! {
             c = chat.recv() => match c {
@@ -152,6 +167,78 @@ impl Bridge {
         let _ = self.kv.kv_set(key, value);
     }
 
+    /// Watches every channel and thread this bridge already knew from earlier runs (those not yet watched start from now).
+    async fn watch_known(&mut self) {
+        let known = ["chanrev:", "threadrev:"]
+            .iter()
+            .flat_map(|prefix| {
+                self.kv
+                    .kv_scan(prefix)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(move |(k, _)| k[prefix.len()..].to_string())
+            })
+            .collect::<Vec<_>>();
+        for channel in known {
+            watch(&self.handle, &channel).await;
+        }
+    }
+
+    /// After a fresh connection to Discord, reads what was said in every watched channel since the last message taken, oldest first, and
+    /// handles each as if it had just arrived. Messages already taken are skipped (the hub remembers the newest per channel, saved with the
+    /// message itself), so this is safe to run any time. It runs before live events are handled, so order is kept.
+    ///
+    /// ponytail: channels are read one after another, so with thousands of them a start-up takes as long as Discord's rate limit allows
+    /// (about 50 calls a second); read busy channels first, or in the background, if that ever matters.
+    async fn backfill(&mut self) {
+        let channels = self
+            .handle
+            .read(|c, _| c.watched_chats())
+            .await
+            .unwrap_or_default();
+        let mut taken = 0usize;
+        for (channel, last) in channels {
+            let mut after = last;
+            loop {
+                let mut msgs = match self.rest.messages_after(&channel, &after.to_string()).await {
+                    Ok(m) => m,
+                    Err(e) => {
+                        crate::warn!(
+                            "discord",
+                            "could not read back the messages of channel {channel}: {e}"
+                        );
+                        break;
+                    }
+                };
+                let id_of = |m: &Value| {
+                    m["id"]
+                        .as_str()
+                        .and_then(|i| i.parse::<u64>().ok())
+                        .unwrap_or(0)
+                };
+                msgs.sort_by_key(id_of);
+                let n = msgs.len();
+                for mut m in msgs {
+                    if m["channel_id"].is_null() {
+                        m["channel_id"] = Value::String(channel.clone());
+                    }
+                    after = after.max(id_of(&m));
+                    self.on_message(&m).await;
+                    taken += 1;
+                }
+                if n < 100 {
+                    break;
+                }
+            }
+        }
+        if taken > 0 {
+            crate::info!(
+                "discord",
+                "read back {taken} message(s) sent while the bridge was not connected"
+            );
+        }
+    }
+
     /// The Discord channel for a project, found by name or made, remembered either way.
     async fn channel(&mut self, project: &str) -> Option<String> {
         if let Some(id) = self.get(&format!("chan:{project}")) {
@@ -172,6 +259,7 @@ impl Bridge {
         };
         self.set(&format!("chan:{project}"), &id);
         self.set(&format!("chanrev:{id}"), project);
+        watch(&self.handle, &id).await;
         Some(id)
     }
 
@@ -200,6 +288,7 @@ impl Bridge {
             .ok()?;
         self.set(&key, &id);
         self.set(&format!("threadrev:{id}"), &format!("{project}\n{name}"));
+        watch(&self.handle, &id).await;
         Some(id)
     }
 
@@ -388,6 +477,10 @@ impl Bridge {
                 ),
             }
         }
+        // A fresh session (not a resume) may have missed messages: read back what was said while away, before live events go on.
+        if e.name == "READY" {
+            self.backfill().await;
+        }
         match e.name.as_str() {
             "MESSAGE_CREATE" => self.on_message(&e.data).await,
             "INTERACTION_CREATE" => self.on_interaction(&e.data).await,
@@ -444,37 +537,19 @@ impl Bridge {
         if text.trim().is_empty() && files.is_empty() {
             return;
         }
-        let reference = format!("{channel}:{mid}");
-        let (p2, h2, t2, th2, r2) = (
-            project.clone(),
-            human.clone(),
-            text.clone(),
-            thread.clone(),
-            reference.clone(),
-        );
-        let outcome = self
+        // Someone who is not on the project's list is ignored before anything is downloaded for them.
+        let (pp, uu) = (project.clone(), uid.to_string());
+        if !self
             .handle
-            .call(move |c, now| {
-                let opts = MessageOpts {
-                    thread: th2.as_deref(),
-                    reference: Some(&r2),
-                    answers_ask: answers.as_deref(),
-                    attachments: &[],
-                };
-                match c.human_message(&h2, &p2, &t2, &opts, now) {
-                    Ok((_, fx)) => (Ok(()), fx),
-                    Err(d) => (Err(d), vec![]),
-                }
-            })
-            .await;
-        match outcome {
-            Some(Err(Denied::Unlisted)) | None => return,
-            Some(Err(_)) => {
-                let _ = self.rest.react(channel, mid, REFUSED).await;
-                return;
-            }
-            Some(Ok(())) => {}
+            .read(move |c, _| c.role_of(&pp, &uu).is_some())
+            .await
+            .unwrap_or(false)
+        {
+            return;
         }
+        // The attachments are fetched first, so that the message and its files are taken in ONE step below: either all of it is saved, or
+        // none of it is, and a retry after a crash cannot take half of it twice.
+        let mut fetched: Vec<(String, String, Vec<u8>)> = Vec::new();
         for (fid, fname, size, url) in files {
             if size > MAX_FILE_BYTES {
                 let _ = self
@@ -491,18 +566,54 @@ impl Bridge {
                     .await;
                 continue;
             }
-            let Ok(data) = self.rest.download(&url).await else {
-                continue;
-            };
-            let (p3, h3, th3, cap) = (project.clone(), human.clone(), thread.clone(), text.clone());
-            self.handle
-                .call(
-                    move |c, _| match c.send_file(&h3, &p3, &cap, &fname, &data, th3, &fid) {
-                        Ok((_, fx)) => ((), fx),
-                        Err(_) => ((), vec![]),
-                    },
-                )
-                .await;
+            if let Ok(data) = self.rest.download(&url).await {
+                fetched.push((fid, fname, data));
+            }
+        }
+        let reference = format!("{channel}:{mid}");
+        let (p2, h2, t2, th2, r2, chan) = (
+            project.clone(),
+            human.clone(),
+            text.clone(),
+            thread.clone(),
+            reference.clone(),
+            channel.to_string(),
+        );
+        let mid_num: Option<u64> = mid.parse().ok();
+        let outcome = self
+            .handle
+            .call(move |c, now| {
+                // A message already taken (read back after an outage, or replayed by a resumed connection) is not taken again. The record
+                // of it is saved in the same commit as what the message causes, so a crash cannot separate the two.
+                if let Some(n) = mid_num
+                    && !c.take_chat_message(&chan, n)
+                {
+                    return (Ok(()), vec![]);
+                }
+                let opts = MessageOpts {
+                    thread: th2.as_deref(),
+                    reference: Some(&r2),
+                    answers_ask: answers.as_deref(),
+                    attachments: &[],
+                };
+                let mut fx = match c.human_message(&h2, &p2, &t2, &opts, now) {
+                    Ok((_, fx)) => fx,
+                    Err(d) => return (Err(d), vec![]),
+                };
+                for (fid, fname, data) in &fetched {
+                    if let Ok((_, f)) = c.send_file(&h2, &p2, &t2, fname, data, th2.clone(), fid) {
+                        fx.extend(f);
+                    }
+                }
+                (Ok(()), fx)
+            })
+            .await;
+        match outcome {
+            Some(Err(Denied::Unlisted)) | None => {}
+            Some(Err(_)) => {
+                let _ = self.rest.react(channel, mid, REFUSED).await;
+            }
+            Some(Ok(())) => {}
         }
     }
 

@@ -30,6 +30,9 @@ pub struct Log {
     pub reactions: Vec<Value>,
     pub responses: Vec<Value>,
     pub commands: Option<Value>,
+    /// What people said in each channel, as the "read the messages after" call returns it (a test fills this to stand in for messages sent
+    /// while the bridge was not connected): channel id -> messages.
+    pub history: HashMap<String, Vec<Value>>,
     pub gateway_connects: u32,
     pub identifies: u32,
     pub resumes: u32,
@@ -43,6 +46,9 @@ pub struct Fake {
     pub kick: broadcast::Sender<()>,
     /// How many of the next "who am I" calls answer with an error, to stand in for Discord being down when the bridge starts.
     pub me_failures: Arc<std::sync::atomic::AtomicUsize>,
+    /// When set, a request to resume a session is refused (as Discord does when it has forgotten the session), so the bridge starts a fresh
+    /// one and has to read back what it missed.
+    pub reject_resume: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Fake {
@@ -62,6 +68,7 @@ pub async fn start_fake() -> (Fake, String) {
         addr: Arc::default(),
         kick,
         me_failures: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        reject_resume: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     async fn me(State(f): State<Fake>) -> Result<Json<Value>, axum::http::StatusCode> {
         let down = f
@@ -188,6 +195,39 @@ pub async fn start_fake() -> (Fake, String) {
         f.log.lock().unwrap().commands = Some(b);
         Json(json!([]))
     }
+    async fn list_messages(
+        State(f): State<Fake>,
+        axum::extract::Path(channel): axum::extract::Path<String>,
+        axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
+    ) -> Json<Value> {
+        let after: u64 = q.get("after").and_then(|a| a.parse().ok()).unwrap_or(0);
+        let limit: usize = q.get("limit").and_then(|l| l.parse().ok()).unwrap_or(50);
+        let log = f.log.lock().unwrap();
+        let mut found: Vec<Value> = log
+            .history
+            .get(&channel)
+            .into_iter()
+            .flatten()
+            .filter(|m| {
+                m["id"]
+                    .as_str()
+                    .and_then(|i| i.parse::<u64>().ok())
+                    .is_some_and(|i| i > after)
+            })
+            .cloned()
+            .collect();
+        // Discord answers newest first.
+        found.sort_by_key(|m| {
+            std::cmp::Reverse(
+                m["id"]
+                    .as_str()
+                    .and_then(|i| i.parse::<u64>().ok())
+                    .unwrap_or(0),
+            )
+        });
+        found.truncate(limit);
+        Json(Value::Array(found))
+    }
     async fn file() -> &'static str {
         "attachment bytes"
     }
@@ -215,6 +255,10 @@ pub async fn start_fake() -> (Fake, String) {
                             f.log.lock().unwrap().identifies += 1;
                             let _ = s.send(WsMsg::Text(json!({"op": 0, "s": 1, "t": "READY", "d": {"session_id": "sess", "resume_gateway_url": format!("ws://{}/gateway", f.addr.lock().unwrap())}}).to_string().into())).await;
                         }
+                        Some(6) if f.reject_resume.load(std::sync::atomic::Ordering::SeqCst) => {
+                            // "I do not know that session": the bridge must start a new one.
+                            let _ = s.send(WsMsg::Text(json!({"op": 9, "d": false}).to_string().into())).await;
+                        }
                         Some(6) => {
                             f.log.lock().unwrap().resumes += 1;
                             // The real gateway confirms a resume with this event.
@@ -236,7 +280,7 @@ pub async fn start_fake() -> (Fake, String) {
         .route("/api/channels/{id}/webhooks", post(mk_hook))
         .route("/api/webhooks/{id}/{tok}", post(hook_post))
         .route("/api/channels/{id}/threads", post(mk_thread))
-        .route("/api/channels/{id}/messages", post(send))
+        .route("/api/channels/{id}/messages", post(send).get(list_messages))
         .route("/api/channels/{c}/messages/{m}", any(edit))
         .route(
             "/api/channels/{c}/messages/{m}/reactions/{e}/@me",

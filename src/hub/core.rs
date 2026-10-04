@@ -99,6 +99,9 @@ pub struct HubCore {
     pub(super) seq: u64,
     /// The last (epoch, number) taken from each machine, so a frame sent twice is taken once. Saved with everything else.
     pub(super) device_seq: TrackedMap<[u64; 2]>,
+    /// The newest chat message (a Discord snowflake) taken from each channel. It is saved in the same commit as the message it belongs to, so
+    /// a message read twice (a resumed connection, a read-back after an outage, a restart) is taken once.
+    pub(super) chat_last: TrackedMap<u64>,
     /// What has changed since the last save (see `tracked`).
     pub(super) dirty: Log,
     /// The `seq` last written, so it is written again only when it moved.
@@ -151,6 +154,7 @@ impl HubCore {
             dirty: dirty.clone(),
             counters: TrackedMap::new("counters", &dirty),
             device_seq: TrackedMap::new("device_seq", &dirty),
+            chat_last: TrackedMap::new("chat_last", &dirty),
             metrics: Metrics::new(1440),
         }
     }
@@ -194,6 +198,31 @@ impl HubCore {
         }
         self.device_seq.insert(node.to_string(), [epoch, n]);
         true
+    }
+
+    /// Whether a chat message is new. Message ids rise with time, so one that is not above the newest taken from its channel has been taken
+    /// already. A new one is recorded here, so the record is saved in the same commit as whatever the message causes.
+    pub fn take_chat_message(&mut self, channel: &str, id: u64) -> bool {
+        if self.chat_last.get(channel).is_some_and(|last| id <= *last) {
+            return false;
+        }
+        self.chat_last.insert(channel.to_string(), id);
+        true
+    }
+
+    /// Starts watching a channel from `id` (messages above it will be taken, older ones never), unless it is already watched.
+    pub fn watch_chat(&mut self, channel: &str, id: u64) {
+        if !self.chat_last.contains_key(channel) {
+            self.chat_last.insert(channel.to_string(), id);
+        }
+    }
+
+    /// Every watched channel and the newest message taken from it, for reading back what was said while the hub was away.
+    pub fn watched_chats(&self) -> Vec<(String, u64)> {
+        self.chat_last
+            .iter()
+            .map(|(c, id)| (c.clone(), *id))
+            .collect()
     }
 
     /// Looks an agent up by its full id (`project/name`).
