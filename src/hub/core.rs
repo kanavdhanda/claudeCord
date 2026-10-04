@@ -97,6 +97,8 @@ pub struct HubCore {
     pub(super) roster_dirty: TrackedSet,
     pub(super) uploads: HashMap<String, super::files::Upload>,
     pub(super) seq: u64,
+    /// The last (epoch, number) taken from each machine, so a frame sent twice is taken once. Saved with everything else.
+    pub(super) device_seq: TrackedMap<[u64; 2]>,
     /// What has changed since the last save (see `tracked`).
     pub(super) dirty: Log,
     /// The `seq` last written, so it is written again only when it moved.
@@ -148,6 +150,7 @@ impl HubCore {
             seq_written: 0,
             dirty: dirty.clone(),
             counters: TrackedMap::new("counters", &dirty),
+            device_seq: TrackedMap::new("device_seq", &dirty),
             metrics: Metrics::new(1440),
         }
     }
@@ -172,6 +175,25 @@ impl HubCore {
         v.sort();
         v.dedup();
         v
+    }
+
+    /// The connection a machine has right now, if any.
+    pub fn conn_of(&self, node: &str) -> Option<u64> {
+        self.conns.get(node).copied()
+    }
+
+    /// Whether a numbered frame from a machine is new. A frame whose number is not above the last taken under the same epoch is one the
+    /// machine sent again (because it had not seen the ack), and is not taken twice. A new epoch means the machine restarted.
+    pub fn accept_seq(&mut self, node: &str, epoch: u64, n: u64) -> bool {
+        if self
+            .device_seq
+            .get(node)
+            .is_some_and(|[e, last]| *e == epoch && n <= *last)
+        {
+            return false;
+        }
+        self.device_seq.insert(node.to_string(), [epoch, n]);
+        true
     }
 
     /// Looks an agent up by its full id (`project/name`).

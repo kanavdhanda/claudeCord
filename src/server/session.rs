@@ -85,7 +85,7 @@ pub(crate) async fn run(
                                 if let Err(e) = send_bounded(&mut socket, Message::Text(bad.into()), &kill, stall).await { why = e.into(); break; }
                                 continue;
                             }
-                            if to_actor.send(Input::Frame { node: node.clone(), text: t.as_str().to_string() }).await.is_err() { why = "the hub is stopping".into(); break; }
+                            if to_actor.send(Input::Frame { node: node.clone(), text: t.as_str().to_string(), stamp: crate::protocol::stamp_of(t.as_str()) }).await.is_err() { why = "the hub is stopping".into(); break; }
                         }
                         Message::Pong(_) => {
                             if to_actor.send(Input::Alive { node: node.clone() }).await.is_err() { why = "the hub is stopping".into(); break; }

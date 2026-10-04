@@ -95,6 +95,61 @@ pub fn resumed_from_sleep(before: SystemTime, now: SystemTime, expected: Duratio
         .is_ok_and(|gap| gap > expected + RESUME_GAP)
 }
 
+/// Most frames kept waiting for the hub to confirm them. Past this the oldest is dropped (and logged), so a machine that cannot reach the
+/// hub for a very long time cannot grow without limit.
+const MAX_UNACKED: usize = 10_000;
+
+/// What this machine has sent and the hub has not confirmed. Each frame is numbered under an epoch chosen at start-up, kept until the hub
+/// acknowledges it (which it does only once the change is on disk), and sent again after a reconnect. The hub remembers the last number it
+/// took, so a frame that arrives twice is taken once. If this process itself restarts, a new epoch begins and what was unconfirmed is lost
+/// with it.
+struct Unacked {
+    epoch: u64,
+    next: u64,
+    frames: std::collections::VecDeque<(u64, String)>,
+}
+
+impl Unacked {
+    fn new() -> Self {
+        let mut r = [0u8; 8];
+        let _ = getrandom::fill(&mut r);
+        // Never zero, so "no epoch" can never be mistaken for one.
+        Self {
+            epoch: u64::from_le_bytes(r) | 1,
+            next: 1,
+            frames: Default::default(),
+        }
+    }
+
+    /// Numbers a frame, remembers it, and returns the text to send.
+    fn stamp(&mut self, frame: &NodeFrame) -> String {
+        let n = self.next;
+        self.next += 1;
+        let mut v = serde_json::to_value(frame).expect("plain data");
+        if let Some(o) = v.as_object_mut() {
+            o.insert("e".into(), self.epoch.into());
+            o.insert("n".into(), n.into());
+        }
+        let text = v.to_string();
+        if self.frames.len() >= MAX_UNACKED {
+            self.frames.pop_front();
+            crate::warn!(
+                "link",
+                "the hub has not confirmed {MAX_UNACKED} frames; dropped the oldest"
+            );
+        }
+        self.frames.push_back((n, text.clone()));
+        text
+    }
+
+    /// The hub has everything up to `n`.
+    fn ack(&mut self, n: u64) {
+        while self.frames.front().is_some_and(|(k, _)| *k <= n) {
+            self.frames.pop_front();
+        }
+    }
+}
+
 /// The reconnect loop.
 async fn run(
     url: String,
@@ -106,10 +161,11 @@ async fn run(
     wake: Arc<Notify>,
 ) {
     let mut failures = 0u32;
+    let mut unacked = Unacked::new();
     loop {
         let started = tokio::time::Instant::now();
         if let Some(ws) = connect(&url, &token, &opts).await {
-            let replaced = session(ws, &node, &events, &mut outbox, &opts).await;
+            let replaced = session(ws, &node, &events, &mut outbox, &mut unacked, &opts).await;
             if events.send(LinkEvent::Down).await.is_err() {
                 return;
             }
@@ -123,7 +179,7 @@ async fn run(
             }
         }
         failures = failures.saturating_add(1);
-        if sleep_or_wake(pause(failures, &opts), &wake).await {
+        if sleep_or_wake(pause(failures, &opts), &wake, &mut outbox, &mut unacked).await {
             // Woken by activity or by the machine waking up: try straight away and start the pauses over.
             failures = 0;
         }
@@ -133,15 +189,30 @@ async fn run(
     }
 }
 
-/// Waits for `total`, in short steps. Returns true if it was cut short by a nudge or by the machine waking from sleep.
-async fn sleep_or_wake(total: Duration, wake: &Notify) -> bool {
+/// Waits for `total`, in short steps. Returns true if it was cut short by a nudge or by the machine waking from sleep. While waiting, frames
+/// the machine wants to send are taken from the queue and kept, so a hub that cannot be reached never backs up into the rest of the program.
+async fn sleep_or_wake(
+    total: Duration,
+    wake: &Notify,
+    outbox: &mut mpsc::Receiver<NodeFrame>,
+    unacked: &mut Unacked,
+) -> bool {
     let step = Duration::from_millis(500).min(total);
     let mut waited = Duration::ZERO;
     let mut last = SystemTime::now();
+    // One clock for the whole wait, so a stream of frames cannot keep restarting the sleep and never let it end.
+    let mut clock = tokio::time::interval(step);
+    clock.tick().await;
     while waited < total {
         tokio::select! {
             _ = wake.notified() => return true,
-            _ = tokio::time::sleep(step) => {}
+            frame = outbox.recv() => {
+                if let Some(f) = frame {
+                    unacked.stamp(&f);
+                }
+                continue;
+            }
+            _ = clock.tick() => {}
         }
         let now = SystemTime::now();
         if resumed_from_sleep(last, now, step) {
@@ -294,6 +365,7 @@ async fn session(
     node: &str,
     events: &mpsc::Sender<LinkEvent>,
     outbox: &mut mpsc::Receiver<NodeFrame>,
+    unacked: &mut Unacked,
     opts: &LinkOpts,
 ) -> bool {
     let (mut tx, mut rx) = ws.split();
@@ -309,6 +381,12 @@ async fn session(
         .is_err()
     {
         return false;
+    }
+    // Everything the hub has not confirmed is sent again, in order, ahead of anything new. The hub takes each numbered frame once.
+    for (_, text) in &unacked.frames {
+        if tx.send(Message::Text(text.clone().into())).await.is_err() {
+            return false;
+        }
     }
     let mut ping = tokio::time::interval(opts.ping_every);
     ping.tick().await;
@@ -327,6 +405,7 @@ async fn session(
                             Some(HubFrame::Welcome { .. }) => {
                                 if events.send(LinkEvent::Up).await.is_err() { return replaced; }
                             }
+                            Some(HubFrame::Ack { n }) => unacked.ack(n),
                             Some(HubFrame::Error { message }) if message.contains("replaced") => replaced = true,
                             Some(f) => {
                                 if events.send(LinkEvent::Frame(f)).await.is_err() { return replaced; }
@@ -341,7 +420,7 @@ async fn session(
             frame = outbox.recv() => match frame {
                 None => return replaced,
                 Some(f) => {
-                    let text = serde_json::to_string(&f).expect("plain data");
+                    let text = unacked.stamp(&f);
                     if tx.send(Message::Text(text.into())).await.is_err() { return replaced; }
                 }
             },

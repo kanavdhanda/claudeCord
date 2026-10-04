@@ -257,3 +257,88 @@ async fn a_wrong_token_never_connects_and_does_not_spin() {
     assert!(!expect(&mut ev, 800, |e| *e == LinkEvent::Up).await);
     hub.shutdown().await;
 }
+
+#[tokio::test]
+async fn frames_sent_while_the_hub_is_away_arrive_once_and_in_order_when_it_is_back() {
+    use claudecord::protocol::{AdapterId, AgentSpec, NodeFrame};
+    let dir = std::env::temp_dir().join(format!("cc-link-away-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("t.db");
+    let mut store = Store::open(&db, None).unwrap();
+    let token = store.create_token("mac", 0).unwrap();
+    drop(store);
+    // Pick an address, and start the machine's link before any hub is there.
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let bind = probe.local_addr().unwrap();
+    drop(probe);
+    let (tx, mut events) = mpsc::channel(256);
+    let link = link::spawn(
+        format!("ws://{bind}/api/v1/node/connect"),
+        token,
+        "mac".into(),
+        tx,
+        fast(),
+    );
+    link.send(NodeFrame::AgentRegister {
+        agent: AgentSpec {
+            agent_id: "p/otter".into(),
+            name: "otter".into(),
+            project: "p".into(),
+            adapter: AdapterId::Claude,
+            model: None,
+            role: None,
+        },
+        cwd: "/x".into(),
+    })
+    .await;
+    for i in 0..30 {
+        link.send(NodeFrame::AgentSay {
+            agent_id: "p/otter".into(),
+            text: format!("while away {i}"),
+            thread: None,
+        })
+        .await;
+    }
+    // Only now does the hub start. The link was already waiting to retry, holding everything.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let hub = server::start(
+        ServerConfig {
+            bind,
+            ..server_cfg("127.0.0.1:0")
+        },
+        HubCore::default(),
+        Store::open(&db, None).unwrap(),
+    )
+    .await
+    .unwrap();
+    let up = tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(e) = events.recv().await {
+            if e == LinkEvent::Up {
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert_eq!(up, Ok(true));
+    // Everything arrives, once each and in the order it was sent, with nothing resent or lost.
+    let mut seen = Vec::new();
+    for _ in 0..200 {
+        seen = Store::open(&db, None)
+            .unwrap()
+            .history_latest("p", None, 500)
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.text.starts_with("while away"))
+            .map(|r| r.text)
+            .collect();
+        if seen.len() >= 30 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let want: Vec<String> = (0..30).map(|i| format!("while away {i}")).collect();
+    assert_eq!(seen, want, "frames were lost, doubled or reordered");
+    hub.shutdown().await;
+}

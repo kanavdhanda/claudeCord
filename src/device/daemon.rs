@@ -507,7 +507,7 @@ impl State {
                         .await;
                 }
             }
-            HubFrame::Welcome { .. } | HubFrame::Error { .. } => {}
+            HubFrame::Welcome { .. } | HubFrame::Error { .. } | HubFrame::Ack { .. } => {}
         }
     }
 

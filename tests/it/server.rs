@@ -937,3 +937,106 @@ async fn past_its_limit_the_hub_refuses_new_devices_with_try_later_and_takes_the
     assert!(again.is_ok(), "{:?}", again.err());
     hub.shutdown().await;
 }
+
+/// A numbered `agent.say`, the way the link sends it.
+fn say(epoch: u64, n: u64, text: &str) -> Message {
+    Message::Text(
+        serde_json::json!({"t": "agent.say", "agentId": "p/otter", "text": text, "e": epoch, "n": n})
+            .to_string()
+            .into(),
+    )
+}
+
+/// The next ack the hub sends, or None.
+async fn next_ack(ws: &mut Ws, ms: u64) -> Option<u64> {
+    loop {
+        match next_frame(ws, ms).await? {
+            HubFrame::Ack { n } => return Some(n),
+            _ => continue,
+        }
+    }
+}
+
+/// How many times `text` appears in a project's saved history.
+fn saved_times(db: &std::path::Path, text: &str) -> usize {
+    Store::open(db, None)
+        .unwrap()
+        .history_latest("p", None, 500)
+        .unwrap()
+        .iter()
+        .filter(|r| r.text.contains(text))
+        .count()
+}
+
+#[tokio::test]
+async fn an_ack_comes_only_when_the_change_is_on_disk_and_a_frame_sent_twice_is_taken_once() {
+    let dir = tmp("acks");
+    let db = dir.join("t.db");
+    let (hub, tokens) = boot(cfg(), &db, &["mac"]).await;
+    let mut ws = connect(&hub, &tokens[0]).await.unwrap();
+    register(&mut ws, "otter").await;
+    wait_for("registered", async || {
+        hub.call(|c, _| (c.agent("p/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    // Each frame's ack means it is already saved.
+    for n in 1..=20u64 {
+        ws.send(say(7, n, &format!("unique line {n}")))
+            .await
+            .unwrap();
+        assert_eq!(
+            next_ack(&mut ws, 3000).await,
+            Some(n),
+            "frame {n} was never acknowledged"
+        );
+        assert_eq!(
+            saved_times(&db, &format!("unique line {n}")),
+            1,
+            "frame {n} was acknowledged before it was on disk"
+        );
+    }
+    // The same number again (a machine that did not see the ack and sends it once more): not taken twice, but acknowledged again.
+    ws.send(say(7, 20, "unique line 20")).await.unwrap();
+    assert_eq!(next_ack(&mut ws, 3000).await, Some(20));
+    assert_eq!(
+        saved_times(&db, "unique line 20"),
+        1,
+        "a repeated frame was taken twice"
+    );
+    // A new epoch is a machine that restarted: its number 1 is new again.
+    ws.send(say(8, 1, "after a restart")).await.unwrap();
+    assert_eq!(next_ack(&mut ws, 3000).await, Some(1));
+    assert_eq!(saved_times(&db, "after a restart"), 1);
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_frame_resent_after_the_hub_restarted_is_not_taken_twice() {
+    let dir = tmp("acks-restart");
+    let db = dir.join("t.db");
+    let (hub, tokens) = boot(cfg(), &db, &["mac"]).await;
+    let mut ws = connect(&hub, &tokens[0]).await.unwrap();
+    register(&mut ws, "otter").await;
+    wait_for("registered", async || {
+        hub.call(|c, _| (c.agent("p/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    ws.send(say(5, 1, "before the restart")).await.unwrap();
+    assert_eq!(next_ack(&mut ws, 3000).await, Some(1));
+    hub.shutdown().await;
+    // The hub comes back from its saved state; the machine, not sure the ack arrived, sends the same frame again.
+    let hub = reboot(cfg(), &db).await;
+    let mut ws = connect(&hub, &tokens[0]).await.unwrap();
+    ws.send(say(5, 1, "before the restart")).await.unwrap();
+    assert_eq!(next_ack(&mut ws, 3000).await, Some(1), "acknowledged again");
+    hub.shutdown().await;
+    assert_eq!(
+        saved_times(&db, "before the restart"),
+        1,
+        "the restart forgot what it had taken"
+    );
+}

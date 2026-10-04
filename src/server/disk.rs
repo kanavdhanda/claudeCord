@@ -66,6 +66,12 @@ impl Disk {
                 mode: Mode::Inline,
             };
         };
+        // Fault injection for the crash test: wait this long before each write, so a kill is likely to land between a change being made and
+        // it being saved. Never set in production.
+        let delay = std::env::var("CLAUDECORD_TEST_COMMIT_DELAY_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(std::time::Duration::from_millis);
         let (tx, rx) = channel::<Commit>();
         let join = std::thread::Builder::new()
             .name("hub-disk".into())
@@ -83,6 +89,9 @@ impl Disk {
                         audits.extend(c.audits);
                         changes.extend(c.changes);
                         waiting.push(c.done);
+                    }
+                    if let Some(d) = delay {
+                        std::thread::sleep(d);
                     }
                     let ok = write(&mut writer, &rows, &audits, &changes);
                     if !ok {

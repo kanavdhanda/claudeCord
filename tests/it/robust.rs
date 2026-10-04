@@ -21,10 +21,18 @@ fn start_hub(data: &std::path::Path) -> (Child, u16) {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         l.local_addr().unwrap().port()
     };
+    start_hub_on(data, port)
+}
+
+/// The same, on a port that is already chosen (to start the hub again where it was).
+fn start_hub_on(data: &std::path::Path, port: u16) -> (Child, u16) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_claudecord"))
         .args(["hub", "--data"])
         .arg(data)
         .args(["--bind", &format!("127.0.0.1:{port}")])
+        // Writes are slowed a little, so a kill is likely to land between a change being made and it being saved: that is the moment
+        // the rule "nothing is acknowledged before it is on disk" has to hold.
+        .env("CLAUDECORD_TEST_COMMIT_DELAY_MS", "25")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -193,4 +201,151 @@ fn the_hub_says_plainly_why_it_will_not_start_instead_of_failing_later() {
         assert!(said.contains("cannot be written"), "{said}");
     }
     std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+// The crash test. A machine sends numbered messages to the real hub program while the hub is killed (SIGKILL: no goodbye, no flush) at
+// random moments and started again. What must hold: every message the hub acknowledged was already on disk when it was killed; and
+// after the machine sends again what was never acknowledged, every message is saved exactly once, in order.
+
+use futures_util::{SinkExt, StreamExt};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+
+/// A machine connected to the hub, noting the highest number the hub has acknowledged.
+struct Machine {
+    tx: futures_util::stream::SplitSink<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        Message,
+    >,
+    acked: Arc<AtomicU64>,
+}
+
+async fn connect_machine(port: u16, token: &str) -> Machine {
+    let mut req = format!("ws://127.0.0.1:{port}/api/v1/node/connect")
+        .into_client_request()
+        .unwrap();
+    req.headers_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    let (ws, _) = tokio_tungstenite::connect_async(req).await.unwrap();
+    let (mut tx, mut rx) = ws.split();
+    let acked = Arc::new(AtomicU64::new(0));
+    let seen = acked.clone();
+    tokio::spawn(async move {
+        while let Some(Ok(m)) = rx.next().await {
+            if let Message::Text(t) = m
+                && let Ok(v) = serde_json::from_str::<serde_json::Value>(t.as_str())
+                && v["t"] == "ack"
+                && let Some(n) = v["n"].as_u64()
+            {
+                seen.fetch_max(n, Ordering::SeqCst);
+            }
+        }
+    });
+    let reg = serde_json::json!({"t": "agent.register", "agent": {"agentId": "p/otter", "name": "otter", "project": "p", "adapter": "claude"}, "cwd": "/x"});
+    tx.send(Message::Text(reg.to_string().into()))
+        .await
+        .unwrap();
+    Machine { tx, acked }
+}
+
+fn numbered(epoch: u64, n: u64) -> Message {
+    Message::Text(serde_json::json!({"t": "agent.say", "agentId": "p/otter", "text": format!("crash-{n:04}"), "e": epoch, "n": n}).to_string().into())
+}
+
+#[tokio::test]
+async fn nothing_acknowledged_is_lost_when_the_hub_is_killed_at_random_moments_and_nothing_is_doubled()
+ {
+    const TOTAL: u64 = 600;
+    const EPOCH: u64 = 99;
+    let data = dir("crash");
+    let tokens = data.join("tokens.json");
+    assert!(
+        Command::new(env!("CARGO_BIN_EXE_claudecord"))
+            .args(["load-tokens", "--count", "1", "--prefix", "mac", "--out"])
+            .arg(&tokens)
+            .arg("--data")
+            .arg(&data)
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let token =
+        serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&tokens).unwrap())
+            .unwrap()[0]["token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+    let db = data.join("hub.db");
+
+    let (mut hub, port) = start_hub(&data);
+    let mut machine = connect_machine(port, &token).await;
+    let mut sent_upto = 0u64;
+    let mut rng = 12345u64;
+    let mut crashes = 0;
+    while machine.acked.load(Ordering::SeqCst) < TOTAL {
+        // Send a burst of the next numbers, then kill the hub at a random moment inside it.
+        rng = rng
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let burst = 20 + (rng >> 40) % 60;
+        let kill_after = (rng >> 20) % burst;
+        for _ in 0..burst {
+            if sent_upto >= TOTAL {
+                break;
+            }
+            sent_upto += 1;
+            if machine.tx.send(numbered(EPOCH, sent_upto)).await.is_err() {
+                break;
+            }
+            if sent_upto % burst == kill_after && crashes < 6 && sent_upto < TOTAL {
+                signal(&hub, "-KILL");
+                wait_exit(&mut hub);
+                crashes += 1;
+                // At the instant of the kill: everything the hub had acknowledged is on disk.
+                let acked = machine.acked.load(Ordering::SeqCst);
+                let on_disk: std::collections::BTreeSet<String> = Store::open(&db, None)
+                    .unwrap()
+                    .history_latest("p", None, 5000)
+                    .unwrap()
+                    .into_iter()
+                    .map(|r| r.text)
+                    .collect();
+                for n in 1..=acked {
+                    assert!(
+                        on_disk.contains(&format!("crash-{n:04}")),
+                        "message {n} was acknowledged and then lost in a crash (crash {crashes})"
+                    );
+                }
+                // The hub starts again; the machine reconnects and sends again what the hub never acknowledged, in order.
+                let (h, _) = start_hub_on(&data, port);
+                hub = h;
+                machine = connect_machine(port, &token).await;
+                for n in (acked + 1)..=sent_upto {
+                    machine.tx.send(numbered(EPOCH, n)).await.unwrap();
+                }
+                break;
+            }
+        }
+        // Give the hub a moment to catch up before the next burst.
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    }
+    assert!(crashes >= 3, "the test killed the hub only {crashes} times");
+    signal(&hub, "-TERM");
+    wait_exit(&mut hub);
+    // Every message, exactly once, in order.
+    let rows = Store::open(&db, None).unwrap().history_all("p").unwrap();
+    let texts: Vec<String> = rows
+        .into_iter()
+        .map(|r| r.text)
+        .filter(|t| t.starts_with("crash-"))
+        .collect();
+    let want: Vec<String> = (1..=TOTAL).map(|n| format!("crash-{n:04}")).collect();
+    assert_eq!(
+        texts, want,
+        "after {crashes} crashes, messages were lost, doubled or reordered"
+    );
 }

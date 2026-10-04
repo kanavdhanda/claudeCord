@@ -179,9 +179,17 @@ pub(crate) async fn run(
                             fx.extend(guard(&mut core, disk.reader(), &conns, &mut report, Some(&node), |c| c.node_disconnected(&node, conn)).unwrap_or_default());
                         }
                         Input::Alive { node } => core.touch(&node, now),
-                        Input::Frame { node, text } => {
+                        Input::Frame { node, text, stamp } => {
                             if let Some(frame) = NodeFrame::parse(&text) {
-                                fx.extend(guard(&mut core, disk.reader(), &conns, &mut report, Some(&node), |c| c.on_node_frame(&node, frame, now)).unwrap_or_default());
+                                // A frame the machine sent again (it had not seen the ack) is taken once. It is acknowledged either way,
+                                // and the ack is held with the rest of the batch until the change it caused is on disk.
+                                let fresh = stamp.is_none_or(|(e, n)| core.accept_seq(&node, e, n));
+                                if fresh {
+                                    fx.extend(guard(&mut core, disk.reader(), &conns, &mut report, Some(&node), |c| c.on_node_frame(&node, frame, now)).unwrap_or_default());
+                                }
+                                if let Some((_, n)) = stamp && let Some(conn) = core.conn_of(&node) {
+                                    fx.push(Effect::Send { conn, frame: HubFrame::Ack { n } });
+                                }
                             }
                         }
                         Input::Call(f) => {

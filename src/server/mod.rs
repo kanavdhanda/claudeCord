@@ -135,6 +135,8 @@ pub(crate) enum Input {
     Frame {
         node: String,
         text: String,
+        /// The machine's epoch and sequence number for this frame, if it numbered it (see `protocol::stamp_of`).
+        stamp: Option<(u64, u64)>,
     },
     /// A heartbeat answer arrived, so the device is alive.
     Alive {

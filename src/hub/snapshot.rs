@@ -176,6 +176,7 @@ impl HubCore {
             "handoffs" => self.handoffs.rows(touched),
             "dump_asked" => self.dump_asked.rows(touched),
             "counters" => self.counters.rows(touched),
+            "device_seq" => self.device_seq.rows(touched),
             "briefed" => self.briefed.rows(touched),
             "roster_dirty" => self.roster_dirty.rows(touched),
             _ => (Vec::new(), Vec::new()),
@@ -195,6 +196,7 @@ impl HubCore {
             "handoffs" => self.handoffs.all_rows(),
             "dump_asked" => self.dump_asked.all_rows(),
             "counters" => self.counters.all_rows(),
+            "device_seq" => self.device_seq.all_rows(),
             "briefed" => self.briefed.all_rows(),
             "roster_dirty" => self.roster_dirty.all_rows(),
             "owners" => vec![self.owners.row()],
@@ -229,6 +231,7 @@ impl HubCore {
         let mut handoffs = HashMap::new();
         let mut dump_asked = HashMap::new();
         let mut counters = HashMap::new();
+        let mut device_seq = HashMap::new();
         let mut briefed = HashSet::new();
         let mut roster_dirty = HashSet::new();
         for (row, body) in rows {
@@ -272,6 +275,9 @@ impl HubCore {
                             dump_asked.extend(parse(&row, &body).map(|v: i64| (key, v)))
                         }
                         "counters" => counters.extend(parse(&row, &body).map(|v: u32| (key, v))),
+                        "device_seq" => {
+                            device_seq.extend(parse(&row, &body).map(|v: [u64; 2]| (key, v)))
+                        }
                         "briefed" => {
                             briefed.insert(key);
                         }
@@ -298,6 +304,7 @@ impl HubCore {
         self.handoffs.load(handoffs);
         self.dump_asked.load(dump_asked);
         self.counters.load(counters);
+        self.device_seq.load(device_seq);
         self.briefed.load(briefed);
         self.roster_dirty.load(roster_dirty);
         self.forget_changes();
@@ -305,7 +312,7 @@ impl HubCore {
 }
 
 /// Every collection that is saved as rows.
-const COLLECTIONS: [&str; 15] = [
+const COLLECTIONS: [&str; 16] = [
     "agents",
     "by_project",
     "members",
@@ -317,6 +324,7 @@ const COLLECTIONS: [&str; 15] = [
     "handoffs",
     "dump_asked",
     "counters",
+    "device_seq",
     "briefed",
     "roster_dirty",
     "owners",

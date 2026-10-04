@@ -418,6 +418,10 @@ impl NodeFrame {
 pub enum HubFrame {
     #[serde(rename = "welcome", rename_all = "camelCase")]
     Welcome { node_id: String },
+    /// Every frame a machine numbered (see `stamp_of`) up to and including `n` is on disk and will not be asked for again. Sent only
+    /// after the change the frame caused is saved, so a machine that has the ack can forget the frame for good.
+    #[serde(rename = "ack")]
+    Ack { n: u64 },
     #[serde(rename = "error")]
     Error { message: String },
     #[serde(rename = "deliver", rename_all = "camelCase")]
@@ -509,6 +513,19 @@ pub enum HubFrame {
         )]
         project: Option<String>,
     },
+}
+
+/// The epoch and sequence number a machine put on a frame, if it did. A machine numbers what it sends (1, 2, 3...) under an epoch chosen
+/// when it starts, keeps each frame until the hub acknowledges it, and sends the unacknowledged ones again after a reconnect. The hub
+/// remembers the last number it took per machine, so a frame sent twice is taken once but acknowledged both times.
+pub fn stamp_of(raw: &str) -> Option<(u64, u64)> {
+    #[derive(Deserialize)]
+    struct Stamp {
+        e: Option<u64>,
+        n: Option<u64>,
+    }
+    let s: Stamp = serde_json::from_str(raw).ok()?;
+    Some((s.e?, s.n?))
 }
 
 impl HubFrame {
