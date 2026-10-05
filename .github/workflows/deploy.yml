@@ -1,49 +1,45 @@
 name: deploy
 
-# Puts a released version on your server (Oracle Cloud or any Linux machine you can SSH into) and checks it is ready. If the new
-# version does not become ready, the old one is put back. Runs when you publish a GitHub release, or by hand with a tag.
-# Set up once (see learnings/ship.md): secrets DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY, DEPLOY_KNOWN_HOSTS; variables HUB_URL and
-# DEPLOY_ARCH (x64 or arm64; Oracle's free Ampere machines are arm64).
+# Puts a version of the hub's container image on your server and checks it is ready. If the new version does not become ready, the one that
+# was running is put back. Run it by hand (Actions > deploy > Run workflow) with an image tag: `latest`, a `sha-...` tag from the docker
+# workflow, or a release such as `v0.2.1`. The server must already have deploy/compose.yml set up in DEPLOY_DIR (see that file).
+# Set up once: secrets DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY, DEPLOY_KNOWN_HOSTS; variables HUB_URL (https://claudecord.kdhanda.com)
+# and DEPLOY_DIR (the folder holding compose.yml on the server, such as /opt/claudecord).
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to deploy, such as v0.2.0
+        description: Image tag to run (latest, sha-..., v0.2.1)
         required: true
+        default: latest
 
 concurrency: deploy
 
 jobs:
   deploy:
-    if: vars.DEPLOY_ARCH != ''
+    if: vars.DEPLOY_DIR != ''
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - name: Get the program from the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name || inputs.tag }}
-        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "claudecord-linux-${{ vars.DEPLOY_ARCH }}" --output claudecord
       - name: Trust only the server we pinned
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id; chmod 600 ~/.ssh/id
           echo "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
-      - name: Install, restart, check, roll back on failure
+      - name: Pull, restart, check, roll back on failure
+        env:
+          TAG: ${{ inputs.tag }}
+          DIR: ${{ vars.DEPLOY_DIR }}
         run: |
           ssh_ () { ssh -i ~/.ssh/id -o StrictHostKeyChecking=yes "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" "$@"; }
-          scp -i ~/.ssh/id -o StrictHostKeyChecking=yes claudecord "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/tmp/claudecord.new"
-          ssh_ 'set -e
-            sudo cp -f /usr/local/bin/claudecord /usr/local/bin/claudecord.previous 2>/dev/null || true
-            sudo install -m 755 /tmp/claudecord.new /usr/local/bin/claudecord
-            sudo systemctl restart claudecord-hub'
+          # The tag that runs now is kept in .tag so a failed deploy can put it back.
+          ssh_ "cd '$DIR' && { cat .tag 2>/dev/null || echo latest; } > .tag.previous && echo '$TAG' > .tag \
+            && CLAUDECORD_TAG='$TAG' docker compose pull && CLAUDECORD_TAG='$TAG' docker compose up -d"
           for i in $(seq 1 20); do
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "${{ vars.HUB_URL }}/readyz" || true)
             [ "$code" = "200" ] && { echo "ready after $i checks"; exit 0; }
             sleep 3
           done
           echo "the new version never became ready, putting the previous one back"
-          ssh_ 'sudo install -m 755 /usr/local/bin/claudecord.previous /usr/local/bin/claudecord && sudo systemctl restart claudecord-hub'
+          ssh_ "cd '$DIR' && PREV=\$(cat .tag.previous) && echo \$PREV > .tag && CLAUDECORD_TAG=\$PREV docker compose up -d"
           exit 1

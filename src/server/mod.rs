@@ -378,9 +378,18 @@ pub fn spawn_core(cfg: Config, core: HubCore, store: Store) -> Hub {
     }
 }
 
-/// Behind a reverse proxy on this machine (Caddy, nginx) every request arrives from 127.0.0.1, so one person's failed sign-ins would block
-/// everybody and the rate limits would be shared. When the direct peer is this machine, the address the proxy reports in
-/// `X-Forwarded-For` (its last entry, the one the proxy itself added) is used instead. Anyone not on this machine cannot choose their address.
+/// Whether a connection comes from this machine or from a private network address, which is where a reverse proxy sits: on the same host, or
+/// outside the container the hub runs in (Docker shows the host to it as a private address, not as 127.0.0.1).
+fn from_proxy_side(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
+        std::net::IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00,
+    }
+}
+
+/// Behind a reverse proxy every request arrives from the proxy's address, so one person's failed sign-ins would block everybody and the rate
+/// limits would be shared. When the direct peer is on the proxy's side, the address the proxy reports in `X-Forwarded-For` (its last entry, the
+/// one the proxy itself added) is used instead. Anyone reaching the hub from a public address cannot choose theirs.
 pub(crate) async fn real_client(
     mut req: axum::extract::Request,
     next: axum::middleware::Next,
@@ -390,7 +399,7 @@ pub(crate) async fn real_client(
         .get::<ConnectInfo<SocketAddr>>()
         .map(|c| c.0);
     if let Some(peer) = peer
-        && peer.ip().is_loopback()
+        && from_proxy_side(peer.ip())
         && let Some(ip) = req
             .headers()
             .get("x-forwarded-for")
@@ -536,3 +545,27 @@ fn watchdog(handle: HubHandle) {
 }
 
 pub(crate) use crate::now_ms;
+
+#[cfg(test)]
+mod proxy_tests {
+    use super::from_proxy_side;
+
+    #[test]
+    fn only_this_machine_and_private_addresses_may_name_the_client() {
+        let yes = [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.18.0.1",
+            "192.168.1.5",
+            "::1",
+            "fd00::1",
+        ];
+        let no = ["203.0.113.9", "8.8.8.8", "172.32.0.1", "2001:db8::1"];
+        for a in yes {
+            assert!(from_proxy_side(a.parse().unwrap()), "{a}");
+        }
+        for a in no {
+            assert!(!from_proxy_side(a.parse().unwrap()), "{a}");
+        }
+    }
+}

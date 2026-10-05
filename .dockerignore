@@ -1,4 +1,7 @@
-target
-.git
-learnings
-docs
+# Nothing the image is not built from goes to the builder (it is sent on every build).
+**
+!Cargo.toml
+!Cargo.lock
+!src/**
+!examples/**
+!web/dist/**

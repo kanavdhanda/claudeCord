@@ -1,0 +1,39 @@
+# Runs the hosted hub from the image GitHub builds (see .github/workflows/docker.yml). On the server, in a folder of its own:
+#
+#   1. copy this file there as compose.yml
+#   2. put the Discord application's client secret in a file called oauth-secret next to it and make the container's user able to read it:
+#        sudo chown 65532:65532 oauth-secret && sudo chmod 400 oauth-secret
+#   3. make a file called .env next to it with:   DISCORD_CLIENT_ID=<the application id>
+#   4. docker compose up -d          (docker compose pull first to get a newer image)
+#
+# The port is published on 127.0.0.1 only, so the only way in is the proxy on the same machine (nginx or Caddy, doing TLS); it must pass the
+# client's address on in X-Forwarded-For (see the README). The hub trusts that header only from this machine or a private network address.
+services:
+  hub:
+    image: ghcr.io/kanavdhanda/claudecord:${CLAUDECORD_TAG:-latest}
+    restart: unless-stopped
+    command:
+      - serve
+      - --data=/data
+      - --bind=0.0.0.0:8787
+      - --allow-plain
+      - --public-url=https://claudecord.kdhanda.com
+      - --client-id=${DISCORD_CLIENT_ID:?set DISCORD_CLIENT_ID in .env}
+      - --secret-file=/run/secrets/oauth-secret
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - claudecord-data:/data
+      - ./oauth-secret:/run/secrets/oauth-secret:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    ulimits:
+      nofile: 65535
+    stop_grace_period: 30s
+
+volumes:
+  claudecord-data:
