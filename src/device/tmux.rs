@@ -340,6 +340,9 @@ impl TmuxTerminal {
                     &self.session,
                 ],
             )?;
+            // Give a real UI time to finish taking the paste, or its Enter can be swallowed as part of it.
+            // ponytail: blocks this thread 150 ms per paste; make it async if many agents get messages at once.
+            std::thread::sleep(std::time::Duration::from_millis(150));
             Self::tmux(&self.socket, &["send-keys", "-t", &self.session, "Enter"])?;
             Ok(())
         })();

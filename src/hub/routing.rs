@@ -151,6 +151,12 @@ impl HubCore {
             items: vec![],
             at: now,
         };
+        // One wake-up is one turn, however many messages ride in it; the characters stand in for the input it will cost.
+        let chars: usize = items.iter().map(|q| q.text.chars().count()).sum();
+        Self::event(&a.project, "turn", &a.name, "", chars as f64, now, fx);
+        for q in &items {
+            Self::event(&a.project, "edge", &q.from, &a.name, 1.0, now, fx);
+        }
         for (i, q) in items.into_iter().enumerate() {
             pending.references.extend(q.reference.clone());
             pending.task_ids.extend(q.task_id.clone());

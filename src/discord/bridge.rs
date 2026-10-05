@@ -24,9 +24,36 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc};
 
+/// Where one project posts, as the hosted service's dashboard set it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Target {
+    /// Which of the account's bots serves this project.
+    pub bot: String,
+    pub guild: String,
+    pub channel: String,
+}
+
+/// Where each project of an account lives in Discord. In the hosted service the person picks this on the dashboard, so the bridge asks
+/// instead of finding a channel by name in one server.
+pub trait Targets: Send + Sync {
+    /// Where a project posts, if it has been placed.
+    fn target(&self, project: &str) -> Option<(String, Target)>;
+    /// Every placed project served by this bot, as (project, target).
+    fn mine(&self, bot: &str) -> Vec<(String, Target)>;
+}
+
+/// What makes a bridge serve only one bot of an account, in any of that bot's servers.
+#[derive(Clone)]
+pub struct Scope {
+    pub bot_id: String,
+    pub targets: std::sync::Arc<dyn Targets>,
+}
+
 /// How the bridge connects.
 #[derive(Clone)]
 pub struct BridgeConfig {
+    /// Set in the hosted service: this bridge serves one bot and the places the dashboard chose. None is the single-server mode.
+    pub scope: Option<Scope>,
     /// Normally `https://discord.com/api/v10`.
     pub api_base: String,
     pub token: String,
@@ -71,10 +98,15 @@ pub fn spawn(
 }
 
 struct Bridge {
+    scope: Option<Scope>,
+    /// Channels and threads this bridge serves (only used with a scope), so it never reads another bot's channels.
+    owned: std::collections::HashSet<String>,
     rest: Rest,
     kv: Store,
     handle: HubHandle,
     guild: String,
+    /// The name this bridge's up/down record is kept under.
+    component: String,
     owner: Option<String>,
     /// The last status text shown per project, and when, so the status message is only edited when it changes.
     status_shown: HashMap<String, (String, Instant)>,
@@ -111,19 +143,46 @@ async fn run(handle: HubHandle, mut chat: broadcast::Receiver<Chat>, cfg: Bridge
         .or_else(|| me["team"]["owner_user_id"].as_str())
         .map(String::from);
     let mut owners = cfg.owners.clone();
-    owners.extend(owner.clone());
+    // In the hosted service the owner is the account's own person; a bot's Discord owner gets no say in someone else's team.
+    let owner = if cfg.scope.is_some() {
+        cfg.owners.first().cloned()
+    } else {
+        owners.extend(owner.clone());
+        owner
+    };
     for o in owners {
         handle.call(move |c, _| (c.add_owner(&o), vec![])).await;
     }
-    if !app_id.is_empty()
-        && let Err(e) = rest
-            .register_commands(&app_id, &cfg.guild, commands::definitions())
-            .await
-    {
-        crate::error!("discord", "could not register the slash commands: {e}");
+    if !app_id.is_empty() {
+        // One server in the single-server mode; every server the bot is in when it serves an account.
+        let guilds: Vec<String> = if cfg.scope.is_some() {
+            rest.my_guilds()
+                .await
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|g| g["id"].as_str().map(String::from))
+                .collect()
+        } else {
+            vec![cfg.guild.clone()]
+        };
+        for g in guilds {
+            if let Err(e) = rest
+                .register_commands(&app_id, &g, commands::definitions())
+                .await
+            {
+                crate::error!(
+                    "discord",
+                    "could not register the slash commands in {g}: {e}"
+                );
+            }
+        }
     }
     // Down until the gateway says READY, so a bridge that never connects shows as down.
-    let _ = kv.uptime_set("discord", crate::uptime::State::Down, crate::now_ms());
+    let component = match &cfg.scope {
+        Some(sc) => format!("discord:{}", sc.bot_id),
+        None => "discord".to_string(),
+    };
+    let _ = kv.uptime_set(&component, crate::uptime::State::Down, crate::now_ms());
     let (ev_tx, mut events) = mpsc::channel(256);
     let _gateway = gateway::spawn(
         rest.clone(),
@@ -135,6 +194,9 @@ async fn run(handle: HubHandle, mut chat: broadcast::Receiver<Chat>, cfg: Bridge
         ev_tx,
     );
     let mut b = Bridge {
+        scope: cfg.scope.clone(),
+        owned: Default::default(),
+        component,
         rest,
         kv,
         handle,
@@ -169,6 +231,25 @@ impl Bridge {
 
     /// Watches every channel and thread this bridge already knew from earlier runs (those not yet watched start from now).
     async fn watch_known(&mut self) {
+        if let Some(sc) = self.scope.clone() {
+            // Serving an account: what this bridge knows is what the dashboard placed for its bot, plus the threads made in those places.
+            for (project, t) in sc.targets.mine(&sc.bot_id) {
+                self.adopt(&project, &t.channel).await;
+            }
+            for (k, v) in self.kv.kv_scan("threadrev:").unwrap_or_default() {
+                let id = k["threadrev:".len()..].to_string();
+                let project = v.split('\n').next().unwrap_or("");
+                if sc
+                    .targets
+                    .target(project)
+                    .is_some_and(|(_, t)| t.bot == sc.bot_id)
+                {
+                    self.owned.insert(id.clone());
+                    watch(&self.handle, &id).await;
+                }
+            }
+            return;
+        }
         let known = ["chanrev:", "threadrev:"]
             .iter()
             .flat_map(|prefix| {
@@ -198,6 +279,10 @@ impl Bridge {
             .unwrap_or_default();
         let mut taken = 0usize;
         for (channel, last) in channels {
+            // Another bot of the same account serves the channels that are not this bridge's.
+            if self.scope.is_some() && !self.owned.contains(&channel) {
+                continue;
+            }
             let mut after = last;
             loop {
                 let mut msgs = match self.rest.messages_after(&channel, &after.to_string()).await {
@@ -241,6 +326,18 @@ impl Bridge {
 
     /// The Discord channel for a project, found by name or made, remembered either way.
     async fn channel(&mut self, project: &str) -> Option<String> {
+        if let Some(sc) = self.scope.clone() {
+            // Serving an account: the place is the one the person chose on the dashboard, never a guess by name. A project nobody has
+            // placed, or one placed with another of the account's bots, is not this bridge's to post.
+            let (_, t) = sc.targets.target(project)?;
+            if t.bot != sc.bot_id {
+                return None;
+            }
+            if !self.owned.contains(&t.channel) {
+                self.adopt(project, &t.channel).await;
+            }
+            return Some(t.channel);
+        }
         if let Some(id) = self.get(&format!("chan:{project}")) {
             return Some(id);
         }
@@ -263,6 +360,14 @@ impl Bridge {
         Some(id)
     }
 
+    /// Starts serving a channel for a project: remembers which project it is, and starts taking what people say in it.
+    async fn adopt(&mut self, project: &str, channel: &str) {
+        self.set(&format!("chan:{project}"), channel);
+        self.set(&format!("chanrev:{channel}"), project);
+        self.owned.insert(channel.to_string());
+        watch(&self.handle, channel).await;
+    }
+
     /// The webhook for a channel (made once), as (id, token).
     async fn webhook(&mut self, channel: &str) -> Option<(String, String)> {
         if let Some(v) = self.get(&format!("wh:{channel}"))
@@ -277,7 +382,12 @@ impl Bridge {
 
     /// The Discord thread for a named thread in a project (made on first use).
     async fn thread(&mut self, project: &str, channel: &str, name: &str) -> Option<String> {
-        let key = format!("thread:{project}:{name}");
+        // Serving an account, the key names the channel too: a project moved to another channel must not reuse the old channel's thread.
+        let key = if self.scope.is_some() {
+            format!("thread:{project}:{channel}:{name}")
+        } else {
+            format!("thread:{project}:{name}")
+        };
         if let Some(id) = self.get(&key) {
             return Some(id);
         }
@@ -288,6 +398,7 @@ impl Bridge {
             .ok()?;
         self.set(&key, &id);
         self.set(&format!("threadrev:{id}"), &format!("{project}\n{name}"));
+        self.owned.insert(id.clone());
         watch(&self.handle, &id).await;
         Some(id)
     }
@@ -308,6 +419,15 @@ impl Bridge {
 
     /// Carries out one thing the core wants shown. Failures are reported to the log and never stop the bridge.
     async fn outward(&mut self, c: Chat) {
+        // Serving an account: a project placed with another of its bots, or not placed at all, is not this bridge's to show.
+        if let Some(sc) = &self.scope
+            && !sc
+                .targets
+                .target(c.project())
+                .is_some_and(|(_, t)| t.bot == sc.bot_id)
+        {
+            return;
+        }
         let result: Result<(), String> = async {
             match c {
                 Chat::EnsureProject(p) => {
@@ -464,7 +584,7 @@ impl Bridge {
         if let Some(state) = state
             && self
                 .kv
-                .uptime_set("discord", state, crate::now_ms())
+                .uptime_set(&self.component, state, crate::now_ms())
                 .unwrap_or(false)
         {
             match state {

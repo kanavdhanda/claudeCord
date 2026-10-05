@@ -193,6 +193,7 @@ pub fn bridge_config(data: &Path) -> Result<Option<BridgeConfig>, String> {
     }
     let s = load(&path)?;
     Ok(Some(BridgeConfig {
+        scope: None,
         api_base: "https://discord.com/api/v10".into(),
         token: s.token,
         guild: s.guild,

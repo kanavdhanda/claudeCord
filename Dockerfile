@@ -9,6 +9,7 @@ RUN apk add --no-cache musl-dev
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY web/dist ./web/dist
 COPY examples ./examples
 RUN cargo build --release --bin claudecord
 

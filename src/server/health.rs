@@ -69,7 +69,7 @@ pub(super) async fn readyz(State(st): State<AppState>) -> Response {
 
 /// Availability and budget per component over every window.
 /// The same, worked out on a thread meant for blocking work.
-async fn summary(st: &AppState) -> Value {
+pub(super) async fn summary(st: &AppState) -> Value {
     let (reader, target) = (st.reader.clone(), st.cfg.uptime_target);
     tokio::task::spawn_blocking(move || summary_blocking(&reader, target))
         .await

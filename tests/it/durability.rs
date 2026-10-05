@@ -177,12 +177,12 @@ fn saving_only_what_changed_always_rebuilds_exactly_the_state_in_memory() {
         // Every few steps: save what changed, and check the rows rebuild the state.
         if step % 7 == 0 {
             let changes = core.take_changes();
-            db.commit(&[], &[], &[changes]).unwrap();
+            db.commit(&[], &[], &[], &[changes]).unwrap();
             same_state(&core, db.load_state().unwrap());
         }
     }
     let changes = core.take_changes();
-    db.commit(&[], &[], &[changes]).unwrap();
+    db.commit(&[], &[], &[], &[changes]).unwrap();
     same_state(&core, db.load_state().unwrap());
     assert!(
         db.load_state().unwrap().len() > 20,
@@ -208,7 +208,7 @@ fn an_older_single_text_save_is_moved_into_rows_without_losing_anything() {
     assert!(moved.restore(&text));
     moved.mark_all_dirty();
     let mut db = Store::open_memory().unwrap();
-    db.commit(&[], &[], &[moved.take_changes()]).unwrap();
+    db.commit(&[], &[], &[], &[moved.take_changes()]).unwrap();
     same_state(&moved, db.load_state().unwrap());
     assert!(
         db.load_state()

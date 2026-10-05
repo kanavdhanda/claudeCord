@@ -1958,3 +1958,63 @@ fn an_agent_can_answer_a_peers_question_once_but_not_its_own() {
         "a second answer is told it was too late"
     );
 }
+
+fn posts(fx: &[Effect]) -> Vec<(String, Option<String>)> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Chat(Chat::Post { text, thread, .. }) => Some((text.clone(), thread.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_task_gets_its_own_thread_by_itself_and_what_the_worker_says_goes_there_until_it_is_done() {
+    let mut w = World::new();
+    w.join("mac", 1, "otter");
+    w.join("gpu", 2, "heron");
+    let fx = w.core.on_node_frame(
+        "mac",
+        NodeFrame::AgentAssign {
+            agent_id: "p/otter".into(),
+            to: "heron".into(),
+            task: "build   the login page".into(),
+            thread: None,
+        },
+        T0,
+    );
+    assert_eq!(
+        posts(&fx)[0].1.as_deref(),
+        Some("T1 build the login page"),
+        "the task opens a thread named after itself"
+    );
+    let say = |w: &mut World, text: &str| {
+        posts(&w.core.on_node_frame(
+            "gpu",
+            NodeFrame::AgentSay {
+                agent_id: "p/heron".into(),
+                text: text.into(),
+                thread: None,
+            },
+            T0 + 1,
+        ))
+    };
+    assert_eq!(
+        say(&mut w, "working")[0].1.as_deref(),
+        Some("T1 build the login page")
+    );
+    w.core.on_node_frame(
+        "gpu",
+        NodeFrame::AgentTaskDone {
+            agent_id: "p/heron".into(),
+            task_id: "T1".into(),
+            summary: "done".into(),
+        },
+        T0 + 2,
+    );
+    assert_eq!(
+        say(&mut w, "free now")[0].1,
+        None,
+        "with no open task, it is the main chat"
+    );
+}

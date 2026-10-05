@@ -25,6 +25,14 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | `src/cli/uptime.rs` | `claudecord uptime` shows how much of the time each part was working; `claudecord probe` checks a hub from the outside (run it on a different machine) and keeps its own record of what it saw. |
 | `src/cli/verbs.rs` | The commands an agent runs in its own shell. |
 
+## src/control
+
+| File | What it is |
+|---|---|
+| `src/control/mod.rs` | The control plane: the one small database (`control.db`) that knows WHO exists, before any team's own data is touched. |
+| `src/control/registry.rs` | The tenant registry: one running hub per account, started the first time it is needed. |
+| `src/control/seal.rs` | Sealing secrets that must be stored but never shown again, such as a Discord bot token. |
+
 ## src/device
 
 | File | What it is |
@@ -32,6 +40,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | `src/device/config.rs` | What a machine remembers between runs: the hub address, its token, and its name. |
 | `src/device/daemon.rs` | The daemon: the one program that runs on a machine with agents. |
 | `src/device/doctor.rs` | `claudecord doctor`: checks, step by step, whether this machine can reach the hub, and says plainly where it stops. |
+| `src/device/enroll.rs` | A machine joining a hub with no token typed by anyone: it asks the hub for a short code, shows the person a link, and waits while they sign in with Discord in a browser and approve it. |
 | `src/device/inject.rs` | When it is safe to type into an agent's terminal on someone's behalf. |
 | `src/device/ipc.rs` | How the `claudecord` command talks to the daemon on the same machine: one JSON line each way over a unix socket in the user's claudeCord folder (a unix socket there, or a named pipe on Windows). |
 | `src/device/link.rs` | The connection from a machine to the hub. |
@@ -66,6 +75,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 |---|---|
 | `src/health/mod.rs` | The health check: boots the real parts of the system in this process and exercises every feature, to prove each one is not just present but wired up and working. |
 | `src/health/probes_core.rs` | Health probes for the parts that are pure logic: the wire format, secret scrubbing, the rules in the hub core, the saved state, storage and metrics. |
+| `src/health/probes_hosted.rs` | Health probes for the hosted service: accounts and sealed secrets (pure logic), and the front door with a machine joining through a browser approval while a second account sees none of it. |
 | `src/health/probes_live.rs` | Health probes for the running pieces: the hub server, the device's link and terminals, the daemon with a stand-in agent, and the command line. |
 
 ## src/hub
@@ -93,6 +103,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 
 | File | What it is |
 |---|---|
+| `src/metrics/events.rs` | Turning the stored events (see `crate::hub::Persist::Event`) into what the dashboard's graphs show: who talks to whom, each agent's state over time, how work flows from task to done and how long questions wait, and what the turns cost. |
 | `src/metrics/mod.rs` | Counters for the dashboard's insights. |
 
 ## src/protocol
@@ -116,7 +127,11 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | File | What it is |
 |---|---|
 | `src/server/actor.rs` | The actor: the one task that owns the hub core and the store. |
+| `src/server/app.rs` | The dashboard app: the React page built in `web/` (`npm run build`), embedded in the program so there is nothing separate to host. |
+| `src/server/bots.rs` | The dashboard's bot and workspace endpoints: saving a Discord bot token (sealed, never shown again), listing the servers and channels the bot can reach, choosing or making the channel a project posts to, and starting another agent on one of the account's machines. |
+| `src/server/demo.rs` | Demo data for `claudecord serve --dev`: so the dashboard has something to show without any real machine or Discord. |
 | `src/server/disk.rs` | The hub's disk writes, kept off the async runtime, and the one rule they serve: NOTHING is sent, reacted to or acknowledged until the change that caused it is on disk. |
+| `src/server/gateway.rs` | The gateway: the hosted service's one front door. |
 | `src/server/health.rs` | What a prober, a load balancer and the dashboard ask the hub about its own health. |
 | `src/server/login.rs` | "Sign in with Discord" for the dashboard, the standard OAuth2 code flow. |
 | `src/server/mod.rs` | The hub as a running server: one small web server that accepts devices over WebSocket, feeds what they send to the hub core, and carries out what the core asks for. |
@@ -162,6 +177,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | `tests/it/e2e.rs` | Everything together, on one machine: a real hub, a real device daemon, and a stand-in agent (a shell script named `claude` that prints the ready line and echoes each line it is given). |
 | `tests/it/edge.rs` | Edge cases and randomised checks: hostile or odd input must never panic, and rules that must hold for every input are checked on many generated ones (from a fixed seed, so a failure repeats). |
 | `tests/it/export.rs` | The Obsidian export: what notes it makes, that the links are right so the graph shows real connections, that running it again changes nothing, and that it includes history that has moved into compressed files. |
+| `tests/it/gateway.rs` | The hosted front door against a stand-in Discord sign-in: accounts are made on first sign-in, a machine with no token is approved by a person through a short code, the token it gets connects to THAT account's hub and no other, and one account never sees another's machines. |
 | `tests/it/health.rs` | The health check as a test: every feature must pass its probe, and every source file must be claimed by a probe, so a new module cannot be added without a check that it is alive. |
 | `tests/it/hub.rs` | Behaviour tests for the hub core. |
 | `tests/it/logs.rs` | The per-agent log files: what they keep, how they are trimmed and what is removed before anyone reads them. |

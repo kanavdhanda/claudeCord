@@ -64,6 +64,9 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y musl-tools
         if: contains(matrix.target, 'musl')
       - run: cargo build --release --target ${{ matrix.target }} --bin claudecord
+        env:
+          # The address a downloaded program goes to when nothing else is said (src/device/enroll.rs).
+          CLAUDECORD_HUB: https://claudecord.kdhanda.com
       - run: cp target/${{ matrix.target }}/release/claudecord${{ matrix.ext }} claudecord-${{ matrix.name }}${{ matrix.ext }}
         shell: bash
       - uses: actions/upload-artifact@v4

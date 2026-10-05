@@ -923,6 +923,7 @@ fn discord_probe() -> Probe {
             link_opts(),
         );
         let cfg = bridge::BridgeConfig {
+            scope: None,
             api_base: format!("http://{addr}/api"),
             token: "bot".into(),
             guild: "g1".into(),

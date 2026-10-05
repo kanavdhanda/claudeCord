@@ -64,6 +64,23 @@ pub enum Chat {
     RefreshStatus(String),
 }
 
+impl Chat {
+    /// The project this is about. Every kind of chat effect belongs to one.
+    pub fn project(&self) -> &str {
+        match self {
+            Chat::EnsureProject(p) | Chat::RefreshStatus(p) => p,
+            Chat::Post { project, .. }
+            | Chat::Ask { project, .. }
+            | Chat::Permission { project, .. }
+            | Chat::Resolved { project, .. }
+            | Chat::Report { project, .. }
+            | Chat::File { project, .. }
+            | Chat::Notice { project, .. }
+            | Chat::Confirm { project, .. } => project,
+        }
+    }
+}
+
 /// Something to save. The core keeps live state in memory, and the store only has to keep up.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Persist {
@@ -88,6 +105,17 @@ pub enum Persist {
         agent_id: String,
         seq: u32,
         text: String,
+        at: i64,
+    },
+    /// One measurable thing that happened, for the dashboard's graphs: an agent changing state (`status`), a message reaching an agent
+    /// (`edge`, from `a` to `b`), an agent being woken (`turn`, `n` characters delivered), a question being asked (`ask_open`) or
+    /// answered (`ask_done`, `n` ms waited), a task changing state (`task`).
+    Event {
+        project: String,
+        kind: &'static str,
+        a: String,
+        b: String,
+        n: f64,
         at: i64,
     },
     /// A decision worth remembering: who allowed or denied what, and when.

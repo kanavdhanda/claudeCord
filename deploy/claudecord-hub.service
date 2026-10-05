@@ -16,7 +16,8 @@ NotifyAccess=main
 WatchdogSec=30
 TimeoutStopSec=30
 User=claudecord
-ExecStart=/usr/local/bin/claudecord hub --data /var/lib/claudecord --bind 127.0.0.1:8787 --owner YOUR_DISCORD_USER_ID
+# For the hosted service. (The single-team `claudecord hub --owner ID` still exists for self-hosting one team.)
+ExecStart=/usr/local/bin/claudecord serve --data /var/lib/claudecord --bind 127.0.0.1:8787 --public-url https://hub.example.com --client-id YOUR_DISCORD_APP_ID --secret-file /var/lib/claudecord/oauth-secret
 Restart=always
 RestartSec=2
 # The Discord token and bucket keys are files in the data folder (mode 0600), never environment variables.

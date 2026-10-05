@@ -83,6 +83,21 @@ impl Rest {
             .await
     }
 
+    /// Who the bot is as a user (its id and name). This is also how a pasted token is proven real: Discord answers 401 for a wrong one.
+    pub async fn bot_user(&self) -> Result<Value> {
+        self.call(Method::GET, "/users/@me", None).await
+    }
+
+    /// The servers the bot has been added to.
+    pub async fn my_guilds(&self) -> Result<Vec<Value>> {
+        Ok(self
+            .call(Method::GET, "/users/@me/guilds", None)
+            .await?
+            .as_array()
+            .cloned()
+            .unwrap_or_default())
+    }
+
     /// The address of the real-time gateway.
     pub async fn gateway_url(&self) -> Result<String> {
         let v = self.call(Method::GET, "/gateway/bot", None).await?;

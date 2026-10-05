@@ -2,7 +2,12 @@
 # Sets up a claudeCord hub on a fresh Linux machine that uses systemd (Ubuntu or Debian, such as an Oracle Cloud Always Free VM), in one go:
 # the program, a service that restarts it (and restarts a hung one), TLS from Let's Encrypt through Caddy, and the firewall openings.
 #
-#   sudo ./bootstrap.sh --domain hub.example.com --owner YOUR_DISCORD_USER_ID [--binary ./claudecord | --version v0.2.0]
+#   sudo ./bootstrap.sh --domain claudecord.example.com --client-id DISCORD_APP_ID --secret-file secret.txt [--binary ./claudecord | --version v0.2.0]
+#
+# This sets up the hosted service: people sign in with Discord, add their own bots on the dashboard, and join machines by a code. The
+# Discord application named by --client-id is only for signing people in (create it in the Discord developer portal and add
+# https://YOUR-DOMAIN/auth/callback under OAuth2 > Redirects). Their bots are separate and are saved on the dashboard, encrypted with a
+# key the program makes on first start in /var/lib/claudecord/kek. BACK THAT FILE UP: without it every saved bot token is lost.
 #
 # Before running it: the domain's A record must already point at this machine (Caddy asks Let's Encrypt for a certificate as soon as it starts),
 # and ports 80 and 443 must be open in the provider's network settings (on Oracle: the VCN security list). It can be run again safely.
@@ -11,21 +16,23 @@
 # NOTE: written carefully but not yet run on a real server. Run it on a throwaway machine first, or read it line by line.
 set -euo pipefail
 
-domain=""; owner=""; binary=""; version="latest"
+domain=""; client=""; secret=""; binary=""; version="latest"
 while [ $# -gt 0 ]; do
   case "$1" in
     --domain) domain=${2:?}; shift 2 ;;
-    --owner) owner=${2:?}; shift 2 ;;
+    --client-id) client=${2:?}; shift 2 ;;
+    --secret-file) secret=${2:?}; shift 2 ;;
     --binary) binary=${2:?}; shift 2 ;;
     --version) version=${2:?}; shift 2 ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
 done
-[ -n "$domain" ] && [ -n "$owner" ] || { echo "usage: $0 --domain NAME --owner DISCORD_USER_ID [--binary FILE | --version TAG]" >&2; exit 2; }
+[ -n "$domain" ] && [ -n "$client" ] && [ -n "$secret" ] || { echo "usage: $0 --domain NAME --client-id DISCORD_APP_ID --secret-file FILE [--binary FILE | --version TAG]" >&2; exit 2; }
+[ -f "$secret" ] || { echo "$secret is not a file" >&2; exit 2; }
 [ "$(id -u)" = 0 ] || { echo "run this as root (sudo)" >&2; exit 1; }
 command -v systemctl >/dev/null || { echo "this needs a machine that uses systemd" >&2; exit 1; }
-# The owner id ends up in a service file and a command line, so only digits are accepted.
-case "$owner" in *[!0-9]*|"") echo "--owner is your Discord user id: digits only" >&2; exit 2 ;; esac
+# The application id ends up in a service file and a command line, so only digits are accepted.
+case "$client" in *[!0-9]*|"") echo "--client-id is the Discord application id: digits only" >&2; exit 2 ;; esac
 case "$domain" in *[!A-Za-z0-9.-]*|"") echo "--domain looks wrong: $domain" >&2; exit 2 ;; esac
 
 # 1. The program.
@@ -49,6 +56,7 @@ install -m 755 "$binary" /usr/local/bin/claudecord
 # 2. A user of its own, and a folder only it can use.
 id claudecord >/dev/null 2>&1 || useradd --system --create-home --shell /usr/sbin/nologin claudecord
 install -d -m 750 -o claudecord -g claudecord /var/lib/claudecord
+install -m 600 -o claudecord -g claudecord "$secret" /var/lib/claudecord/oauth-secret
 
 # 3. The service: starts at boot, restarts if it dies, and restarts if its core hangs (it tells systemd it is alive every few seconds).
 cat > /etc/systemd/system/claudecord-hub.service <<UNIT
@@ -64,7 +72,7 @@ NotifyAccess=main
 WatchdogSec=30
 TimeoutStopSec=30
 User=claudecord
-ExecStart=/usr/local/bin/claudecord hub --data /var/lib/claudecord --bind 127.0.0.1:8787 --owner $owner --vault /var/lib/claudecord/vault
+ExecStart=/usr/local/bin/claudecord serve --data /var/lib/claudecord --bind 127.0.0.1:8787 --public-url https://$domain --client-id $client --secret-file /var/lib/claudecord/oauth-secret
 Restart=always
 RestartSec=2
 NoNewPrivileges=true
@@ -113,9 +121,7 @@ for _ in $(seq 1 30); do
 done
 [ "${code:-}" = 200 ] || { echo "the hub did not come up; see: journalctl -u claudecord-hub -n 50" >&2; exit 1; }
 echo
-echo "The hub is running. Check from outside in a minute (the certificate is being fetched):  curl -s https://$domain/readyz"
-echo "Next, as the claudecord user (sudo -u claudecord ...), set up Discord, then restart the hub:"
-echo "  claudecord discord set --guild YOUR_SERVER_ID --token-file bot-token.txt --data /var/lib/claudecord"
-echo "  claudecord discord oauth --client-id APP_ID --secret-file secret.txt --url https://$domain --data /var/lib/claudecord"
-echo "  sudo systemctl restart claudecord-hub"
-echo "Machines join with:  claudecord token mac --data /var/lib/claudecord   (on this server), then claudecord login on the machine."
+echo "The service is running. Check from outside in a minute (the certificate is being fetched):  curl -s https://$domain/readyz"
+echo "Open https://$domain, sign in with Discord, and the dashboard walks you through adding a bot and a project."
+echo "BACK UP /var/lib/claudecord/kek (it seals every saved bot token) and /var/lib/claudecord/control.db."
+echo "On a machine: npx claudecord  (it opens a browser to approve the machine)."

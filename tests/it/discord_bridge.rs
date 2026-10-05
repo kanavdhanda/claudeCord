@@ -125,6 +125,7 @@ async fn rig_with(name: &str, me_failures: usize) -> Rig {
         },
     );
     let cfg = BridgeConfig {
+        scope: None,
         api_base: format!("http://{addr}/api"),
         token: "bottoken".into(),
         guild: "g1".into(),

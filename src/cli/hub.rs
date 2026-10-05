@@ -31,6 +31,32 @@ pub struct HubArgs {
 }
 
 #[derive(Args)]
+pub struct ServeArgs {
+    /// Where the service keeps its files (the control database, the key file, and a folder per account).
+    #[arg(long, default_value = "claudecord-data")]
+    pub data: PathBuf,
+    /// Address to listen on. Put a TLS proxy (Caddy) in front and keep this on 127.0.0.1.
+    #[arg(long, default_value = "127.0.0.1:8787")]
+    pub bind: String,
+    /// The address people open in a browser, such as https://claudecord.example.com. Sign-in comes back to `<this>/auth/callback`.
+    #[arg(long)]
+    pub public_url: String,
+    /// The Discord application used to sign people in (not their bots). Create it in the Discord developer portal.
+    #[arg(long, required_unless_present = "dev")]
+    pub client_id: Option<String>,
+    /// File holding that application's client secret.
+    #[arg(long, required_unless_present = "dev")]
+    pub secret_file: Option<PathBuf>,
+    /// Try it on this machine with no Discord at all: sign-in lets you in as a made-up person and the servers and channels come from a
+    /// built-in stand-in. Only runs on 127.0.0.1.
+    #[arg(long)]
+    pub dev: bool,
+    /// Allow listening on a public address without TLS.
+    #[arg(long)]
+    pub allow_plain: bool,
+}
+
+#[derive(Args)]
 pub struct TokenArgs {
     /// The machine's name.
     pub node: String,
@@ -72,8 +98,12 @@ pub async fn run_hub(a: HubArgs) -> Result<(), String> {
     crate::log::init(Some(a.data.join("hub.log")));
     // Find the problems that can be found before serving anyone, and say them plainly, rather than failing in the middle of the night.
     preflight(&a.data)?;
-    let store = Store::open(&a.data.join("hub.db"), Some(&a.data.join("history")))
+    let mut store = Store::open(&a.data.join("hub.db"), Some(&a.data.join("history")))
         .map_err(|e| e.to_string())?;
+    // Old history and backups go to the bucket chosen with `claudecord storage`, if there is one.
+    if a.data.join("storage.json").exists() {
+        store.set_bucket(Some(super::storage::load(&a.data.join("storage.json"))?));
+    }
     let mut core = HubCore::default();
     for o in &a.owners {
         core.add_owner(o);
@@ -286,4 +316,113 @@ impl VaultKeeper {
             crate::warn!("hub", "could not update the Obsidian vault at the end: {e}");
         }
     }
+}
+
+/// Runs the hosted service: one front door for many accounts. People sign in with Discord, machines join by a code, and each account's
+/// data lives in its own folder under `--data`.
+pub async fn run_serve(a: ServeArgs) -> Result<(), String> {
+    use crate::control::{Control, seal::LocalKeys};
+    let bind: std::net::SocketAddr = a
+        .bind
+        .parse()
+        .map_err(|_| format!("{} is not an address like 127.0.0.1:8787", a.bind))?;
+    if !bind.ip().is_loopback() && !a.allow_plain {
+        return Err("refusing to listen on a public address without TLS: put Caddy in front and bind to 127.0.0.1, or pass --allow-plain".into());
+    }
+    let url = a.public_url.trim_end_matches('/').to_string();
+    if !url.starts_with("https://")
+        && !url.starts_with("http://localhost")
+        && !url.starts_with("http://127.0.0.1")
+    {
+        return Err("--public-url must be https:// (plain http only for localhost)".into());
+    }
+    let oauth = match (&a.client_id, &a.secret_file) {
+        (Some(id), Some(f)) => {
+            let secret = std::fs::read_to_string(f)
+                .map_err(|e| format!("cannot read {}: {e}", f.display()))?
+                .trim()
+                .to_string();
+            if secret.is_empty() || id.trim().is_empty() {
+                return Err("the client id and secret must not be empty".into());
+            }
+            Some(server::Oauth {
+                client_id: id.clone(),
+                client_secret: secret,
+                redirect_uri: format!("{url}/auth/callback"),
+                authorize_url: "https://discord.com/oauth2/authorize".into(),
+                api_base: "https://discord.com/api/v10".into(),
+            })
+        }
+        _ => None,
+    };
+    // Local preview: a stand-in Discord keeps every page of the wizard working with no account and no bot.
+    let discord = if a.dev {
+        let (fake, addr) = crate::discord::fake::start_fake().await;
+        std::mem::forget(fake);
+        crate::info!(
+            "hub",
+            "dev mode: a stand-in Discord is running, nothing here reaches the real one"
+        );
+        crate::control::registry::DiscordSettings {
+            api_base: format!("http://{addr}/api"),
+            gateway_url: None,
+        }
+    } else {
+        Default::default()
+    };
+    let stop = crate::task::stop_listener();
+    std::fs::create_dir_all(&a.data).map_err(|e| e.to_string())?;
+    crate::log::init(Some(a.data.join("hub.log")));
+    // The operator's bucket (`claudecord storage oracle ...` with this --data) holds old history and backups for every account.
+    let bucket = if a.data.join("storage.json").exists() {
+        Some(super::storage::load(&a.data.join("storage.json"))?)
+    } else {
+        None
+    };
+    let control = std::sync::Arc::new(
+        Control::open(&a.data.join("control.db")).map_err(|e| format!("control database: {e}"))?,
+    );
+    // The key that seals bot tokens. Made on first start; back this file up, because without it every saved token is lost.
+    let keys: std::sync::Arc<dyn crate::control::seal::KeyProvider> =
+        std::sync::Arc::new(LocalKeys::load_or_create(&a.data.join("kek"))?);
+    let g = server::gateway::start_gateway(
+        server::gateway::GatewayConfig {
+            bind,
+            public_url: url.clone(),
+            oauth,
+            hub: Config::default(),
+            discord,
+            dev: a.dev,
+            bucket,
+        },
+        a.data.clone(),
+        control,
+        keys.clone(),
+    )
+    .await
+    .map_err(|e| match e.kind() {
+        std::io::ErrorKind::AddrInUse => {
+            format!("{bind} is already in use: is another copy running?")
+        }
+        _ => e.to_string(),
+    })?;
+    if a.dev {
+        // So the dashboard has something to show: a made-up account with a placed project, a machine, agents and a few hours of work.
+        server::demo::seed(&g.control, &g.registry, keys.as_ref())
+            .await
+            .map_err(|e| format!("could not make the demo data: {e}"))?;
+        crate::info!("hub", "dev mode: sign in to see a demo account");
+    }
+    crate::info!(
+        "hub",
+        "serving accounts on {} (public address {url})",
+        g.addr
+    );
+    crate::notify::ready();
+    stop.wait().await;
+    crate::notify::stopping();
+    crate::info!("hub", "told to stop; saving every account's hub");
+    g.shutdown().await;
+    crate::info!("hub", "stopped cleanly");
+    Ok(())
 }

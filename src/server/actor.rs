@@ -6,7 +6,7 @@ use super::disk::{Audit, Disk};
 use super::{Config, Input, Out, Reply, now_ms};
 use crate::hub::{Chat, Effect, HubCore, Persist};
 use crate::protocol::{HubFrame, NodeFrame};
-use crate::store::{HistoryRow, Store};
+use crate::store::{EventRow, HistoryRow, Store};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -46,8 +46,13 @@ fn load_core(core: &mut HubCore, store: &Store) {
 }
 
 /// Pulls the history rows and audit lines out of a batch's effects: they are written with the batch, before anything else it caused.
-fn split_persist(fx: &mut Vec<Effect>) -> (Vec<HistoryRow>, Vec<Audit>) {
-    let (mut rows, mut audits, mut rest) = (Vec::new(), Vec::new(), Vec::with_capacity(fx.len()));
+fn split_persist(fx: &mut Vec<Effect>) -> (Vec<HistoryRow>, Vec<Audit>, Vec<EventRow>) {
+    let (mut rows, mut audits, mut events, mut rest) = (
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::with_capacity(fx.len()),
+    );
     for e in fx.drain(..) {
         match e {
             Effect::Persist(Persist::History {
@@ -74,12 +79,20 @@ fn split_persist(fx: &mut Vec<Effect>) -> (Vec<HistoryRow>, Vec<Audit>) {
                 what,
                 at,
             }) => audits.push((at, project, who, what)),
+            Effect::Persist(Persist::Event {
+                project,
+                kind,
+                a,
+                b,
+                n,
+                at,
+            }) => events.push((at, project, kind.to_string(), a, b, n)),
             Effect::Persist(_) => {}
             other => rest.push(other),
         }
     }
     *fx = rest;
-    (rows, audits)
+    (rows, audits, events)
 }
 
 /// Carries out, in order, every batch at the front of the queue whose changes are on disk: first what the core asked for (frames to
@@ -218,7 +231,12 @@ pub(crate) async fn run(
                     // files a day ends up with follows.
                     let cutoff = now - cfg.hot_window.as_millis() as i64;
                     let cutoff = if cfg.hot_window >= Duration::from_secs(86_400) { cutoff - cutoff.rem_euclid(86_400_000) } else { cutoff };
+                    let events_before = now - 90 * 86_400_000;
                     rolling = Some(tokio::task::spawn_blocking(move || {
+                        // The graphs look back at most a quarter of a year, so older events only take up room.
+                        if let Err(e) = s.prune_events(events_before) {
+                            crate::error!("hub", "forgetting old events failed: {e}");
+                        }
                         match s.rollover(cutoff) {
                             Ok(n) if n > 0 => crate::info!("hub", "moved {n} old history rows out of the database into files"),
                             Ok(_) => {}
@@ -245,14 +263,15 @@ pub(crate) async fn run(
         }
         fx.extend(report);
         // The batch's history and the changes it made to the saved state go to disk together, and what it caused waits for that.
-        let (rows, audits) = split_persist(&mut fx);
+        let (rows, audits, events) = split_persist(&mut fx);
         let changes = core.take_changes();
-        let needs_write = !rows.is_empty() || !audits.is_empty() || !changes.is_empty();
+        let needs_write =
+            !rows.is_empty() || !audits.is_empty() || !events.is_empty() || !changes.is_empty();
         if needs_write || !fx.is_empty() || !replies.is_empty() {
             let id = next_id;
             next_id += 1;
             let durable = if needs_write {
-                let wait = disk.commit(rows, audits, vec![changes]);
+                let wait = disk.commit(rows, audits, events, vec![changes]);
                 let told = written_tx.clone();
                 tokio::spawn(async move {
                     let _ = told.send((id, wait.await.unwrap_or(false)));

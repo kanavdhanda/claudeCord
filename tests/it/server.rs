@@ -195,6 +195,48 @@ async fn a_bad_token_is_refused_and_a_good_one_is_welcomed() {
     hub.shutdown().await;
 }
 
+/// Like `connect`, as a proxy on this machine would pass it on: with the client's address in `X-Forwarded-For`.
+async fn connect_via_proxy(
+    hub: &server::Hub,
+    token: &str,
+    client: &str,
+) -> Result<Ws, tokio_tungstenite::tungstenite::Error> {
+    let mut req = format!("ws://{}/api/v1/node/connect", hub.addr)
+        .into_client_request()
+        .unwrap();
+    req.headers_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    req.headers_mut()
+        .insert("x-forwarded-for", client.parse().unwrap());
+    connect_async(req).await.map(|(ws, _)| Ws::new(ws))
+}
+
+#[tokio::test]
+async fn behind_a_proxy_only_the_misbehaving_address_is_blocked_not_everyone() {
+    let dir = tmp("proxy");
+    let (hub, tokens) = boot(cfg(), &dir.join("t.db"), &["mac"]).await;
+    for _ in 0..10 {
+        assert!(
+            connect_via_proxy(&hub, "wrong", "203.0.113.9")
+                .await
+                .is_err()
+        );
+    }
+    assert!(
+        connect_via_proxy(&hub, &tokens[0], "203.0.113.9")
+            .await
+            .is_err(),
+        "the one that failed is blocked"
+    );
+    assert!(
+        connect_via_proxy(&hub, &tokens[0], "198.51.100.4")
+            .await
+            .is_ok(),
+        "somebody else, through the same proxy, is not"
+    );
+    hub.shutdown().await;
+}
+
 #[tokio::test]
 async fn repeated_bad_tokens_get_an_address_blocked() {
     let dir = tmp("block");

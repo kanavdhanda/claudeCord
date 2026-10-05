@@ -11,7 +11,11 @@
 //! keeps what is waiting, and the device simply reconnects and registers again.
 
 pub mod actor;
+pub mod app;
+pub mod bots;
+pub mod demo;
 mod disk;
+pub mod gateway;
 pub mod health;
 pub mod login;
 pub mod session;
@@ -202,6 +206,8 @@ pub struct Hub {
     server: Option<tokio::task::JoinHandle<()>>,
     /// The uptime log and the task that keeps the hub's heartbeat (see `crate::uptime`). None for an in-memory store.
     uptime: Option<(Store, crate::uptime::Heartbeat)>,
+    /// What the front door needs to serve this hub's devices and dashboard.
+    pub(crate) state: AppState,
 }
 
 impl Hub {
@@ -210,6 +216,11 @@ impl Hub {
         HubHandle {
             to_actor: self.to_actor.clone(),
         }
+    }
+
+    /// The sending end of the chat broadcast, for whoever starts bridges later (each takes its own receiver with `subscribe`).
+    pub(crate) fn chat_sender(&self) -> broadcast::Sender<Chat> {
+        self.chat.clone()
     }
 
     /// Everything the core wants shown in chat arrives here. The chat bridge listens on it.
@@ -286,6 +297,45 @@ pub(crate) struct AppState {
 pub async fn start(cfg: Config, core: HubCore, store: Store) -> std::io::Result<Hub> {
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
     let addr = listener.local_addr()?;
+    let mut hub = spawn_core(cfg, core, store);
+    hub.addr = addr;
+    let app = Router::new()
+        .route(NODE_CONNECT_PATH, get(connect))
+        .route("/healthz", get(|| async { "ok" }))
+        .route("/readyz", get(health::readyz))
+        .route("/metrics", get(health::metrics))
+        .route("/api/v1/uptime", get(health::uptime))
+        .route("/api/v1/logs", get(health::logs))
+        .route("/", get(web::index))
+        .route("/app.js", get(web::script))
+        .route("/app.css", get(web::style))
+        .route("/api/v1/state", get(web::state))
+        .route("/api/v1/history", get(web::history))
+        .route("/auth/login", get(login::start))
+        .route("/auth/callback", get(login::callback))
+        .route("/auth/me", get(login::me))
+        .route("/auth/logout", axum::routing::post(login::logout))
+        .with_state(hub.state.clone())
+        .layer(axum::middleware::from_fn(real_client));
+    let (stop_tx, stop_rx) = oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async {
+            let _ = stop_rx.await;
+        })
+        .await;
+    });
+    hub.stop_server = Some(stop_tx);
+    hub.server = Some(server);
+    Ok(hub)
+}
+
+/// Starts a hub's actor, its watchdog and its heartbeat WITHOUT listening on any port: whoever owns the front door (the single-team
+/// `start` above, or the multi-team gateway in `control::registry`) takes the returned `Hub`'s `state` and serves it.
+pub fn spawn_core(cfg: Config, core: HubCore, store: Store) -> Hub {
     let (to_actor, from_world) = mpsc::channel(4096);
     let (chat_tx, _) = broadcast::channel(1024);
     let reader = Arc::new(Mutex::new(store.fork()));
@@ -294,6 +344,7 @@ pub async fn start(cfg: Config, core: HubCore, store: Store) -> std::io::Result<
         crate::uptime::recover(&log, now_ms());
         (log, crate::uptime::heartbeat(beat))
     });
+    let addr = cfg.bind;
     tokio::spawn(actor::run(
         core,
         store,
@@ -313,45 +364,44 @@ pub async fn start(cfg: Config, core: HubCore, store: Store) -> std::io::Result<
         open: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         sessions: Arc::new(Mutex::new(HashMap::new())),
     };
-    let app = Router::new()
-        .route(NODE_CONNECT_PATH, get(connect))
-        .route("/healthz", get(|| async { "ok" }))
-        .route("/readyz", get(health::readyz))
-        .route("/metrics", get(health::metrics))
-        .route("/api/v1/uptime", get(health::uptime))
-        .route("/api/v1/logs", get(health::logs))
-        .route("/", get(web::index))
-        .route("/app.js", get(web::script))
-        .route("/app.css", get(web::style))
-        .route("/api/v1/state", get(web::state))
-        .route("/api/v1/history", get(web::history))
-        .route("/auth/login", get(login::start))
-        .route("/auth/callback", get(login::callback))
-        .route("/auth/me", get(login::me))
-        .route("/auth/logout", axum::routing::post(login::logout))
-        .with_state(state);
     watchdog(HubHandle {
         to_actor: to_actor.clone(),
     });
-    let (stop_tx, stop_rx) = oneshot::channel::<()>();
-    let server = tokio::spawn(async move {
-        let _ = axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async {
-            let _ = stop_rx.await;
-        })
-        .await;
-    });
-    Ok(Hub {
+    Hub {
         addr,
         to_actor,
         chat: chat_tx,
-        stop_server: Some(stop_tx),
-        server: Some(server),
+        stop_server: None,
+        server: None,
         uptime,
-    })
+        state,
+    }
+}
+
+/// Behind a reverse proxy on this machine (Caddy, nginx) every request arrives from 127.0.0.1, so one person's failed sign-ins would block
+/// everybody and the rate limits would be shared. When the direct peer is this machine, the address the proxy reports in
+/// `X-Forwarded-For` (its last entry, the one the proxy itself added) is used instead. Anyone not on this machine cannot choose their address.
+pub(crate) async fn real_client(
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|c| c.0);
+    if let Some(peer) = peer
+        && peer.ip().is_loopback()
+        && let Some(ip) = req
+            .headers()
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.rsplit(',').next())
+            .and_then(|s| s.trim().parse::<std::net::IpAddr>().ok())
+    {
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::new(ip, peer.port())));
+    }
+    next.run(req).await
 }
 
 /// The WebSocket door. Checks the caller is not being blocked for repeated failures, checks its token, and only then
@@ -399,6 +449,17 @@ async fn connect(
         st.failures.locked().fail(&ip, now);
         return StatusCode::UNAUTHORIZED.into_response();
     };
+    admit(&st, &ip, node, ws)
+}
+
+/// Lets an already authenticated machine in: checks the connection cap, then upgrades the socket and runs the session. Used by the
+/// single-team door above and by the multi-team gateway, which checks the token in `control.db` instead.
+pub(crate) fn admit(
+    st: &AppState,
+    ip: &str,
+    node: String,
+    ws: WebSocketUpgrade,
+) -> axum::response::Response {
     // Past the cap a device is told to try later, rather than the hub running out of file handles and failing for everyone.
     let slot = OpenSlot::take(&st.open, st.cfg.max_devices);
     let Some(slot) = slot else {

@@ -29,6 +29,22 @@ impl HubCore {
         if summary.is_some() {
             t.summary = summary;
         }
+        let (to, cycle) = (t.to_agent.clone(), (now - t.created) as f64);
+        let to_name = self
+            .agents
+            .get(&to)
+            .map_or(to.rsplit('/').next().unwrap_or("").to_string(), |a| {
+                a.name.clone()
+            });
+        Self::event(
+            project,
+            "task",
+            &to_name,
+            &format!("{state:?}").to_lowercase(),
+            cycle,
+            now,
+            fx,
+        );
         fx.push(Effect::Persist(Persist::History {
             project: project.into(),
             thread: None,
@@ -137,11 +153,14 @@ impl HubCore {
             created: now,
             updated: now,
         };
+        // Every task gets its own thread by itself, so the main chat keeps only results and questions.
+        let thread = thread.or_else(|| Some(task_thread(&row)));
         self.tasks
             .entry(from.project.clone())
             .or_default()
             .push(row.clone());
         self.metrics.inc("task_assigned", 1.0, now);
+        Self::event(&from.project, "task", &to.name, "assigned", 0.0, now, fx);
         fx.push(Effect::Persist(Persist::History {
             project: from.project.clone(),
             thread: thread.clone(),
@@ -248,5 +267,25 @@ impl HubCore {
             );
             Self::notice(&a.project, format!("All {n} task(s) are done."), false, fx);
         }
+    }
+}
+
+/// The chat thread of a task: its number and the start of its text, on one line (the chat caps thread names at 100 characters).
+pub(super) fn task_thread(t: &TaskRow) -> String {
+    let words: String = t.text.split_whitespace().collect::<Vec<_>>().join(" ");
+    format!("{} {}", t.id, words.chars().take(40).collect::<String>())
+        .trim_end()
+        .to_string()
+}
+
+impl HubCore {
+    /// The thread of the newest task still open for an agent, so what it says while working goes there with no flag to remember.
+    pub(super) fn open_task_thread(&self, agent_id: &str, project: &str) -> Option<String> {
+        self.tasks
+            .get(project)?
+            .iter()
+            .rev()
+            .find(|t| t.to_agent == agent_id && t.state != TaskState::Done)
+            .map(task_thread)
     }
 }

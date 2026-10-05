@@ -23,6 +23,8 @@ use tokio::sync::broadcast;
 pub struct Log {
     pub next: u64,
     pub channels: Vec<Value>,
+    /// The servers the bot is in, as `/users/@me/guilds` returns them.
+    pub guilds: Vec<Value>,
     pub webhooks: HashMap<String, String>, // webhook id -> channel id
     pub posts: Vec<Value>, // webhook posts: {username, content, thread_id, channel, file}
     pub messages: Vec<Value>, // bot messages: {channel, content, components, id}
@@ -62,8 +64,15 @@ impl Fake {
 pub async fn start_fake() -> (Fake, String) {
     let (events, _) = broadcast::channel(64);
     let (kick, _) = broadcast::channel(4);
+    let log = Log {
+        guilds: vec![
+            json!({"id": "g1", "name": "Test server"}),
+            json!({"id": "g2", "name": "Second server"}),
+        ],
+        ..Log::default()
+    };
     let fake = Fake {
-        log: Arc::default(),
+        log: Arc::new(Mutex::new(log)),
         events,
         addr: Arc::default(),
         kick,
@@ -84,15 +93,45 @@ pub async fn start_fake() -> (Fake, String) {
         }
         Ok(Json(json!({"id": "app1", "owner": {"id": "1"}})))
     }
+    /// Who the bot is, from its token: its user id is the first part of the token, as with real Discord.
+    async fn user_me(
+        headers: axum::http::HeaderMap,
+    ) -> Result<Json<Value>, axum::http::StatusCode> {
+        let auth = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bot "))
+            .ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+        if auth.starts_with("bad") {
+            return Err(axum::http::StatusCode::UNAUTHORIZED);
+        }
+        let id = crate::discord::perms::app_id_from_token(auth).unwrap_or_else(|| "app1".into());
+        Ok(Json(
+            json!({"id": id, "username": format!("bot-{id}"), "bot": true}),
+        ))
+    }
+    async fn my_guilds(State(f): State<Fake>) -> Json<Value> {
+        Json(Value::Array(f.log.lock().unwrap().guilds.clone()))
+    }
     async fn gw(State(f): State<Fake>) -> Json<Value> {
         Json(json!({"url": format!("ws://{}/gateway", f.addr.lock().unwrap())}))
     }
-    async fn list(State(f): State<Fake>) -> Json<Value> {
-        Json(Value::Array(f.log.lock().unwrap().channels.clone()))
+    async fn list(State(f): State<Fake>, Path(g): Path<String>) -> Json<Value> {
+        let all = f.log.lock().unwrap().channels.clone();
+        // A channel made without a server (older tests) counts as being in every server.
+        Json(Value::Array(
+            all.into_iter()
+                .filter(|c| c["guild"].as_str().is_none_or(|x| x == g))
+                .collect(),
+        ))
     }
-    async fn mk_channel(State(f): State<Fake>, Json(b): Json<Value>) -> Json<Value> {
+    async fn mk_channel(
+        State(f): State<Fake>,
+        Path(g): Path<String>,
+        Json(b): Json<Value>,
+    ) -> Json<Value> {
         let id = f.id();
-        let c = json!({"id": id, "name": b["name"], "type": 0});
+        let c = json!({"id": id, "name": b["name"], "type": 0, "guild": g});
         f.log.lock().unwrap().channels.push(c.clone());
         Json(c)
     }
@@ -276,7 +315,9 @@ pub async fn start_fake() -> (Fake, String) {
     let app = Router::new()
         .route("/api/oauth2/applications/@me", get(me))
         .route("/api/gateway/bot", get(gw))
-        .route("/api/guilds/g1/channels", get(list).post(mk_channel))
+        .route("/api/users/@me", get(user_me))
+        .route("/api/users/@me/guilds", get(my_guilds))
+        .route("/api/guilds/{g}/channels", get(list).post(mk_channel))
         .route("/api/channels/{id}/webhooks", post(mk_hook))
         .route("/api/webhooks/{id}/{tok}", post(hook_post))
         .route("/api/channels/{id}/threads", post(mk_thread))

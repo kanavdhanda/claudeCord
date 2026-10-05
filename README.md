@@ -24,38 +24,33 @@ people  <->  Discord  <->  hub  <->  machine daemons  <->  agents in terminals
                   history, roles, saved state (SQLite) and old history in a bucket
 ```
 
-## Try it (about ten minutes)
+## Try it
 
-Install the program with `pip install claudecord` or `npm install -g claudecord` (no compiler needed; Linux, macOS and Windows), or build it
-with `cargo build --release`. You also need a Discord server you own.
+claudeCord is a hosted service: you sign in on its website with Discord, add your own Discord bot there, and connect your machines.
+You do not run a server unless you want to (see "Run your own" below).
 
-**1. Make the Discord bot.** In the Discord developer portal create an application and a bot, copy the bot token, and turn on the
-Message Content intent. Then on the hub's machine:
+1. **Install** with `pip install claudecord` or `npm install -g claudecord` (no compiler needed; Linux, macOS and Windows), or `cargo install`.
+2. **Run `claudecord`** (or `npx claudecord`) on a machine. The first time, it opens your browser: sign in with Discord and approve the machine.
+3. **Add a project** on the dashboard. A wizard takes you through it: save a Discord bot token (checked with Discord, stored encrypted, never shown
+   again), pick a server and a channel (or make a new one), and name the project and its first agent. One bot can serve any number of servers.
+4. **Start an agent** in a project folder with the command the wizard shows, for example `claudecord start --project myproject`.
+   A channel in Discord now carries the agent, which posts under its own name. Type there and the agent hears you. Leave with the usual tmux
+   detach (Ctrl-b d); the agent keeps running. `claudecord attach NAME` returns to it. Where tmux is not installed (native Windows) a built-in
+   terminal is used instead, and Ctrl-] leaves it.
 
-    claudecord discord set --guild YOUR_SERVER_ID --token-file bot-token.txt
-    claudecord discord invite            # open the link it prints and add the bot to your server
+The dashboard shows machines, agents, what is waiting on a person, and how the team behaves: who talks to whom, each agent's state over time,
+how tasks and questions flow, and what the turns cost. Spawning another agent is a button there too. It does not show chats (those live in
+Discord threads).
 
-**2. Start the hub.**
+### Run your own
 
-    claudecord hub --data claudecord-hub --bind 127.0.0.1:8787
+    claudecord serve --data claudecord-data --public-url https://claudecord.example.com --client-id DISCORD_APP_ID --secret-file secret.txt
 
-The bot's owner in Discord becomes the owner of the team. For anything beyond one machine, put a TLS proxy (Caddy, nginx,
-Cloudflare) in front and bind to 127.0.0.1; the hub refuses a public address without TLS unless you insist.
+`deploy/bootstrap.sh` does this on a fresh Ubuntu or Debian machine (service, TLS, firewall). The Discord application given here only signs people
+in; their bots are saved on the dashboard, encrypted with a key the program makes in the data folder (**back up the file `kek`**). To try everything
+on your own computer with no Discord at all: `claudecord serve --dev --public-url http://127.0.0.1:8787`, then `cd web && npm run dev`.
 
-**3. Give a machine a token and log it in.**
-
-    claudecord token mac --data claudecord-hub          # prints a token once
-    claudecord login --hub wss://your-hub.example.com --token THE_TOKEN --name mac
-    claudecord doctor                                   # checks the route step by step
-
-**4. Start an agent in a project folder.**
-
-    cd ~/code/myproject
-    claudecord start                                    # starts claude here in its own tmux session and opens it
-
-A channel named after the folder appears in Discord. Type there and the agent hears you. Leave with the usual tmux detach
-(Ctrl-b d); the agent keeps running. `claudecord attach NAME` returns to it. Where tmux is not installed (native Windows) a
-built-in terminal is used instead, and Ctrl-] leaves it.
+The older single-team mode still exists for one team on one server: `claudecord hub`, `claudecord discord set`, `claudecord token`.
 
 `claudecord start` does exactly what you ask and nothing more. Every extra is a flag you choose:
 
@@ -120,13 +115,9 @@ about what any command means, so it works the same for every agent program. Ever
 
 ## Dashboard
 
-The hub also serves a read-only page that shows machines (and whether they are connected), agents and what each is doing,
-what is waiting on a person, tasks, and the conversation. Make a token and open the hub's address in a browser:
-
-    claudecord web-token me --data claudecord-hub      # prints a token once; paste it into the page
-
-A dashboard token opens the page and nothing else, and a machine's token never opens it. The page draws everything as text and
-is served with a strict content policy.
+A React app (source in `web/`, the build is committed in `web/dist` and embedded in the program, so `cargo install` needs no Node). Pages: Overview,
+Add a project (the wizard, also how a new place is chosen), Discord bots, Machines, Insights. After changing `web/`, run `npm run build` in it.
+Everything is scoped to the signed-in account; nobody sees another account's machines, bots, history or numbers.
 
 ## What is guaranteed about messages
 
@@ -254,8 +245,8 @@ and macOS.
 - The Discord side is tested against a stand-in Discord, not against the real service yet.
 - Typing into Claude Code, Codex and agy is done through the terminal. The screen-reading rules for agy and Codex are generic and
   unverified against the live programs; whether a pasted `/command` runs the same way in every program is also unverified.
-- The dashboard is read-only. Sign in with Discord (`claudecord discord oauth`) shows each person only the projects they have a
-  role in; it is tested against a stand-in Discord, not the real one. A dashboard token still shows everything.
+- The hosted service, its dashboard and the sign-in are tested against a stand-in Discord, not the real one yet. The dashboard cannot send messages or
+  show chats; it places projects, spawns agents and shows status and numbers.
 - A load test exists (`scripts/load/`, k6, users with three bots each); it was run only up to about 9,000 users on a laptop, where k6
   itself ran out of threads. The 10,000-user runs on free-server sizes are a CI job (`load.yml`) that has not been run yet.
 - The pip and npm packages are built and tested by `scripts/test_packaging.py`, but nothing has been published yet.

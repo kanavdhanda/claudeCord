@@ -4,6 +4,7 @@
 use crate::device::config::{Config, home_dir};
 use crate::device::daemon::{self, Options};
 use crate::device::doctor;
+use crate::device::enroll;
 use crate::device::ipc::{self, Req, Resp, UpOpts};
 use crate::device::link::LinkOpts;
 use clap::Args;
@@ -14,12 +15,12 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 #[derive(Args)]
 pub struct LoginArgs {
-    /// Where the hub is, for example wss://hub.example.com
+    /// Where the hub is, for example https://claudecord.example.com (default: the address this program was built for, or $CLAUDECORD_HUB).
     #[arg(long)]
-    pub hub: String,
-    /// The token the hub gave this machine.
+    pub hub: Option<String>,
+    /// A token the hub gave this machine. Without it, a browser opens for you to sign in and approve this machine.
     #[arg(long)]
-    pub token: String,
+    pub token: Option<String>,
     /// A name for this machine (default: its hostname).
     #[arg(long)]
     pub name: Option<String>,
@@ -61,22 +62,79 @@ pub struct StartArgs {
     pub command: Vec<String>,
 }
 
-/// Saves the hub address and token for this machine.
-pub fn login(a: LoginArgs) -> Result<(), String> {
-    let name = a.name.unwrap_or_else(|| {
-        std::env::var("HOSTNAME")
-            .ok()
-            .filter(|h| !h.is_empty())
-            .unwrap_or_else(|| "this-machine".into())
-    });
-    let cfg = Config {
-        hub_url: a.hub,
-        token: a.token,
-        node_name: name,
+/// Joins a hub: with a token, saves it; without one, opens the browser to sign in with Discord and approve this machine.
+pub async fn login(a: LoginArgs) -> Result<(), String> {
+    let hub = a
+        .hub
+        .or_else(|| std::env::var("CLAUDECORD_HUB").ok())
+        .unwrap_or_else(|| enroll::DEFAULT_HUB.to_string());
+    let name = a.name.unwrap_or_else(enroll::default_node_name);
+    let cfg = match a.token {
+        Some(token) => Config {
+            hub_url: enroll::ws_base(&hub),
+            token,
+            node_name: name,
+        },
+        None => browser_login(&hub, &name).await?,
     };
     cfg.save(&home_dir()).map_err(|e| e.to_string())?;
-    println!("saved. Next: claudecord doctor");
+    println!("saved. Next: claudecord start (in a project folder)");
     Ok(())
+}
+
+/// What bare `claudecord` (and `npx claudecord`) does. A machine that has never joined opens the browser to sign in and approve it; one
+/// that has says where it is connected and what to do next.
+pub async fn home() -> Result<(), String> {
+    if let Some(cfg) = Config::load(&home_dir()) {
+        println!("Connected to {} as {}.", cfg.hub_url, cfg.node_name);
+        // The daemon is never started just to look: if it is not running, nothing is.
+        match ipc::call(&home_dir(), &Req::List).await {
+            Ok(r) if r.ok => {
+                let rows = r
+                    .data
+                    .and_then(|d| d.as_array().cloned())
+                    .unwrap_or_default();
+                println!("\nRunning here ({}):", rows.len());
+                for a in &rows {
+                    println!(
+                        "  {:28} {:12} {}",
+                        a["agent"].as_str().unwrap_or(""),
+                        a["status"].as_str().unwrap_or(""),
+                        a["cwd"].as_str().unwrap_or("")
+                    );
+                }
+                if !rows.is_empty() {
+                    println!("Open one:  claudecord attach NAME");
+                }
+            }
+            _ => println!("\nNothing is running here (the daemon is off)."),
+        }
+        println!("\nStart an agent in a project folder:  claudecord start");
+        println!("Everything else:                      claudecord --help");
+        return Ok(());
+    }
+    login(LoginArgs {
+        hub: None,
+        token: None,
+        name: None,
+    })
+    .await?;
+    println!(
+        "Connected. Open the dashboard to pick where your project lives, then run `claudecord start` in a project folder."
+    );
+    Ok(())
+}
+
+/// The first-run path: shows a code and link, opens the browser, and waits for the person to approve this machine.
+async fn browser_login(hub: &str, name: &str) -> Result<Config, String> {
+    enroll::enroll(hub, name, |code, link| {
+        eprintln!("To connect this machine, sign in with Discord and approve it.");
+        eprintln!("  Code: {code}");
+        eprintln!("  Link: {link}");
+        eprintln!("Waiting for you to approve it in the browser...");
+        enroll::open_browser(link);
+    })
+    .await
 }
 
 /// Runs the daemon in the foreground.
@@ -97,7 +155,13 @@ async fn ensure_daemon() -> Result<(), String> {
         return Ok(());
     }
     if Config::load(&dir).is_none() {
-        return Err("not logged in: run claudecord login first".into());
+        // A machine that has never joined: this is the first run, so sign in through the browser now rather than failing.
+        login(LoginArgs {
+            hub: None,
+            token: None,
+            name: None,
+        })
+        .await?;
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     // Appended to, so the history of earlier runs is still there when something went wrong.
@@ -144,6 +208,10 @@ fn expect_ok(r: Resp) -> Result<Resp, String> {
 pub async fn start(a: StartArgs) -> Result<(), String> {
     ensure_daemon().await?;
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let name = match a.name.clone() {
+        Some(n) => Some(n),
+        None => ask_name()?,
+    };
     let project = a.project.unwrap_or_else(|| {
         cwd.file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -154,7 +222,7 @@ pub async fn start(a: StartArgs) -> Result<(), String> {
         &home_dir(),
         &Req::Up {
             project,
-            name: a.name,
+            name,
             adapter: a.adapter,
             model: a.model,
             role: a.role,
@@ -468,4 +536,116 @@ pub async fn handoff(agent: &str, out: Option<std::path::PathBuf>) -> Result<(),
         None => print!("{note}"),
     }
     Ok(())
+}
+
+/// Asks what to call the agent, when a person is at the keyboard. Enter alone keeps the random friendly name.
+fn ask_name() -> Result<Option<String>, String> {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return Ok(None);
+    }
+    loop {
+        print!("Name for this agent (Enter for a random one): ");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|e| e.to_string())?;
+        let n = line.trim();
+        if n.is_empty() {
+            return Ok(None);
+        }
+        if crate::protocol::is_slug(n) {
+            return Ok(Some(n.to_string()));
+        }
+        println!("Names use letters, digits, dots, dashes and underscores.");
+    }
+}
+
+/// `claudecord attach` with or without a name: without one, lists what runs here and lets the person choose by number or name.
+pub async fn attach_or_pick(agent: Option<String>) -> Result<(), String> {
+    if let Some(a) = agent {
+        return attach(&a).await;
+    }
+    let r = ipc::call(&home_dir(), &Req::List)
+        .await
+        .map_err(|_| "nothing is running here (the daemon is off)".to_string())?;
+    let rows = r
+        .data
+        .and_then(|d| d.as_array().cloned())
+        .unwrap_or_default();
+    let names: Vec<String> = rows
+        .iter()
+        .filter_map(|a| a["agent"].as_str().map(String::from))
+        .collect();
+    match names.as_slice() {
+        [] => return Err("nothing is running here".into()),
+        [only] => return attach(only).await,
+        _ => {}
+    }
+    use std::io::{IsTerminal, Write};
+    for (i, a) in rows.iter().enumerate() {
+        println!(
+            "{:>2}) {:28} {:12} {}",
+            i + 1,
+            a["agent"].as_str().unwrap_or(""),
+            a["status"].as_str().unwrap_or(""),
+            a["cwd"].as_str().unwrap_or("")
+        );
+    }
+    if !std::io::stdin().is_terminal() {
+        return Err("name one: claudecord attach NAME".into());
+    }
+    loop {
+        print!("Open which? (number or name, Enter to cancel): ");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|e| e.to_string())?;
+        if line.trim().is_empty() {
+            return Ok(());
+        }
+        match choose(&names, &line) {
+            Some(a) => return attach(&a).await,
+            None => println!("No match. Type a number from the list, or a name."),
+        }
+    }
+}
+
+/// What the person typed at the list: a number, a full name, the short name after the project, or the start of a name that fits only one.
+fn choose(names: &[String], input: &str) -> Option<String> {
+    let t = input.trim();
+    if let Ok(n) = t.parse::<usize>() {
+        return names.get(n.checked_sub(1)?).cloned();
+    }
+    let hits: Vec<&String> = names
+        .iter()
+        .filter(|a| a.as_str() == t || a.rsplit('/').next() == Some(t))
+        .collect();
+    let hits = if hits.is_empty() {
+        names.iter().filter(|a| a.starts_with(t)).collect()
+    } else {
+        hits
+    };
+    (hits.len() == 1).then(|| hits[0].clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::choose;
+
+    #[test]
+    fn the_list_takes_a_number_a_name_or_a_unique_start() {
+        let n: Vec<String> = ["demo/otter", "demo/heron", "web/otter"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(choose(&n, "2").as_deref(), Some("demo/heron"));
+        assert_eq!(choose(&n, "web/otter").as_deref(), Some("web/otter"));
+        assert_eq!(choose(&n, "heron").as_deref(), Some("demo/heron"));
+        assert_eq!(choose(&n, "otter"), None, "two agents are called otter");
+        assert_eq!(choose(&n, "de").as_deref(), None, "a start that fits two");
+        assert_eq!(choose(&n, "0"), None);
+        assert_eq!(choose(&n, "9"), None);
+    }
 }

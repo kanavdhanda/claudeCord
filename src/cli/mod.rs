@@ -19,14 +19,17 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "claudecord", version, about)]
 pub struct Cli {
+    /// With no command: on a new machine, open the browser to sign in and approve it; afterwards, say how to start an agent.
     #[command(subcommand)]
-    pub command: Cmd,
+    pub command: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
 pub enum Cmd {
     /// Run the central hub (one per team).
     Hub(hub::HubArgs),
+    /// Run the hosted service: many accounts sign in with Discord, join machines by code, and each gets its own hub.
+    Serve(hub::ServeArgs),
     /// Connect the hub to your Discord server (token, server id, invite link).
     Discord(discord::DiscordArgs),
     /// Choose, test and change where old history files are kept (Oracle Cloud, Cloudflare R2, ...).
@@ -67,8 +70,8 @@ pub enum Cmd {
     },
     /// List the agents on this machine.
     Ls,
-    /// Open an agent's terminal.
-    Attach { agent: String },
+    /// Open an agent's terminal. With no name, pick from the agents running here.
+    Attach { agent: Option<String> },
     /// Stop one agent.
     Stop { agent: String },
     /// Stop the daemon and every agent on this machine.
@@ -113,8 +116,12 @@ pub enum Cmd {
 
 /// Runs a parsed command.
 pub async fn run(cli: Cli) -> Result<(), String> {
-    match cli.command {
+    let Some(command) = cli.command else {
+        return machine::home().await;
+    };
+    match command {
         Cmd::Hub(a) => hub::run_hub(a).await,
+        Cmd::Serve(a) => hub::run_serve(a).await,
         Cmd::Token(a) => hub::make_token(a),
         Cmd::WebToken(a) => hub::make_web_token(a),
         Cmd::LoadTokens(a) => hub::make_load_tokens(a),
@@ -124,7 +131,7 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         Cmd::Storage(a) => storage::run(a),
         Cmd::Export(a) => export::run(a),
         Cmd::Daemon => machine::run_daemon().await,
-        Cmd::Login(a) => machine::login(a),
+        Cmd::Login(a) => machine::login(a).await,
         Cmd::Start(a) => machine::start(a).await,
         Cmd::Logs {
             agent,
@@ -133,7 +140,7 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         } => machine::logs(&agent, lines, terminal).await,
         Cmd::Handoff { agent, out } => machine::handoff(&agent, out).await,
         Cmd::Ls => machine::ls().await,
-        Cmd::Attach { agent } => machine::attach(&agent).await,
+        Cmd::Attach { agent } => machine::attach_or_pick(agent).await,
         Cmd::Stop { agent } => machine::stop(&agent).await,
         Cmd::Down => machine::down().await,
         Cmd::Doctor => machine::doctor().await,

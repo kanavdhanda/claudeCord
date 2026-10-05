@@ -12,6 +12,7 @@ mod durability;
 mod e2e;
 mod edge;
 mod export;
+mod gateway;
 mod health;
 mod hub;
 mod logs;

@@ -732,7 +732,8 @@ fn snapshot() -> Probe {
             !changes.is_empty(),
             "changes were made and none were noticed"
         );
-        db.commit(&[], &[], &[changes]).map_err(|e| e.to_string())?;
+        db.commit(&[], &[], &[], &[changes])
+            .map_err(|e| e.to_string())?;
         let mut e = HubCore::default();
         e.restore_rows(db.load_state().map_err(|e| e.to_string())?);
         let (a, b): (serde_json::Value, serde_json::Value) = (

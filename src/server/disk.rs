@@ -10,7 +10,7 @@
 //! Reads stay on the actor's own connection (the database allows readers and one writer at once). An in-memory database (used by some
 //! tests) cannot be shared with a second connection, so it is written inline instead.
 
-use crate::store::{Changes, HistoryRow, Store};
+use crate::store::{Changes, EventRow, HistoryRow, Store};
 use std::sync::mpsc::{Sender, channel};
 use std::thread::JoinHandle;
 use tokio::sync::oneshot;
@@ -21,6 +21,7 @@ pub(crate) type Audit = (i64, String, String, String);
 struct Commit {
     rows: Vec<HistoryRow>,
     audits: Vec<Audit>,
+    events: Vec<EventRow>,
     changes: Vec<Changes>,
     /// Told whether the commit reached the disk.
     done: oneshot::Sender<bool>,
@@ -41,9 +42,15 @@ pub(crate) struct Disk {
 }
 
 /// Writes what is waiting in one transaction, trying a few times if the disk objects. Returns whether it is on disk.
-fn write(store: &mut Store, rows: &[HistoryRow], audits: &[Audit], changes: &[Changes]) -> bool {
+fn write(
+    store: &mut Store,
+    rows: &[HistoryRow],
+    audits: &[Audit],
+    events: &[EventRow],
+    changes: &[Changes],
+) -> bool {
     for attempt in 0..4u32 {
-        match store.commit(rows, audits, changes) {
+        match store.commit(rows, audits, events, changes) {
             Ok(()) => return true,
             Err(e) => {
                 crate::error!(
@@ -82,18 +89,20 @@ impl Disk {
                     batch.extend(rx.try_iter());
                     let mut rows = Vec::new();
                     let mut audits = Vec::new();
+                    let mut events = Vec::new();
                     let mut changes = Vec::new();
                     let mut waiting = Vec::new();
                     for c in batch {
                         rows.extend(c.rows);
                         audits.extend(c.audits);
+                        events.extend(c.events);
                         changes.extend(c.changes);
                         waiting.push(c.done);
                     }
                     if let Some(d) = delay {
                         std::thread::sleep(d);
                     }
-                    let ok = write(&mut writer, &rows, &audits, &changes);
+                    let ok = write(&mut writer, &rows, &audits, &events, &changes);
                     if !ok {
                         crate::error!("hub", "giving up on this write: the hub is running WITHOUT durability until the disk recovers");
                     }
@@ -122,6 +131,7 @@ impl Disk {
         &mut self,
         rows: Vec<HistoryRow>,
         audits: Vec<Audit>,
+        events: Vec<EventRow>,
         changes: Vec<Changes>,
     ) -> oneshot::Receiver<bool> {
         let (done, wait) = oneshot::channel();
@@ -130,6 +140,7 @@ impl Disk {
                 if let Err(e) = tx.send(Commit {
                     rows,
                     audits,
+                    events,
                     changes,
                     done,
                 }) {
@@ -142,7 +153,7 @@ impl Disk {
                 }
             }
             Mode::Inline => {
-                let ok = write(&mut self.store, &rows, &audits, &changes);
+                let ok = write(&mut self.store, &rows, &audits, &events, &changes);
                 let _ = done.send(ok);
             }
         }

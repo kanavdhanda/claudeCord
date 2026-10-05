@@ -27,6 +27,9 @@ pub struct HistoryRow {
     pub text: String,
 }
 
+/// One measurable thing that happened, as stored: (at, project, kind, a, b, n). See `crate::hub::Persist::Event` for what the kinds mean.
+pub type EventRow = (i64, String, String, String, String, f64);
+
 /// What to write to bring the saved state up to date: rows to insert or replace, rows to delete, and collections whose rows are all
 /// replaced (their old rows are deleted first). Made by the hub core from what changed; see `crate::hub::tracked`.
 #[derive(Default, Debug, Clone)]
@@ -122,6 +125,10 @@ impl Store {
              CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, project TEXT NOT NULL, who TEXT NOT NULL, what TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS tokens (hash TEXT PRIMARY KEY, node TEXT NOT NULL, at INTEGER NOT NULL);
              CREATE INDEX IF NOT EXISTS tokens_node ON tokens (node);
+             CREATE TABLE IF NOT EXISTS events (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, project TEXT NOT NULL, kind TEXT NOT NULL,
+                 a TEXT NOT NULL, b TEXT NOT NULL, n REAL NOT NULL);
+             CREATE INDEX IF NOT EXISTS events_at ON events (at);
              CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS uptime (component TEXT NOT NULL, at INTEGER NOT NULL, state TEXT NOT NULL);
              CREATE INDEX IF NOT EXISTS uptime_component ON uptime (component, at);
@@ -298,10 +305,17 @@ impl Store {
         &mut self,
         rows: &[HistoryRow],
         audits: &[(i64, String, String, String)],
+        events: &[EventRow],
         changes: &[Changes],
     ) -> rusqlite::Result<()> {
         let tx = self.conn.transaction()?;
         {
+            let mut ev = tx.prepare_cached(
+                "INSERT INTO events (at, project, kind, a, b, n) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            for (at, project, kind, a, b, n) in events {
+                ev.execute(params![at, project, kind, a, b, n])?;
+            }
             let mut st = tx.prepare_cached("INSERT INTO history (at, project, thread, sender, kind, body) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")?;
             for r in rows {
                 st.execute(params![r.at, r.project, r.thread, r.from, r.kind, r.text])?;
@@ -331,6 +345,34 @@ impl Store {
             }
         }
         tx.commit()
+    }
+
+    /// The events of one project (or every project when `project` is None) from `since` on, oldest first.
+    pub fn events_since(
+        &self,
+        project: Option<&str>,
+        since: i64,
+    ) -> rusqlite::Result<Vec<EventRow>> {
+        let mut st = self.conn.prepare(
+            "SELECT at, project, kind, a, b, n FROM events WHERE at >= ?1 AND (?2 IS NULL OR project = ?2) ORDER BY id",
+        )?;
+        let rows = st.query_map(params![since, project], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })?;
+        rows.collect()
+    }
+
+    /// Forgets events older than `before`, so the table never grows without bound.
+    pub fn prune_events(&mut self, before: i64) -> rusqlite::Result<usize> {
+        self.conn
+            .execute("DELETE FROM events WHERE at < ?1", params![before])
     }
 
     /// Every saved state row, as (key, JSON). Empty on a fresh database, or one that still has the older single-text save.

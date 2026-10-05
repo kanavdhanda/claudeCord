@@ -10,6 +10,7 @@
 //! checks the running pieces (server, link, terminals, daemon).
 
 mod probes_core;
+mod probes_hosted;
 mod probes_live;
 
 use futures_util::FutureExt;
@@ -43,6 +44,7 @@ pub struct Outcome {
 pub fn features() -> Vec<Feature> {
     let mut all = probes_core::features();
     all.extend(probes_live::features());
+    all.extend(probes_hosted::features());
     all
 }
 

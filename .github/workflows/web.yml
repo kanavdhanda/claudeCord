@@ -1,0 +1,27 @@
+name: web
+
+# The dashboard (web/) is built with Vite and the build is committed in web/dist, because the Rust program embeds it and `cargo install`
+# must work without Node. This fails if the committed build is not what the source builds to, so the two cannot drift apart.
+on:
+  push:
+    paths: ["web/**"]
+  pull_request:
+    paths: ["web/**"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - name: The committed build matches the source
+        run: git diff --exit-code -- dist

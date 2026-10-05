@@ -33,14 +33,14 @@ const SESSION_MS: i64 = 8 * 3600 * 1000;
 // ponytail: sessions live in memory with a fixed cap; move them into the database if the dashboard gets many thousands of viewers.
 const MAX_SESSIONS: usize = 10_000;
 
-fn random_hex() -> String {
+pub(super) fn random_hex() -> String {
     let mut b = [0u8; 24];
     getrandom::fill(&mut b).expect("the system has a random source");
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 /// Percent-encodes everything but unreserved characters, for query strings and form bodies.
-fn pct(s: &str) -> String {
+pub(super) fn pct(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
@@ -66,11 +66,18 @@ pub(crate) fn cookie(headers: &HeaderMap, name: &str) -> Option<String> {
 }
 
 /// Compares two secrets without stopping at the first difference.
-fn same(a: &str, b: &str) -> bool {
+pub(super) fn same(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
 }
 
-fn set_cookie(r: &mut Response, name: &str, value: &str, path: &str, max_age: i64, oauth: &Oauth) {
+pub(super) fn set_cookie(
+    r: &mut Response,
+    name: &str,
+    value: &str,
+    path: &str,
+    max_age: i64,
+    oauth: &Oauth,
+) {
     let secure = if oauth.redirect_uri.starts_with("https://") {
         "; Secure"
     } else {
@@ -84,7 +91,7 @@ fn set_cookie(r: &mut Response, name: &str, value: &str, path: &str, max_age: i6
     );
 }
 
-fn page(status: StatusCode, text: &str) -> Response {
+pub(super) fn page(status: StatusCode, text: &str) -> Response {
     secure_headers(
         (status, text.to_string()).into_response(),
         "text/plain; charset=utf-8",
@@ -127,7 +134,7 @@ pub(super) async fn start(State(st): State<AppState>) -> Response {
 }
 
 /// Swaps Discord's one-time code for the person's account.
-async fn identify(o: &Oauth, code: &str) -> Result<(String, String), String> {
+pub(super) async fn identify(o: &Oauth, code: &str) -> Result<(String, String), String> {
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()

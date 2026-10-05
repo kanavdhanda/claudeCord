@@ -2,6 +2,8 @@
 //! path. Values live in a ring of one-minute buckets covering a day, and are saved sparsely, so a restart keeps
 //! history and the saved form stays tiny. Every method takes the time as an argument, so tests need no clock.
 
+pub mod events;
+
 use serde::Serialize;
 use std::collections::{BTreeMap, HashMap};
 

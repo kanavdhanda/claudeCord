@@ -30,7 +30,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 /// The short standing instruction added to every agent: the verbs it has and the one rule about replies.
-pub const RULES: &str = "Team chat is the shell command claudecord: say <text> (FYI), ask <question>, assign <agent> <task>, done <id> <summary>, dump (save state), send <file>. Plain say is FYI: @name someone to need a reply.";
+pub const RULES: &str = "Team chat is the shell command claudecord: say <text> (FYI), ask <question>, assign <agent> <task>, done <id> <summary>, dump (save state), send <file>. Your say while you work on a task goes to that task's thread by itself; ask, done and report go to the main chat. Plain say is FYI: @name someone to need a reply.";
 
 /// Choices that tests change.
 #[derive(Clone)]
@@ -491,7 +491,7 @@ impl State {
             HubFrame::Spawn { agent } => {
                 // Only in a folder this machine already knows for the project. Otherwise there is nothing safe to start.
                 if let Some(cwd) = self.folders.get(&agent.project).cloned() {
-                    let _ = self
+                    let r = self
                         .up_agent(
                             agent.project.clone(),
                             Some(agent.name.clone()),
@@ -505,6 +505,14 @@ impl State {
                             UpOpts::default(),
                         )
                         .await;
+                    if !r.ok {
+                        crate::warn!(
+                            "daemon",
+                            "{}: spawn from the hub failed: {}",
+                            agent.agent_id,
+                            r.msg
+                        );
+                    }
                 }
             }
             HubFrame::Welcome { .. } | HubFrame::Error { .. } | HubFrame::Ack { .. } => {}
@@ -829,6 +837,8 @@ impl State {
                 && !a.queue.is_empty()
                 && state.limit.is_none()
                 && state.prompt.is_none()
+                // Not before the agent's input box is showing, or start-up would swallow the message.
+                && (state.ready || a.status != AgentStatus::Starting)
             {
                 let text = format_deliveries(&a.queue);
                 let before = a.proc.screen_hash();

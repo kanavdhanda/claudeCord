@@ -139,17 +139,9 @@ pub(super) fn denied() -> Response {
     )
 }
 
-/// Everything the dashboard shows apart from the conversation: machines, and per project its agents, what is waiting on a
-/// person, and its tasks.
-pub(super) async fn state(
-    State(st): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-) -> Response {
-    let Some(who) = authorised(&st, peer, &headers).await else {
-        return denied();
-    };
-    let body = st
+/// The dashboard's state as JSON, for whoever `who` says is looking.
+pub(super) async fn state_json(st: &AppState, who: Who) -> Value {
+    st
         .handle
         .call(move |c, _| {
             let devices: Vec<Value> = c.devices().iter().map(|d| json!({"node": d.node, "connected": d.connected, "agents": d.agents.len(), "max": d.max_agents, "labels": d.labels, "lastSeen": d.last_seen})).collect();
@@ -165,7 +157,20 @@ pub(super) async fn state(
             (json!({"devices": devices, "projects": projects}), vec![])
         })
         .await
-        .unwrap_or(Value::Null);
+        .unwrap_or(Value::Null)
+}
+
+/// Everything the dashboard shows apart from the conversation: machines, and per project its agents, what is waiting on a
+/// person, and its tasks.
+pub(super) async fn state(
+    State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(who) = authorised(&st, peer, &headers).await else {
+        return denied();
+    };
+    let body = state_json(&st, who).await;
     secure(Json(body).into_response(), "application/json", "no-store")
 }
 

@@ -57,6 +57,16 @@ impl HubCore {
             .push(ask.clone());
         self.status
             .insert(agent_id.to_string(), (AgentStatus::WaitingInput, None));
+        Self::event(&a.project, "status", &a.name, "waiting_input", 0.0, now, fx);
+        Self::event(
+            &a.project,
+            "ask_open",
+            &a.name,
+            &format!("Q{qn}"),
+            0.0,
+            now,
+            fx,
+        );
         fx.push(Effect::Persist(Persist::History {
             project: a.project.clone(),
             thread,
@@ -126,6 +136,24 @@ impl HubCore {
             .ok_or(Denied::NotFound)?;
         self.status
             .insert(ask.agent_id.clone(), (AgentStatus::Thinking, None));
+        Self::event(
+            project,
+            "status",
+            &asker.name,
+            "thinking",
+            0.0,
+            now,
+            &mut fx,
+        );
+        Self::event(
+            project,
+            "ask_done",
+            &asker.name,
+            &format!("Q{}", ask.qn),
+            (now - ask.opened) as f64,
+            now,
+            &mut fx,
+        );
         // The answer goes straight to the asker. If its device is away it waits in the queue instead.
         if !self.send_to(
             &asker,

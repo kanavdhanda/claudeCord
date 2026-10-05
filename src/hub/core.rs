@@ -395,6 +395,26 @@ impl HubCore {
         fx.push(Effect::Chat(Chat::RefreshStatus(project.to_string())));
     }
 
+    /// Records something measurable for the dashboard's graphs (see `Persist::Event`).
+    pub(super) fn event(
+        project: &str,
+        kind: &'static str,
+        a: &str,
+        b: &str,
+        n: f64,
+        now: i64,
+        fx: &mut Vec<Effect>,
+    ) {
+        fx.push(Effect::Persist(Persist::Event {
+            project: project.into(),
+            kind,
+            a: a.into(),
+            b: b.into(),
+            n,
+            at: now,
+        }));
+    }
+
     /// Records a decision for the audit trail.
     pub(super) fn audit(project: &str, who: &str, what: String, now: i64, fx: &mut Vec<Effect>) {
         fx.push(Effect::Persist(Persist::Audit {
@@ -461,14 +481,19 @@ impl HubCore {
             return fx;
         }
         self.conns.remove(node);
-        let mine: Vec<(String, String)> = self
+        let mine: Vec<(String, String, String)> = self
             .agents
             .values()
             .filter(|a| a.node_name == node)
-            .map(|a| (a.agent_id.clone(), a.project.clone()))
+            .map(|a| (a.agent_id.clone(), a.project.clone(), a.name.clone()))
             .collect();
+        // The moment is the last sign of life: the core reads no clock, and that is as close as it knows.
+        let went = self.seen_at.get(node).copied().unwrap_or(0);
         let mut projects: Vec<String> = Vec::new();
-        for (id, project) in mine {
+        for (id, project, name) in mine {
+            if went > 0 {
+                Self::event(&project, "status", &name, "offline", 0.0, went, &mut fx);
+            }
             self.status.insert(id, (AgentStatus::Offline, None));
             if !projects.contains(&project) {
                 projects.push(project);
@@ -574,6 +599,7 @@ impl HubCore {
         fx.push(Effect::Persist(Persist::UpsertAgent(row.clone())));
         self.status
             .insert(spec.agent_id.clone(), (AgentStatus::Idle, None));
+        Self::event(&row.project, "status", &row.name, "idle", 0.0, now, fx);
         Self::refresh(&row.project, fx);
         self.flush(&row.agent_id, now, fx);
     }
@@ -816,6 +842,15 @@ impl HubCore {
         self.status.insert(agent_id.to_string(), (status, detail));
         self.metrics
             .status(agent_id, super::routing::status_name(status), now);
+        Self::event(
+            &a.project,
+            "status",
+            &a.name,
+            super::routing::status_name(status),
+            0.0,
+            now,
+            fx,
+        );
         Self::refresh(&a.project, fx);
         self.flush(agent_id, now, fx);
     }
@@ -833,6 +868,7 @@ impl HubCore {
             return;
         };
         self.metrics.inc("msg_agent", 1.0, now);
+        let thread = thread.or_else(|| self.open_task_thread(agent_id, &a.project));
         let clean = self.scrub(&a, text, now, fx);
         fx.push(Effect::Persist(Persist::History {
             project: a.project.clone(),
