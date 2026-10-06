@@ -2560,3 +2560,46 @@ fn a_file_whose_checksum_does_not_match_is_not_posted() {
             .any(|e| matches!(e, Effect::Chat(Chat::File { .. })))
     );
 }
+
+#[test]
+fn a_machine_running_an_older_version_is_told_the_newest_and_a_current_one_is_not() {
+    let mut w = World::new();
+    w.core.node_connected("old", 1);
+    w.core.node_connected("new", 2);
+    let hello = |node: &str, version: &str, w: &mut World| {
+        w.core.on_node_frame(
+            node,
+            NodeFrame::Hello {
+                node_name: node.into(),
+                version: version.into(),
+            },
+            T0,
+        )
+    };
+    let now = env!("CARGO_PKG_VERSION");
+    let fx = hello("old", "0.0.1", &mut w);
+    assert!(
+        matches!(frames(&fx).as_slice(), [HubFrame::Update { latest }] if latest == now),
+        "{fx:?}"
+    );
+    assert!(
+        frames(&hello("new", now, &mut w)).is_empty(),
+        "the current version hears nothing"
+    );
+    assert!(
+        frames(&hello("new", "99.0.0", &mut w)).is_empty(),
+        "nor does a machine that is ahead of the hub"
+    );
+}
+
+#[test]
+fn versions_compare_number_by_number() {
+    use claudecord::protocol::version_older as older;
+    assert!(older("0.2.5", "0.2.10") && older("0.2.9", "0.3.0") && older("v0.1.0", "0.2.0"));
+    assert!(!older("0.2.5", "0.2.5") && !older("0.2.10", "0.2.5") && !older("1.0", "0.9.9"));
+    assert!(
+        !older("0.3.0-rc1", "0.3.0"),
+        "a release candidate is not behind its own release"
+    );
+    assert!(!older("garbage", "0.0.0") && older("garbage", "0.0.1"));
+}

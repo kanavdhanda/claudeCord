@@ -99,6 +99,9 @@ pub async fn home() -> Result<(), String> {
     if let Some(cfg) = Config::load(&home_dir()) {
         // The daemon is never started just to look: if it is not running, nothing is.
         let rows = list_agents().await;
+        if let Some(n) = update_notice() {
+            println!("{n}\n");
+        }
         if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
             println!("Connected to {} as {}.", cfg.hub_url, cfg.node_name);
             println!("Running here: {}", rows.len());
@@ -172,6 +175,102 @@ async fn ensure_login() -> Result<(), String> {
     Ok(())
 }
 
+/// The one line that says a newer claudeCord exists, if the hub told this machine so (the daemon keeps what it was told in `update.json`), with
+/// the command that updates it the way it was installed. None when this is already the newest, or nothing was said.
+fn update_notice() -> Option<String> {
+    let path = home_dir().join("update.json");
+    let latest = serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&path).ok()?)
+        .ok()?["latest"]
+        .as_str()?
+        .to_string();
+    let mine = env!("CARGO_PKG_VERSION");
+    if !crate::protocol::version_older(mine, &latest) {
+        // Updated since: nothing left to say.
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
+    Some(format!(
+        "claudecord {latest} is available (you have {mine}). Update with:  {}",
+        update_command(&std::env::current_exe().ok()?.to_string_lossy())
+    ))
+}
+
+/// How to update, judged by where this program lives: under uv's tools, an npm package, or (otherwise) a pip install.
+fn update_command(exe: &str) -> &'static str {
+    let e = exe.replace('\\', "/");
+    if e.contains("/uv/tools/") || e.contains("/uv/") && e.contains("/tools/") {
+        "uv tool upgrade claudecord"
+    } else if e.contains("node_modules") {
+        "npm i -g claudecord@latest"
+    } else if e.contains("/.cargo/bin/") {
+        "cargo install --git https://github.com/kanavdhanda/claudeCord --force"
+    } else {
+        "pip install -U claudecord   (or: pipx upgrade claudecord)"
+    }
+}
+
+/// What this machine is missing for running agents, as lines to show: tmux (where the built-in terminal is not what is asked for) and the
+/// program of the agent type, unless a command of the person's own is given. Empty means everything needed is there.
+fn missing_requirements(adapter: &str, own_command: bool) -> Vec<String> {
+    let mut missing = Vec::new();
+    let wants_pty = std::env::var("CLAUDECORD_TERMINAL").is_ok_and(|v| v == "pty");
+    if !cfg!(windows) && !wants_pty && !crate::device::tmux::TmuxTerminal::available() {
+        let how = if cfg!(target_os = "macos") {
+            "brew install tmux"
+        } else {
+            "sudo apt install tmux   (or: dnf install tmux, pacman -S tmux)"
+        };
+        missing.push(format!(
+            "tmux: not found. It keeps each agent running when you close the window. Install it with:  {how}"
+        ));
+    }
+    if !own_command {
+        let (program, how) = match adapter {
+            "codex" => ("codex", "npm i -g @openai/codex"),
+            "agy" => ("agy", "install Antigravity and put `agy` on your PATH"),
+            _ => (
+                "claude",
+                "npm i -g @anthropic-ai/claude-code   (see https://claude.com/claude-code)",
+            ),
+        };
+        if !program_on_path(program) {
+            missing.push(format!(
+                "{program}: not found on your PATH. Install it with:  {how}"
+            ));
+        }
+    }
+    missing
+}
+
+/// Whether `program` is found in a folder of the PATH.
+fn program_on_path(program: &str) -> bool {
+    let exts: &[&str] = if cfg!(windows) {
+        &["", ".exe", ".cmd", ".bat"]
+    } else {
+        &[""]
+    };
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).any(|dir| {
+        exts.iter()
+            .any(|e| dir.join(format!("{program}{e}")).is_file())
+    })
+}
+
+/// Stops with a list of what is missing, or lets the start go on.
+fn require(adapter: &str, own_command: bool) -> Result<(), String> {
+    let missing = missing_requirements(adapter, own_command);
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "cannot start an agent here yet: this machine is missing\n{}\nInstall that, then run the same command again.",
+        missing
+            .iter()
+            .map(|m| format!("  - {m}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    ))
+}
+
 /// Makes sure a daemon is listening, starting one in the background if not.
 async fn ensure_daemon() -> Result<(), String> {
     let dir = home_dir();
@@ -236,7 +335,12 @@ pub async fn start(a: StartArgs) -> Result<(), String> {
             a.policy
         ));
     }
+    // Everything the machine must have comes first, so nobody fills in the dashboard only to learn that tmux is missing.
+    require(&a.adapter, !a.command.is_empty())?;
     ensure_login().await?;
+    if let Some(n) = update_notice() {
+        println!("{n}\n");
+    }
     let dir = home_dir();
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     // The project is chosen on the dashboard, never here, and before the daemon starts (a person may take longer than the daemon's idle wait).
@@ -265,6 +369,8 @@ pub async fn start(a: StartArgs) -> Result<(), String> {
         .adapter
         .filter(|_| a.adapter == "claude")
         .unwrap_or(a.adapter.clone());
+    // The page may have chosen another program than the one asked for on the command line.
+    require(&adapter, !a.command.is_empty())?;
     ensure_daemon().await?;
     let (cols, rows) = terminal_size();
     let r = ipc::call(
@@ -1300,7 +1406,28 @@ fn confirm(rows: &[serde_json::Value]) -> bool {
 
 #[cfg(test)]
 mod picker_tests {
-    use super::{cut_to_width, window_top};
+    use super::{cut_to_width, update_command, window_top};
+
+    #[test]
+    fn the_update_command_matches_how_it_was_installed() {
+        assert_eq!(
+            update_command("/Users/a/.local/share/uv/tools/claudecord/bin/claudecord"),
+            "uv tool upgrade claudecord"
+        );
+        assert_eq!(
+            update_command(
+                "/home/a/.nvm/versions/node/v24/lib/node_modules/claudecord/bin/linux-x64/claudecord"
+            ),
+            "npm i -g claudecord@latest"
+        );
+        assert!(update_command("/usr/local/bin/claudecord").starts_with("pip install -U"));
+        assert!(
+            update_command(
+                "C:\\Users\\a\\AppData\\Roaming\\uv\\tools\\claudecord\\Scripts\\claudecord.exe"
+            )
+            .starts_with("uv tool")
+        );
+    }
 
     #[test]
     fn a_list_line_fits_the_columns_and_a_long_list_scrolls_with_the_highlight() {

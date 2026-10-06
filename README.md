@@ -57,6 +57,12 @@ The older single-team mode still exists for one team on one server: `claudecord 
 `claudecord` on its own lists the agents running here (the one in this folder highlighted) and a "+ new agent" line; Enter takes the highlighted line. A new agent opens the dashboard, where you choose the project (new or existing), the agent's name, program and role; nothing is asked in the terminal. `claudecord stop` lists what is running, asks, then stops everything here (every agent, and the connection to the hub; `-y` skips the question); `claudecord stop NAME` stops one. `claudecord restart` starts every
 agent's program again with the same name and folder (`claudecord restart NAME` for one).
 
+**What a machine needs.** `tmux` (it keeps each agent running when you close the window; not needed on Windows) and the program of the agent you start (`claude`, `codex` or `agy`). Before anything is asked, `claudecord start` checks both and, if something is missing, lists what and how to install it, then stops. A command of your own after `--` skips the agent-program check.
+
+**Updates.** The hub knows the newest version. A machine that connects running an older one is told, and the next `claudecord` or `claudecord start` prints one line with the command that updates it the way it was installed (`uv tool upgrade claudecord`, `npm i -g claudecord@latest`, `pip install -U claudecord`).
+
+**Files between agents.** `claudecord send FILE` puts a file in the chat; `claudecord send FILE --to NAME` sends it to another agent. It lands in that agent's `.claudecord/files` folder, the agent is told where, and the chat shows it in the thread of the two of them. Agents learn this from `claudecord guide`.
+
 `claudecord start` does exactly what you ask and nothing more. Every extra is a flag you choose:
 
 | Flag | Does |

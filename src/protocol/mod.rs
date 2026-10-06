@@ -480,6 +480,10 @@ impl NodeFrame {
 pub enum HubFrame {
     #[serde(rename = "welcome", rename_all = "camelCase")]
     Welcome { node_id: String },
+    /// The newest version of claudeCord, sent to a machine that told the hub (in its hello) it runs an older one. The machine decides how to
+    /// word the update (it knows how it was installed). A machine that does not know this frame ignores it.
+    #[serde(rename = "update")]
+    Update { latest: String },
     /// Every frame a machine numbered (see `stamp_of`) up to and including `n` is on disk and will not be asked for again. Sent only
     /// after the change the frame caused is saved, so a machine that has the ack can forget the frame for good.
     #[serde(rename = "ack")]
@@ -617,6 +621,31 @@ impl HubFrame {
             .ok()
             .filter(Self::is_valid)
     }
+}
+
+/// Whether version `a` is older than `b` (`0.2.5` is older than `0.2.10`). Numbers are compared one by one; a part that is not a number counts as 0,
+/// and a pre-release suffix (`0.3.0-rc1`) is ignored, so it never says a machine is behind the version it is a candidate for.
+pub fn version_older(a: &str, b: &str) -> bool {
+    let parts = |v: &str| -> Vec<u64> {
+        v.trim()
+            .trim_start_matches('v')
+            .split(['-', '+'])
+            .next()
+            .unwrap_or("")
+            .split('.')
+            .map(|p| p.parse().unwrap_or(0))
+            .collect()
+    };
+    let (x, y) = (parts(a), parts(b));
+    (0..x.len().max(y.len()))
+        .map(|i| {
+            (
+                x.get(i).copied().unwrap_or(0),
+                y.get(i).copied().unwrap_or(0),
+            )
+        })
+        .find(|(p, q)| p != q)
+        .is_some_and(|(p, q)| p < q)
 }
 
 const ADJECTIVES: [&str; 8] = [

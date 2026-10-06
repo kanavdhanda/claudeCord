@@ -654,6 +654,20 @@ impl State {
                         .await;
                 }
             }
+            HubFrame::Update { latest } => {
+                // Kept for the command line to mention the next time it runs (the daemon has no terminal to say it in).
+                if crate::protocol::version_older(env!("CARGO_PKG_VERSION"), &latest) {
+                    crate::info!(
+                        "daemon",
+                        "claudecord {latest} is available (this is {})",
+                        env!("CARGO_PKG_VERSION")
+                    );
+                    let _ = std::fs::write(
+                        self.dir.join("update.json"),
+                        serde_json::json!({ "latest": latest }).to_string(),
+                    );
+                }
+            }
             HubFrame::Welcome { .. } | HubFrame::Error { .. } | HubFrame::Ack { .. } => {}
         }
     }

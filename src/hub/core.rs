@@ -672,7 +672,19 @@ impl HubCore {
             return fx;
         }
         match frame {
-            NodeFrame::Hello { .. } => {}
+            NodeFrame::Hello { version, .. } => {
+                // A machine running an older claudeCord than this hub is told the newest version (it words the update itself).
+                if crate::protocol::version_older(&version, env!("CARGO_PKG_VERSION"))
+                    && let Some(&conn) = self.conns.get(node)
+                {
+                    fx.push(Effect::Send {
+                        conn,
+                        frame: HubFrame::Update {
+                            latest: env!("CARGO_PKG_VERSION").into(),
+                        },
+                    });
+                }
+            }
             NodeFrame::NodeInfo {
                 cores,
                 mem_mb,
