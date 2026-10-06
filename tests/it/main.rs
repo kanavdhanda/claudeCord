@@ -3,6 +3,7 @@
 //! own purpose and its own helpers; run one with `cargo test --test it races::` (the module name, then `::`).
 
 mod bucket;
+mod capacity;
 mod conformance;
 mod device_link;
 mod device_pty;
