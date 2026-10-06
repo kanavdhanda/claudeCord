@@ -80,17 +80,19 @@ impl Disk {
             .and_then(|v| v.parse::<u64>().ok())
             .map(std::time::Duration::from_millis);
         let (tx, rx) = channel::<Commit>();
+        // What a write gave up on stays here and goes out first with the next one, so a disk that was full or read-only for a while does not
+        // cost what the machines were already told was saved (they will not send it again). Only this much is kept, so an outage that never
+        // ends cannot fill the memory.
+        const KEEP_ROWS: usize = 100_000;
         let join = std::thread::Builder::new()
             .name("hub-disk".into())
             .spawn(move || {
+                let mut kept = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
                 while let Ok(first) = rx.recv() {
                     // Everything waiting becomes one transaction, with rows, audit lines and state changes in the order handed over.
                     let mut batch = vec![first];
                     batch.extend(rx.try_iter());
-                    let mut rows = Vec::new();
-                    let mut audits = Vec::new();
-                    let mut events = Vec::new();
-                    let mut changes = Vec::new();
+                    let (mut rows, mut audits, mut events, mut changes) = std::mem::take(&mut kept);
                     let mut waiting = Vec::new();
                     for c in batch {
                         rows.extend(c.rows);
@@ -105,6 +107,11 @@ impl Disk {
                     let ok = write(&mut writer, &rows, &audits, &events, &changes);
                     if !ok {
                         crate::error!("hub", "giving up on this write: the hub is running WITHOUT durability until the disk recovers");
+                        if rows.len() + events.len() + audits.len() <= KEEP_ROWS {
+                            kept = (rows, audits, events, changes);
+                        } else {
+                            crate::error!("hub", "the disk has been failing for so long that what is waiting for it is being dropped");
+                        }
                     }
                     for done in waiting {
                         let _ = done.send(ok);

@@ -1193,3 +1193,52 @@ async fn a_quiet_device_costs_the_hub_kilobytes_not_hundreds() {
     drop(links);
     hub.shutdown().await;
 }
+
+/// The disk fails for a while (here: the history table is out of reach, which makes every write fail the same way a full or read-only disk
+/// does) and then comes back. The hub keeps serving, as it says it does; what it took in meanwhile must not be gone for good once the disk
+/// is back, because the device was told it was saved and will never send it again.
+#[tokio::test]
+async fn what_arrived_while_the_disk_was_failing_is_written_when_it_recovers() {
+    let dir = tmp("diskfail");
+    let db = dir.join("t.db");
+    let (hub, tokens) = boot(cfg(), &db, &["mac"]).await;
+    let mut ws = connect(&hub, &tokens[0]).await.unwrap();
+    register(&mut ws, "otter").await;
+    wait_for("registered", async || {
+        hub.call(|c, _| (c.agent("p/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    let other = rusqlite::Connection::open(&db).unwrap();
+    other.busy_timeout(Duration::from_secs(5)).unwrap();
+    other
+        .execute_batch("ALTER TABLE history RENAME TO history_away")
+        .unwrap();
+    for n in 1..=3u64 {
+        ws.send(say(7, n, &format!("while the disk failed {n}")))
+            .await
+            .unwrap();
+    }
+    // The hub carries on (it answers) although every write fails.
+    assert!(connected(&hub, "mac").await, "the hub must keep serving");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    other
+        .execute_batch("ALTER TABLE history_away RENAME TO history")
+        .unwrap();
+    ws.send(say(7, 4, "after the disk came back"))
+        .await
+        .unwrap();
+    wait_for("the later message saved", async || {
+        saved_times(&db, "after the disk came back") == 1
+    })
+    .await;
+    for n in 1..=3 {
+        assert_eq!(
+            saved_times(&db, &format!("while the disk failed {n}")),
+            1,
+            "message {n}, which the hub took in while the disk was failing, never reached the disk"
+        );
+    }
+    hub.shutdown().await;
+}
