@@ -50,8 +50,12 @@ pub enum Cmd {
     Daemon,
     /// Save which hub this machine talks to.
     Login(machine::LoginArgs),
-    /// Put the team-chat guide for agents into this folder's AGENTS.md (and CLAUDE.md, for Claude). Never overwrites your own text; run it again to update.
-    Init,
+    /// Put the team-chat guide for agents into this folder's AGENTS.md. Never overwrites your own text; run it again to update. Claude already gets the
+    /// rules from claudecord itself; --claude also makes its CLAUDE.md include the guide.
+    Init {
+        #[arg(long)]
+        claude: bool,
+    },
     /// Start an agent in the current folder and open its terminal (starting the daemon if needed, and saying so).
     Start(machine::StartArgs),
     /// Show the tail of an agent's log: what it was sent and did, or what its terminal showed.
@@ -143,7 +147,7 @@ pub async fn run(cli: Cli) -> Result<(), String> {
             terminal,
         } => machine::logs(&agent, lines, terminal).await,
         Cmd::Handoff { agent, out } => machine::handoff(&agent, out).await,
-        Cmd::Init => machine::init().await,
+        Cmd::Init { claude } => machine::init(claude).await,
         Cmd::Ls => machine::ls().await,
         Cmd::Attach { agent } => machine::attach_or_pick(agent).await,
         Cmd::Stop { agent } => machine::stop(&agent).await,

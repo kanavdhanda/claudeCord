@@ -2061,3 +2061,47 @@ fn a_worker_is_told_about_the_other_workers_and_can_ask_who_is_here_and_who_can_
     assert!(team.contains("otter, lead"), "{team}");
     assert!(team.contains("ibis") && team.contains("offline"), "{team}");
 }
+
+#[test]
+fn when_an_agent_leaves_the_others_are_told_with_their_next_delivery() {
+    let mut w = World::new();
+    w.join("mac", 1, "otter");
+    w.join("gpu", 2, "heron");
+    w.join("box", 3, "ibis");
+    // Everyone gets their brief with a first message.
+    for who in ["otter", "heron", "ibis"] {
+        w.core
+            .human_message(
+                &w.kd.clone(),
+                "p",
+                &format!("@{who} hi"),
+                &MessageOpts::default(),
+                T0,
+            )
+            .unwrap();
+    }
+    w.core.on_node_frame(
+        "box",
+        NodeFrame::AgentGone {
+            agent_id: "p/ibis".into(),
+        },
+        T0 + 1,
+    );
+    let fx = w
+        .core
+        .human_message(
+            &w.kd.clone(),
+            "p",
+            "@heron again",
+            &MessageOpts::default(),
+            T0 + 2,
+        )
+        .unwrap()
+        .1;
+    let d = deliveries(&fx);
+    assert_eq!(
+        d[0].1, "system",
+        "the news rides along with the next message"
+    );
+    assert_eq!(d[0].2, "peers: otter", "ibis is gone from heron's list");
+}

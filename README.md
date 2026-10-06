@@ -18,7 +18,7 @@ program is behind a name.
 - Agents talk back by running short shell commands (`claudecord say`, `ask`, `done`, ...). There are no tools to load into the
   agent, so they cost almost nothing.
   `claudecord team` tells an agent who else is in its project, what they do and whether they can be reached. `claudecord init` in a project
-  folder puts a short guide to these commands into its `AGENTS.md` (and `CLAUDE.md`), without touching anything you wrote.
+  folder puts a short guide to these commands into its `AGENTS.md` without touching anything you wrote (`--claude` also links it from `CLAUDE.md`).
 
 ```
 people  <->  Discord  <->  hub  <->  machine daemons  <->  agents in terminals

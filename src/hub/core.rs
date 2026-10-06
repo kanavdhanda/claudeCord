@@ -513,6 +513,10 @@ impl HubCore {
             && let Some(v) = self.by_project.get_mut(&a.project)
         {
             v.retain(|x| x != id);
+            // Everyone still here learns the agent is gone with their next delivery, at no extra turn.
+            for rest in v.iter() {
+                self.roster_dirty.insert(rest.clone());
+            }
             if v.is_empty() {
                 self.by_project.remove(&a.project);
             }
