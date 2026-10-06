@@ -46,7 +46,7 @@ Discord threads).
 
     claudecord serve --data claudecord-data --public-url https://claudecord.example.com --client-id DISCORD_APP_ID --secret-file secret.txt
 
-`deploy/bootstrap.sh` does this on a fresh Ubuntu or Debian machine (service, TLS, firewall). The Discord application given here only signs people
+With Docker (built on the server itself, nothing is pulled from a registry): `deploy/compose.yml` has the steps; put nginx or Caddy in front for TLS. `deploy/baremetal/bootstrap.sh` does it without Docker on a fresh Ubuntu or Debian machine (service, TLS, firewall). The Discord application given here only signs people
 in; their bots are saved on the dashboard, encrypted with a key the program makes in the data folder (**back up the file `kek`**). To try everything
 on your own computer with no Discord at all: `claudecord serve --dev --public-url http://127.0.0.1:8787`, then `cd web && npm run dev`.
 
@@ -150,7 +150,7 @@ a bug caught inside the hub is reported to the affected projects' chats (owner p
 `systemctl stop` or Docker) saves everything and is recorded as a stop, while a kill is counted as downtime from the last heartbeat.
 
 The log can also be read over HTTP, `GET /api/v1/logs?lines=200&level=warn&q=text` (a dashboard token or a signed-in workspace owner; the dashboard
-shows it as a panel for them), and the hub is set up for systemd to restart it if its core hangs, not only if it dies (`deploy/claudecord-hub.service`:
+shows it as a panel for them), and the hub is set up for systemd to restart it if its core hangs, not only if it dies (`deploy/baremetal/claudecord-hub.service`:
 never gives up restarting, `Type=notify` with a watchdog); the Docker image has a health check. Database backups to the bucket run hourly.
 
 Failures are also prevented where they can be: the hub checks before serving that its data folder is writable and its database is sound
@@ -167,7 +167,7 @@ process is there) and `/readyz` (it can do its job, including Discord), and serv
     claudecord probe https://hub.example.com --name eu    # on ANOTHER machine: an outside check with its own record
 
 A scheduled GitHub Actions check (`.github/workflows/uptime.yml`, set the repository variable `HUB_URL`) is the free safety net.
-`deploy/` has a Caddyfile (automatic TLS), a systemd unit, and `bootstrap.sh`, which sets up a hub on a fresh Ubuntu or Debian machine in one command (not yet tried on a real server).
+`deploy/baremetal/` has a Caddyfile (automatic TLS), a systemd unit, and `bootstrap.sh`, which sets up a hub on a fresh Ubuntu or Debian machine in one command (not yet tried on a real server).
 
 ## Keeping cost down
 

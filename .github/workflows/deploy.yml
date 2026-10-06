@@ -1,17 +1,17 @@
 name: deploy
 
-# Puts a version of the hub's container image on your server and checks it is ready. If the new version does not become ready, the one that
-# was running is put back. Run it by hand (Actions > deploy > Run workflow) with an image tag: `latest`, a `sha-...` tag from the docker
-# workflow, or a release such as `v0.2.1`. The server must already have deploy/compose.yml set up in DEPLOY_DIR (see that file).
-# Set up once: secrets DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY, DEPLOY_KNOWN_HOSTS; variables HUB_URL (https://claudecord.kdhanda.com)
-# and DEPLOY_DIR (the folder holding compose.yml on the server, such as /opt/claudecord).
+# Updates the hub on your server and checks it is ready. The server builds the image itself from a clone of this repository (nothing is
+# published to a registry). If the new version does not become ready, the one that was running is put back. Run it by hand
+# (Actions > deploy > Run workflow) with a git ref: a release tag such as v0.2.1, a branch, or a commit.
+# Set up once: secrets DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY, DEPLOY_KNOWN_HOSTS; variables HUB_URL (https://claudecord.kdhanda.com) and
+# DEPLOY_DIR (the clone of the repository on the server, such as /opt/claudeCord), with deploy/compose.yml already set up there.
 on:
   workflow_dispatch:
     inputs:
-      tag:
-        description: Image tag to run (latest, sha-..., v0.2.1)
+      ref:
+        description: Git ref to run (v0.2.1, main, or a commit)
         required: true
-        default: latest
+        default: main
 
 concurrency: deploy
 
@@ -26,20 +26,20 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id; chmod 600 ~/.ssh/id
           echo "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
-      - name: Pull, restart, check, roll back on failure
+      - name: Build on the server, restart, check, roll back on failure
         env:
-          TAG: ${{ inputs.tag }}
+          REF: ${{ inputs.ref }}
           DIR: ${{ vars.DEPLOY_DIR }}
         run: |
           ssh_ () { ssh -i ~/.ssh/id -o StrictHostKeyChecking=yes "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" "$@"; }
-          # The tag that runs now is kept in .tag so a failed deploy can put it back.
-          ssh_ "cd '$DIR' && { cat .tag 2>/dev/null || echo latest; } > .tag.previous && echo '$TAG' > .tag \
-            && CLAUDECORD_TAG='$TAG' docker compose pull && CLAUDECORD_TAG='$TAG' docker compose up -d"
+          # The running image is kept as claudecord:previous, and the commit it came from in .previous, so a failed deploy can put it back.
+          ssh_ "set -e; cd '$DIR' && git rev-parse HEAD > .previous && { docker tag claudecord:local claudecord:previous 2>/dev/null || true; } \
+            && git fetch --tags origin && git checkout --detach '$REF' && cd deploy && docker compose up -d --build"
           for i in $(seq 1 20); do
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "${{ vars.HUB_URL }}/readyz" || true)
             [ "$code" = "200" ] && { echo "ready after $i checks"; exit 0; }
             sleep 3
           done
           echo "the new version never became ready, putting the previous one back"
-          ssh_ "cd '$DIR' && PREV=\$(cat .tag.previous) && echo \$PREV > .tag && CLAUDECORD_TAG=\$PREV docker compose up -d"
+          ssh_ "set -e; cd '$DIR' && git checkout --detach \$(cat .previous) && docker tag claudecord:previous claudecord:local && cd deploy && docker compose up -d --no-build"
           exit 1

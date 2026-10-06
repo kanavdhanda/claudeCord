@@ -16,3 +16,4 @@ docs/
 
 __pycache__/
 *.pyc
+deploy/oauth-secret
