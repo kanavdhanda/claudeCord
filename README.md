@@ -35,7 +35,7 @@ You do not run a server unless you want to (see "Run your own" below).
 2. **Run `claudecord`** (or `npx claudecord`) on a machine. The first time, it opens your browser: sign in with Discord and approve the machine.
 3. **Add a project** on the dashboard. A wizard takes you through it: save a Discord bot token (checked with Discord, stored encrypted, never shown
    again), pick a server and a channel (or make a new one), and name the project and its first agent. One bot can serve any number of servers.
-4. **Start an agent** in a project folder with the command the wizard shows, for example `claudecord start --project myproject`.
+4. **Start an agent** in a project folder with `claudecord start`: it opens a page on the dashboard where you choose the project, the agent's name, its program (or a saved startup command) and its role, and press Start. The hub then has your machine start the agent in that folder.
    A channel in Discord now carries the agent, which posts under its own name. Type there and the agent hears you. Leave with the usual tmux
    detach (Ctrl-b d); the agent keeps running. `claudecord attach NAME` returns to it. Where tmux is not installed (native Windows) a built-in
    terminal is used instead, and Ctrl-] leaves it.
@@ -61,20 +61,21 @@ agent's program again with the same name and folder (`claudecord restart NAME` f
 
 **Updates.** The hub knows the newest version. A machine that connects running an older one is told, and the next `claudecord` or `claudecord start` prints one line with the command that updates it the way it was installed (`uv tool upgrade claudecord`, `npm i -g claudecord@latest`, `pip install -U claudecord`).
 
-**Saved startup commands.** Any shell line can be saved under a name and used instead of the plain agent program, for example setup steps followed by the launch: `claudecord commands add opus "source venv/bin/activate && claude --model opus"` (add `--here` to keep it in this folder's `.claudecord/commands.json`, `--program codex` if it starts another program). `claudecord commands` lists them, `rm NAME` removes one, `claudecord start --saved NAME` uses one. The dashboard's Program list shows them too: this machine sends the page only the names and which program each starts, never the command, and the page sends back a name. The line runs in your own login shell on your machine. A command kept in a folder is shown and asked about the first time (a downloaded repository could carry one), and again if it changes. Not available on Windows.
+**Agents are started by the hub.** Only the hub (the dashboard's Start and Spawn buttons, and `/spawn` in Discord) can start an agent: a machine's own `claudecord` never does, so nobody can make a mess of what the hub knows. `claudecord start` only asks: it opens the page and waits, and when you press Start the hub asks this machine to start the agent in the folder you ran it from. If something stops it (the program is not installed, the name is taken), the page says what.
+
+**Saved startup commands.** Any shell line can be saved under a name on the dashboard (Startup commands), such as setup steps followed by the launch: `source venv/bin/activate && claude --model opus`, and which program it starts. They are kept with your account on the hub, shown there, and chosen in the Program list of the start page, on the Spawn button, or as `command:` in Discord's `/spawn` (names autocomplete). The hub sends the line with the request to start; the machine runs it in your own login shell, **only if its owner allowed that** with `claudecord settings custom-commands on` (off by default, so a stolen dashboard login cannot run code on machines that never agreed). Not available on Windows.
 
 **Several projects, moving agents.** One folder can serve several projects (the menu offers the one used last); each project keeps its own inbox for files, and two agents never share a folder at once (the second gets its own git worktree). An owner of both projects can move a running agent to another with `/move agent project` in Discord or the Move menu on the dashboard: it keeps its conversation and folder, its open tasks go back to the old project's lead, and from then on it only hears and speaks in the new project.
 
-**Files between agents.** `claudecord send FILE` puts a file in the chat; `claudecord send FILE --to NAME` sends it to another agent. It lands in that agent's `.claudecord/files` folder, the agent is told where, and the chat shows it in the thread of the two of them. Agents learn this from `claudecord guide`.
+**Files between agents.** `claudecord send FILE` puts a file in the chat; `claudecord send FILE --to NAME` sends it to another agent. It lands in that agent's `.claudecord/files/<project>` folder, the agent is told where, and the chat shows it in the thread of the two of them. Agents learn this from `claudecord guide`.
 
-`claudecord start` does exactly what you ask and nothing more. Every extra is a flag you choose:
+`claudecord start` does exactly what you ask and nothing more. `--project`, `--name`, `--adapter` and `--role` only give the page something to start with. These choices belong to your machine alone, and every one is a flag you choose:
 
 | Flag | Does |
 |---|---|
 | `--worktree` | gives the agent its own git worktree and branch (this happens by itself when another agent already works in the folder; a folder that is not a git repository can only hold one agent) |
 | `--pickup` | hands over the state the previous session saved |
 | `--restart N` | starts the agent again up to N times if it dies (default: never) |
-| `-- COMMAND...` | runs that program instead of the adapter's default |
 
 Start-up dialogs (such as a trust question) are never answered for you: they reach the chat as a permission request.
 
