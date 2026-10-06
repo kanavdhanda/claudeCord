@@ -778,7 +778,12 @@ impl Store {
     pub fn create_token(&mut self, node: &str, at: i64) -> rusqlite::Result<String> {
         let mut bytes = [0u8; 32];
         getrandom::fill(&mut bytes).expect("the system has a random source");
-        let token: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        // The prefix is what lets the screen-picture and file scrubbers recognise a machine token wherever it shows up. Tokens made
+        // without it still work: only a hash of the whole string is kept and compared.
+        let token = format!(
+            "ccn1.{}",
+            bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        );
         self.conn.execute(
             "INSERT INTO tokens (hash, node, at) VALUES (?1, ?2, ?3)",
             params![hash_token(&token), node, at],

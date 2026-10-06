@@ -1145,7 +1145,14 @@ impl Bridge {
             }
             _ => return,
         };
-        let _ = self.rest.respond(iid, token, &reply, true).await;
+        if reply.is_empty() {
+            let _ = self
+                .rest
+                .respond_silently(iid, token, i["application_id"].as_str().unwrap_or(""))
+                .await;
+        } else {
+            let _ = self.rest.respond(iid, token, &reply, true).await;
+        }
     }
 
     /// A button on a question or a permission request.

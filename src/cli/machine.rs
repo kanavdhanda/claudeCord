@@ -74,6 +74,7 @@ pub async fn login(a: LoginArgs) -> Result<(), String> {
         .hub
         .or_else(|| std::env::var("CLAUDECORD_HUB").ok())
         .unwrap_or_else(|| enroll::DEFAULT_HUB.to_string());
+    enroll::check_hub(&hub)?;
     let name = a.name.unwrap_or_else(enroll::default_node_name);
     let cfg = match a.token {
         Some(token) => Config {
@@ -889,6 +890,32 @@ async fn pick_and_attach(rows: &[serde_json::Value], with_new: bool) -> Result<(
     }
 }
 
+/// The first line of a window of `visible` lines, out of `len`, that keeps line `sel` in view.
+fn window_top(sel: usize, len: usize, visible: usize) -> usize {
+    sel.saturating_sub(visible / 2)
+        .min(len.saturating_sub(visible))
+}
+
+/// `text` cut to fit `max` terminal columns (a wide character, such as Chinese or an emoji, takes two), ending in an ellipsis when cut.
+fn cut_to_width(text: &str, max: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if text.width() <= max {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let w = c.width().unwrap_or(0);
+        if used + w + 1 > max {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out.push('…');
+    out
+}
+
 /// What a key press does in the list.
 #[derive(Debug, PartialEq)]
 enum PickKey {
@@ -941,6 +968,13 @@ fn pick_with_keys(title: &str, labels: &[String], start: usize) -> Result<Option
         .ok()
         .filter(|c| *c >= 20)
         .unwrap_or(80);
+    // As many lines as fit above the cursor with the title and a spare line (at least 3): a longer list scrolls with the highlight.
+    let height = crossterm::terminal::size()
+        .map(|(_, r)| r as usize)
+        .ok()
+        .filter(|r| *r >= 5)
+        .unwrap_or(24);
+    let visible = labels.len().min(height.saturating_sub(3).max(3));
     let shown: Vec<String> = labels
         .iter()
         .enumerate()
@@ -950,10 +984,7 @@ fn pick_with_keys(title: &str, labels: &[String], start: usize) -> Result<Option
             } else {
                 " ".into()
             };
-            format!(" {n}  {l}")
-                .chars()
-                .take(width.saturating_sub(3))
-                .collect()
+            cut_to_width(&format!(" {n}  {l}"), width.saturating_sub(3))
         })
         .collect();
     let mut out = std::io::stdout();
@@ -962,18 +993,24 @@ fn pick_with_keys(title: &str, labels: &[String], start: usize) -> Result<Option
         if again {
             queue!(
                 out,
-                cursor::MoveUp(shown.len() as u16 + 1),
+                cursor::MoveUp(visible as u16 + 1),
                 cursor::MoveToColumn(0),
                 Clear(ClearType::FromCursorDown)
             )?;
         }
-        queue!(
-            out,
-            Print(format!(
-                "{title}  (arrows or 1-9, Enter opens, Esc cancels)\r\n"
-            ))
-        )?;
-        for (i, l) in shown.iter().enumerate() {
+        let top = window_top(sel, labels.len(), visible);
+        let more = if visible < labels.len() {
+            format!("  [{}/{}]", sel + 1, labels.len())
+        } else {
+            String::new()
+        };
+        // The title is cut like the lines: if it wrapped, the redraw would move up by the wrong number of lines.
+        let head = cut_to_width(
+            &format!("{title}  (arrows or 1-9, Enter opens, Esc cancels){more}"),
+            width.saturating_sub(1),
+        );
+        queue!(out, Print(format!("{head}\r\n")))?;
+        for (i, l) in shown.iter().enumerate().skip(top).take(visible) {
             if i == sel {
                 queue!(
                     out,
@@ -1010,7 +1047,7 @@ fn pick_with_keys(title: &str, labels: &[String], start: usize) -> Result<Option
     };
     let _ = queue!(
         out,
-        cursor::MoveUp(shown.len() as u16 + 1),
+        cursor::MoveUp(visible as u16 + 1),
         cursor::MoveToColumn(0),
         Clear(ClearType::FromCursorDown),
         cursor::Show
@@ -1332,7 +1369,27 @@ fn ask_line(question: &str) -> Option<String> {
 
 #[cfg(test)]
 mod name_tests {
-    use super::valid_name;
+    use super::{cut_to_width, valid_name, window_top};
+
+    #[test]
+    fn a_list_line_fits_the_columns_and_a_long_list_scrolls_with_the_highlight() {
+        use unicode_width::UnicodeWidthStr;
+        assert_eq!(cut_to_width("short", 10), "short");
+        for t in [
+            "abcdefghijklmnop",
+            "日本語日本語日本語日本語",
+            "a😀b😀c😀d😀e😀f😀",
+        ] {
+            for max in [4, 7, 10] {
+                assert!(cut_to_width(t, max).width() <= max, "{t} {max}");
+            }
+        }
+        // 30 lines, 8 showing: the highlight is always among them, at the first, the middle and the last line.
+        for sel in [0, 1, 14, 28, 29] {
+            let top = window_top(sel, 30, 8);
+            assert!(top <= sel && sel < top + 8 && top + 8 <= 30, "{sel} {top}");
+        }
+    }
 
     #[test]
     fn a_name_follows_the_dashboards_rule() {

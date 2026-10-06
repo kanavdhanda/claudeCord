@@ -1300,3 +1300,36 @@ async fn an_attachment_that_cannot_be_fetched_is_said_so_and_the_message_still_g
     r.frame("the text itself", |f| deliver_text(f, "see this"))
         .await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn screen_asks_the_terminal_and_leaves_no_message_of_its_own() {
+    let mut r = rig("screenask").await;
+    register(&r, "otter").await;
+    let ch = channel(&r).await;
+    let mut i = interaction(
+        2,
+        &ch,
+        "1",
+        json!({"name": "screen", "options": [{"name": "agent", "type": 3, "value": "otter"}]}),
+    );
+    i["application_id"] = json!("app1");
+    r.event("INTERACTION_CREATE", i);
+    r.frame("the screen request", |f| {
+        matches!(f, HubFrame::Screen { .. })
+    })
+    .await;
+    // Discord is answered (a deferred, private acknowledgement) and that acknowledgement is taken away again: no "Asking ..." text anywhere.
+    let ack = r
+        .until("the acknowledgement", |l| {
+            l.responses.iter().find(|x| x["type"] == 5).cloned()
+        })
+        .await;
+    assert!(ack["content"].is_null(), "{ack}");
+    r.until("the acknowledgement taken away", |l| {
+        l.deleted
+            .iter()
+            .find(|d| d.starts_with("@original"))
+            .map(|d| json!(d))
+    })
+    .await;
+}

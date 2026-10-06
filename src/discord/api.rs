@@ -380,6 +380,29 @@ impl Rest {
         self.call(Method::POST, &format!("/interactions/{interaction}/{token}/callback"), Some(json!({"type": 4, "data": {"content": content.chars().take(1990).collect::<String>(), "flags": flags, "allowed_mentions": {"parse": []}}}))).await.map(|_| ())
     }
 
+    /// Answers a slash command without leaving a message: it is acknowledged (so Discord is satisfied) and the acknowledgement is taken away
+    /// again. For a command whose real answer arrives separately, such as a picture.
+    pub async fn respond_silently(
+        &self,
+        interaction: &str,
+        token: &str,
+        app_id: &str,
+    ) -> Result<()> {
+        self.call(
+            Method::POST,
+            &format!("/interactions/{interaction}/{token}/callback"),
+            Some(json!({"type": 5, "data": {"flags": 64}})),
+        )
+        .await?;
+        self.call(
+            Method::DELETE,
+            &format!("/webhooks/{app_id}/{token}/messages/@original"),
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
+
     /// Answers a person who is typing an option with the choices to list (Discord shows at most 25).
     pub async fn choices(&self, interaction: &str, token: &str, names: &[String]) -> Result<()> {
         let list: Vec<Value> = names

@@ -346,7 +346,8 @@ impl Control {
         let (Some(tenant), Some(node)) = (account, node) else {
             return Ok(Poll::Gone);
         };
-        let token = random_hex(32);
+        // The prefix is what lets the screen-picture and file scrubbers recognise a machine token wherever it shows up.
+        let token = format!("ccn1.{}", random_hex(32));
         // Taking the code and making the token are one step: either the machine gets a working token or nothing changed.
         let tx = c.unchecked_transaction()?;
         let gone = tx.execute(

@@ -312,6 +312,14 @@ pub async fn start_fake() -> (Fake, String) {
         l.deleted.extend(ids);
         Json(json!({}))
     }
+    /// A command's own answer taken away again (`/webhooks/{app}/{token}/messages/@original`): kept in `deleted` as "@original of <token>".
+    async fn hook_delete(
+        State(f): State<Fake>,
+        Path((_app, tok, m)): Path<(String, String, String)>,
+    ) -> Json<Value> {
+        f.log.lock().unwrap().deleted.push(format!("{m} of {tok}"));
+        Json(json!({}))
+    }
     async fn respond(
         State(f): State<Fake>,
         Path((id, _t)): Path<(String, String)>,
@@ -420,6 +428,10 @@ pub async fn start_fake() -> (Fake, String) {
         .route("/api/channels/{id}", get(get_channel).patch(patch_channel))
         .route("/api/channels/{id}/webhooks", post(mk_hook))
         .route("/api/webhooks/{id}/{tok}", post(hook_post))
+        .route(
+            "/api/webhooks/{id}/{tok}/messages/{m}",
+            axum::routing::delete(hook_delete),
+        )
         .route("/api/channels/{id}/threads", post(mk_thread))
         .route("/api/channels/{id}/messages", post(send).get(list_messages))
         .route("/api/channels/{id}/messages/bulk-delete", post(bulk_delete))

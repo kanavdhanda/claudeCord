@@ -287,7 +287,8 @@ pub fn handle(
                         format!("{n}'s machine is not connected, so its terminal cannot be read."),
                         fx,
                     ),
-                    Ok(fx) => (format!("Asking {n}'s terminal…"), fx),
+                    // No words: the picture is the answer (the bridge answers the command without leaving a message behind).
+                    Ok(fx) => (String::new(), fx),
                     Err(d) => fail(d),
                 },
                 None => ("There is no agent in this project.".into(), vec![]),

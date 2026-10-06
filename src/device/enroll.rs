@@ -35,6 +35,30 @@ pub fn why(e: &dyn std::error::Error) -> String {
     text
 }
 
+/// Checks that a hub address is one: an optional `http(s)://` or `ws(s)://`, then a host (with an optional port), then at most a path. Anything else
+/// (empty, spaces, `ftp://x`, `https://`) is refused with what is wrong, before a lookup of a made-up name is tried.
+pub fn check_hub(hub: &str) -> Result<(), String> {
+    let h = hub.trim();
+    let bad = |why: &str| {
+        Err(format!(
+            "\"{hub}\" is not a hub address ({why}); it looks like https://claudecord.example.com"
+        ))
+    };
+    if h.is_empty() {
+        return bad("it is empty");
+    }
+    let rest = match h.split_once("://") {
+        Some((scheme, rest)) if ["http", "https", "ws", "wss"].contains(&scheme) => rest,
+        Some((scheme, _)) => return bad(&format!("{scheme}:// is not http, https, ws or wss")),
+        None => h,
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if host.is_empty() || host.contains(char::is_whitespace) || rest.contains("://") {
+        return bad("there is no host name in it, or it has a space");
+    }
+    Ok(())
+}
+
 /// The `http(s)` form of a hub address, whatever form it was given in (`wss://x`, `https://x`, or just `x`).
 pub fn http_base(hub: &str) -> String {
     let h = hub.trim().trim_end_matches('/');
@@ -176,4 +200,33 @@ pub async fn enroll(hub: &str, node: &str, show: impl Fn(&str, &str)) -> Result<
         }
     }
     Err("nobody approved it in time; run the command again".into())
+}
+
+#[cfg(test)]
+mod hub_address_tests {
+    use super::check_hub;
+
+    #[test]
+    fn only_something_that_looks_like_a_hub_is_accepted() {
+        for ok in [
+            "https://claudecord.kdhanda.com",
+            "claudecord.kdhanda.com",
+            "127.0.0.1:8787",
+            "ws://localhost:8787/",
+            " wss://x.y ",
+        ] {
+            assert!(check_hub(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "",
+            "  ",
+            "ftp://x",
+            "https://",
+            "http://exa mple.com",
+            "not a url",
+            "https://https://x",
+        ] {
+            assert!(check_hub(bad).is_err(), "{bad}");
+        }
+    }
 }

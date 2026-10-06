@@ -29,6 +29,8 @@ sha2 = "0.11.0"
 tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "signal", "io-std", "process"] }
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 vt100 = "0.16.2"
+# Already in the build through vt100: how many terminal columns a character takes (a wide character takes two), to cut a list line to the window.
+unicode-width = "0.2.2"
 
 [profile.release]
 lto = "thin"

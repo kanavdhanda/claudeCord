@@ -179,7 +179,18 @@ fn socket_name(dir: &Path) -> std::io::Result<Name<'static>> {
         dir.hash(&mut h);
         format!("claudecord-{:x}", h.finish()).to_ns_name::<GenericNamespaced>()
     } else {
-        socket_path(dir).to_fs_name::<GenericFilePath>()
+        let path = socket_path(dir);
+        // A unix socket's path must fit in about 100 bytes (104 on macOS, 108 on Linux): say so, instead of the system's own wording.
+        if path.as_os_str().len() >= 100 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "the claudecord folder {} is too long for the daemon's socket (the whole path must stay under 100 characters): set CLAUDECORD_HOME to a shorter folder",
+                    dir.display()
+                ),
+            ));
+        }
+        path.to_fs_name::<GenericFilePath>()
     }
 }
 

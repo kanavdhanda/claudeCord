@@ -1551,3 +1551,22 @@ async fn a_file_changed_on_the_way_fails_its_checksum_and_is_not_kept() {
     assert!(left.is_empty(), "nothing damaged is kept: {left:?}");
     r.hub.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_second_daemon_does_not_take_over_a_running_ones_socket() {
+    let r = rig("second").await;
+    let cfg = Config {
+        hub_url: "ws://127.0.0.1:1".into(),
+        token: "x".into(),
+        node_name: "mac2".into(),
+    };
+    let err = daemon::run(cfg, r.dir.clone(), fast(vec![], 8, vec![]))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("already running"), "{err}");
+    assert!(
+        ipc::call(&r.dir, &Req::Ping).await.unwrap().ok,
+        "the first one still answers"
+    );
+    r.hub.shutdown().await;
+}

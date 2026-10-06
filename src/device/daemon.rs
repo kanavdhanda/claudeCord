@@ -39,7 +39,14 @@ pub fn shot(screen: &str) -> String {
         .map_or(0, |i| i + 1);
     let from = end.saturating_sub(25);
     let text = lines[from..end].join("\n");
-    let text = crate::security::redact::redact(&text).text;
+    let clean = crate::security::redact::redact(&text);
+    // A credential that wraps over the end of a line is two halves, and neither is recognised alone. If putting the lines together shows
+    // more of them than each line did, show nothing of the screen rather than a half.
+    let together = crate::security::redact::redact(&lines[from..end].concat());
+    if together.found.len() > clean.found.len() {
+        return "(the screen shows something that looks like a credential running over a line, so it is not shown)".into();
+    }
+    let text = clean.text;
     let skip = text.chars().count().saturating_sub(1500);
     text.chars().skip(skip).collect()
 }
@@ -260,6 +267,13 @@ struct State {
 pub async fn run(cfg: Config, dir: PathBuf, opts: Options) -> std::io::Result<()> {
     std::fs::create_dir_all(&dir)?;
     let sock = socket_path(&dir);
+    // Listening replaces whatever socket file is there (a leftover from a daemon that crashed), so a second daemon would quietly take the
+    // first one's place and leave its agents unreachable. One that answers is not a leftover.
+    if super::ipc::call(&dir, &Req::Ping).await.is_ok() {
+        return Err(std::io::Error::other(
+            "a daemon is already running here (claudecord stop ends it)",
+        ));
+    }
     let listener = super::ipc::listen(&dir)?;
     #[cfg(unix)]
     {
@@ -1650,15 +1664,7 @@ impl State {
         if !std::path::Path::new(&cwd).is_dir() {
             return Resp::err(format!("{cwd} is not a folder on this machine"));
         }
-        // Remember the folder, so the hub can start more agents for this project here later.
         let origin = PathBuf::from(&cwd);
-        let list = self.folders.entry(project.clone()).or_default();
-        list.retain(|f| f != &origin);
-        list.insert(0, origin.clone());
-        let _ = std::fs::write(
-            self.dir.join("projects.json"),
-            serde_json::to_string(&self.folders).expect("plain data"),
-        );
         // Two agents in one folder would trample each other's files and see each other's work. That is refused unless the
         // person asked for a separate git worktree for this one.
         let cwd = match self.isolate(&origin, &project, &name, opts.worktree) {
@@ -1743,6 +1749,15 @@ impl State {
             }
         };
         crate::info!("daemon", "{agent_id}: started {} in {cwd}", argv[0]);
+        // Remember the folder, so the hub can start more agents for this project here later. Only now that the agent is running: a start that was
+        // refused or failed must not leave the folder attached to the project.
+        let list = self.folders.entry(project.clone()).or_default();
+        list.retain(|f| f != &origin);
+        list.insert(0, origin.clone());
+        let _ = std::fs::write(
+            self.dir.join("projects.json"),
+            serde_json::to_string(&self.folders).expect("plain data"),
+        );
         let log = AgentLog::new(&self.dir, &agent_id);
         log.prepare();
         watch_terminal(&proc, &log);
@@ -1917,6 +1932,12 @@ mod intro_tests {
         assert!(t.ends_with("line 59") && !t.contains("line 10\n"), "{t}");
         assert!(shot("export API_KEY=abcdefghijklmnop1234").contains("[redacted"));
         assert!(shot("").is_empty());
+        // A token cut in two by the width of the terminal is not shown in halves.
+        let half = shot("see ghp_abcdefghijklmnopqrstuvwxy\nz0123456789ABCD here");
+        assert!(
+            !half.contains("ghp_") && !half.contains("z0123456789"),
+            "{half}"
+        );
     }
 
     #[test]
