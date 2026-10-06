@@ -212,6 +212,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | `scripts/load/smoke.sh` | A small, cheap run of the k6 load test, fit for every push: a few hundred users with three bots each for under a minute. |
 | `scripts/package_npm.py` | (no header comment) |
 | `scripts/publish_npm.sh` | Publishes the packages made by scripts/package_npm.py: every platform package first, the main package last, so nobody can install a main package whose platform package is not there yet. |
+| `scripts/release.sh` | Ships a version: bumps it in Cargo.toml (the one place pip and npm read it from), commits, tags and pushes. |
 | `scripts/smoke.sh` | End-to-end smoke test of the real binary, the way a person would use it: make a token, start the hub, log a machine in, and run the connection check. |
 | `scripts/test_packaging.py` | (no header comment) |
 | `scripts/tests_gate.py` | A diff line that adds a test. |
