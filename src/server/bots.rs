@@ -35,6 +35,11 @@ pub(crate) fn routes() -> Router<Gateway> {
         .route("/api/v1/projects", get(projects))
         .route("/api/v1/projects/{project}/target", put(set_target))
         .route("/api/v1/spawn", post(spawn))
+        .route("/api/v1/commands", get(list_commands))
+        .route(
+            "/api/v1/commands/{name}",
+            axum::routing::put(save_command).delete(delete_command),
+        )
         .route(
             "/api/v1/projects/{project}/agents/{name}/move",
             post(move_agent),
@@ -564,6 +569,70 @@ async fn set_target(
             .await;
     }
     json_reply(StatusCode::OK, json!({"ok": true}))
+}
+
+/// `GET /api/v1/commands`: the startup commands the signed-in account saved (the dashboard is where they are seen and kept).
+async fn list_commands(State(gw): State<Gateway>, headers: HeaderMap) -> Response {
+    let Some(a) = account_of(&gw, &headers) else {
+        return err(StatusCode::UNAUTHORIZED, "sign in first");
+    };
+    let all = gw.control.commands(&a.id).unwrap_or_default();
+    json_reply(
+        StatusCode::OK,
+        json!(
+            all.into_iter()
+                .map(
+                    |(name, c)| json!({ "name": name, "command": c.command, "program": c.program })
+                )
+                .collect::<Vec<_>>()
+        ),
+    )
+}
+
+#[derive(Deserialize)]
+struct CommandBody {
+    command: String,
+    #[serde(default = "claude_program")]
+    program: String,
+}
+
+fn claude_program() -> String {
+    "claude".into()
+}
+
+/// `PUT /api/v1/commands/{name}`: saves or replaces one startup command. It runs only on machines that allowed hub commands.
+async fn save_command(
+    State(gw): State<Gateway>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(b): Json<CommandBody>,
+) -> Response {
+    let Some(a) = account_of(&gw, &headers) else {
+        return err(StatusCode::UNAUTHORIZED, "sign in first");
+    };
+    let cmd = crate::control::Command {
+        command: b.command,
+        program: b.program,
+    };
+    match gw.control.set_command(&a.id, &name, cmd) {
+        Ok(()) => json_reply(StatusCode::OK, json!({"ok": true})),
+        Err(why) => err(StatusCode::BAD_REQUEST, &why),
+    }
+}
+
+/// `DELETE /api/v1/commands/{name}`: removes one.
+async fn delete_command(
+    State(gw): State<Gateway>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    let Some(a) = account_of(&gw, &headers) else {
+        return err(StatusCode::UNAUTHORIZED, "sign in first");
+    };
+    match gw.control.remove_command(&a.id, &name) {
+        Ok(removed) => json_reply(StatusCode::OK, json!({ "removed": removed })),
+        Err(why) => err(StatusCode::INTERNAL_SERVER_ERROR, &why),
+    }
 }
 
 #[derive(Deserialize)]

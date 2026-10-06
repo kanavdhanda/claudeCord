@@ -1305,3 +1305,166 @@ async fn a_channel_used_by_one_service_is_refused_to_another_service_with_the_sa
     );
     drop(fake);
 }
+
+#[tokio::test]
+async fn an_account_keeps_its_startup_commands_on_the_hub_and_nobody_elses_are_visible() {
+    let (gw, base) = rig().await;
+    let (alice, bob) = (sign_in(&base, "1").await, sign_in(&base, "2").await);
+    let put = |s: &str, name: &str, body: Value| {
+        let (c, url, s) = (
+            client(),
+            format!("{base}/api/v1/commands/{name}"),
+            s.to_string(),
+        );
+        async move {
+            c.put(url)
+                .header("cookie", format!("cc_session={s}"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        }
+    };
+    // Saving needs a sign-in; a name or a program that is not allowed, an empty line, and a very long one are refused.
+    assert_eq!(
+        client()
+            .put(format!("{base}/api/v1/commands/x"))
+            .json(&json!({"command": "claude"}))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16(),
+        401
+    );
+    assert_eq!(
+        put(&alice, "bad name", json!({"command": "claude"})).await,
+        400
+    );
+    assert_eq!(put(&alice, "x", json!({"command": "   "})).await, 400);
+    assert_eq!(
+        put(&alice, "x", json!({"command": "claude", "program": "bash"})).await,
+        400
+    );
+    assert_eq!(
+        put(&alice, "x", json!({"command": "a".repeat(2001)})).await,
+        400
+    );
+    assert_eq!(
+        put(&alice, "x", json!({"command": "echo \u{0}"})).await,
+        400
+    );
+    // A good one is saved, listed with its text, replaced by the same name, and unseen by another account.
+    assert_eq!(
+        put(
+            &alice,
+            "opus",
+            json!({"command": "source venv/bin/activate && claude --model opus"})
+        )
+        .await,
+        200
+    );
+    assert_eq!(
+        put(
+            &alice,
+            "fast",
+            json!({"command": "codex -m mini", "program": "codex"})
+        )
+        .await,
+        200
+    );
+    assert_eq!(
+        put(&alice, "opus", json!({"command": "claude --model opus"})).await,
+        200
+    );
+    let list = get_list(&base, "/api/v1/commands", &alice).await;
+    assert_eq!(
+        list,
+        vec![
+            json!({"name": "fast", "command": "codex -m mini", "program": "codex"}),
+            json!({"name": "opus", "command": "claude --model opus", "program": "claude"}),
+        ]
+    );
+    assert!(get_list(&base, "/api/v1/commands", &bob).await.is_empty());
+    // Removing one: once, then it is gone.
+    let del = |s: &str, name: &str| {
+        let (c, url, s) = (
+            client(),
+            format!("{base}/api/v1/commands/{name}"),
+            s.to_string(),
+        );
+        async move {
+            c.delete(url)
+                .header("cookie", format!("cc_session={s}"))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()["removed"]
+                .clone()
+        }
+    };
+    assert_eq!(
+        del(&bob, "opus").await,
+        false,
+        "another account cannot remove it"
+    );
+    assert_eq!(del(&alice, "opus").await, true);
+    assert_eq!(del(&alice, "opus").await, false);
+    assert_eq!(get_list(&base, "/api/v1/commands", &alice).await.len(), 1);
+    gw.shutdown().await;
+}
+
+#[test]
+fn a_database_from_before_commands_gets_the_column_and_keeps_its_accounts() {
+    use claudecord::control::{Command, Control};
+    let dir = std::env::temp_dir().join(format!("cc-oldctl-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("control.db");
+    // The first release's table, without the column, with an account in it.
+    {
+        let c = rusqlite::Connection::open(&file).unwrap();
+        c.execute_batch(
+            "CREATE TABLE accounts (id TEXT PRIMARY KEY, discord_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, created INTEGER NOT NULL);
+             INSERT INTO accounts VALUES ('t0000000000000001', '77', 'old-timer', 1);",
+        )
+        .unwrap();
+    }
+    for round in 0..2 {
+        // Opened twice: the second time the column is already there and nothing is added again, and what was saved is still there.
+        let ctl = Control::open(&file).unwrap();
+        assert_eq!(
+            ctl.account("t0000000000000001").unwrap().unwrap().name,
+            "old-timer"
+        );
+        assert_eq!(ctl.commands("t0000000000000001").unwrap().len(), round);
+        ctl.set_command(
+            "t0000000000000001",
+            "a",
+            Command {
+                command: "claude".into(),
+                program: "claude".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(ctl.commands("t0000000000000001").unwrap().len(), 1);
+    }
+    // At most 50 (the one saved above is the first of them).
+    let ctl = Control::open(&file).unwrap();
+    for i in 0..60 {
+        let r = ctl.set_command(
+            "t0000000000000001",
+            &format!("c{i}"),
+            Command {
+                command: "claude".into(),
+                program: "claude".into(),
+            },
+        );
+        assert_eq!(r.is_ok(), i < 49, "{i}: {r:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

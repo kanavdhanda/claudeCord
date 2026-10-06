@@ -24,6 +24,39 @@ pub struct Account {
     pub name: String,
 }
 
+/// A startup command an account saved on the hub: any shell line (setup steps and the launch), and which agent program it starts, so the
+/// screen reader knows how to tell idle from busy from a question. It runs on a machine only after that machine allowed it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Command {
+    pub command: String,
+    pub program: String,
+}
+
+/// The most commands an account may save, and the longest line.
+pub const MAX_COMMANDS: usize = 50;
+pub const MAX_COMMAND_CHARS: usize = 2000;
+
+impl Command {
+    /// Whether this is a command that may be saved under `name`, and if not, why.
+    pub fn problem(&self, name: &str) -> Option<&'static str> {
+        if !crate::protocol::is_slug(name) {
+            Some(
+                "a name is letters, digits, dots, dashes and underscores (up to 50), starting with a letter or digit",
+            )
+        } else if self.command.trim().is_empty() {
+            Some("the command is empty")
+        } else if self.command.chars().count() > MAX_COMMAND_CHARS {
+            Some("the command is too long (2000 characters at most)")
+        } else if self.command.contains('\0') {
+            Some("the command has a character that cannot be run")
+        } else if !["claude", "codex", "agy"].contains(&self.program.as_str()) {
+            Some("the program is claude, codex or agy")
+        } else {
+            None
+        }
+    }
+}
+
 /// What a machine asking to be approved is told while it waits.
 #[derive(Debug, PartialEq)]
 pub enum Poll {
@@ -136,6 +169,16 @@ impl Control {
                  guild_name TEXT NOT NULL DEFAULT '', channel_name TEXT NOT NULL DEFAULT '',
                  PRIMARY KEY (tenant, project));",
         )?;
+        // Added after the first release: an existing database gets the column once, a new one already has it.
+        let has_commands = conn
+            .prepare("SELECT 1 FROM pragma_table_info('accounts') WHERE name = 'commands'")?
+            .exists([])?;
+        if !has_commands {
+            conn.execute(
+                "ALTER TABLE accounts ADD COLUMN commands TEXT NOT NULL DEFAULT '{}'",
+                [],
+            )?;
+        }
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -183,6 +226,65 @@ impl Control {
     }
 
     /// An account by id.
+    /// The startup commands an account saved, by name.
+    pub fn commands(
+        &self,
+        tenant: &str,
+    ) -> rusqlite::Result<std::collections::BTreeMap<String, Command>> {
+        let text: Option<String> = self
+            .conn
+            .locked()
+            .query_row(
+                "SELECT commands FROM accounts WHERE id = ?1",
+                params![tenant],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(text
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default())
+    }
+
+    /// Saves (or replaces) one startup command of an account. Err says why it was refused.
+    pub fn set_command(&self, tenant: &str, name: &str, cmd: Command) -> Result<(), String> {
+        if let Some(why) = cmd.problem(name) {
+            return Err(why.into());
+        }
+        let mut all = self.commands(tenant).map_err(|e| e.to_string())?;
+        if !all.contains_key(name) && all.len() >= MAX_COMMANDS {
+            return Err(format!(
+                "an account can save {MAX_COMMANDS} commands at most"
+            ));
+        }
+        all.insert(name.to_string(), cmd);
+        self.write_commands(tenant, &all)
+    }
+
+    /// Removes one saved command. False if the account had none by that name.
+    pub fn remove_command(&self, tenant: &str, name: &str) -> Result<bool, String> {
+        let mut all = self.commands(tenant).map_err(|e| e.to_string())?;
+        if all.remove(name).is_none() {
+            return Ok(false);
+        }
+        self.write_commands(tenant, &all)?;
+        Ok(true)
+    }
+
+    fn write_commands(
+        &self,
+        tenant: &str,
+        all: &std::collections::BTreeMap<String, Command>,
+    ) -> Result<(), String> {
+        self.conn
+            .locked()
+            .execute(
+                "UPDATE accounts SET commands = ?2 WHERE id = ?1",
+                params![tenant, serde_json::to_string(all).expect("plain data")],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
     pub fn account(&self, id: &str) -> rusqlite::Result<Option<Account>> {
         self.conn
             .locked()
