@@ -1780,7 +1780,6 @@ async fn discord_spawn_can_name_a_saved_startup_command_with_autocomplete_and_re
     gw.shutdown().await;
 }
 
-
 /// One machine asks for a project to be picked, and says what it got back.
 async fn ask_pick(base: &str, token: &str) -> u16 {
     client()
