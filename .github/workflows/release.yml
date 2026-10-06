@@ -12,6 +12,11 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+env:
+  # The address a downloaded program goes to when nothing else is said (src/device/enroll.rs). It is built into every program: the npm
+  # binaries, the wheels and the sdist all get it from here, so none of them can fall back to the placeholder address.
+  CLAUDECORD_HUB: ${{ vars.HUB_URL }}
+
 permissions:
   contents: write
 
@@ -65,9 +70,6 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y musl-tools
         if: contains(matrix.target, 'musl')
       - run: cargo build --release --target ${{ matrix.target }} --bin claudecord
-        env:
-          # The address a downloaded program goes to when nothing else is said (src/device/enroll.rs).
-          CLAUDECORD_HUB: https://claudecord.kdhanda.com
       - run: cp target/${{ matrix.target }}/release/claudecord${{ matrix.ext }} claudecord-${{ matrix.name }}${{ matrix.ext }}
         shell: bash
       - uses: actions/upload-artifact@v4
@@ -96,6 +98,8 @@ jobs:
           target: ${{ matrix.target }}
           # An old glibc target (2014 = glibc 2.17) so the wheel installs on Ubuntu 22.04, Debian 12 and the like, not only the newest systems.
           manylinux: ${{ matrix.manylinux || 'auto' }}
+          # The manylinux build runs in a container, which only sees the variables it is handed.
+          docker-options: -e CLAUDECORD_HUB
           args: --release --out dist ${{ matrix.extra }}
       - uses: actions/upload-artifact@v4
         with:
@@ -116,8 +120,32 @@ jobs:
           name: sdist
           path: dist
 
+  # Every program that gets published must have the hub address built in. 0.2.4's wheels were built without it and sent people to the placeholder
+  # claudecord.example.com. This runs on every build (not only tags), so a trial run on main shows it too.
+  address:
+    needs: [build, wheels]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: "{wheel-*,bin-*}"
+          path: built
+          merge-multiple: true
+      - run: |
+          want="${CLAUDECORD_HUB#https://}"
+          [ -n "$want" ] || { echo "the HUB_URL repository variable is empty"; exit 1; }
+          for f in built/*; do
+            case "$f" in
+              *.whl) look() { unzip -p "$f" '*claudecord*'; } ;;
+              *) look() { cat "$f"; } ;;
+            esac
+            if look | grep -aq "claudecord.example.com"; then echo "$f has the placeholder hub address"; exit 1; fi
+            look | grep -aq "$want" || { echo "$f does not contain $want"; exit 1; }
+            echo "ok  $f"
+          done
+
   publish-pypi:
-    needs: [build, wheels, sdist, verify-packaging]
+    needs: [build, wheels, sdist, verify-packaging, address]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment: pypi
@@ -133,7 +161,7 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
 
   publish-npm:
-    needs: [build, verify-packaging]
+    needs: [build, verify-packaging, address]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment: npm
