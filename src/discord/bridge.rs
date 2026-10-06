@@ -40,6 +40,10 @@ pub trait Targets: Send + Sync {
     fn target(&self, project: &str) -> Option<(String, Target)>;
     /// Every placed project served by this bot, as (project, target).
     fn mine(&self, bot: &str) -> Vec<(String, Target)>;
+    /// The startup commands the account saved on the hub, as (name, shell line, program). None where there are no accounts.
+    fn commands(&self) -> Vec<(String, String, String)> {
+        Vec::new()
+    }
 }
 
 /// What makes a bridge serve only one bot of an account, in any of that bot's servers.
@@ -1055,11 +1059,27 @@ impl Bridge {
                 let mut todo: Vec<Value> =
                     i["data"]["options"].as_array().cloned().unwrap_or_default();
                 let mut typed = String::new();
+                let mut focused = String::new();
                 while let Some(o) = todo.pop() {
                     if o["focused"].as_bool() == Some(true) {
                         typed = o["value"].as_str().unwrap_or("").to_lowercase();
+                        focused = o["name"].as_str().unwrap_or("").to_string();
                     }
                     todo.extend(o["options"].as_array().cloned().unwrap_or_default());
+                }
+                // A saved startup command is chosen from the account's own list; everything else listed here is an agent.
+                if focused == "command" {
+                    let names: Vec<String> = self
+                        .scope
+                        .as_ref()
+                        .map(|sc| sc.targets.commands())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|c| c.0)
+                        .filter(|n| n.to_lowercase().contains(&typed))
+                        .collect();
+                    let _ = self.rest.choices(iid, token, &names).await;
+                    return;
                 }
                 let names: Vec<String> = self
                     .handle
@@ -1135,6 +1155,27 @@ impl Bridge {
                         opts.insert(format!("{k}_name"), n.to_string());
                     }
                     opts.insert(k.to_string(), val);
+                }
+                // A saved startup command is named in `/spawn`; the hub looks up its line and program, so what the core receives is already resolved
+                // (and a name the account does not have is refused here, before anything is asked of a machine).
+                opts.remove("command_line");
+                opts.remove("command_program");
+                if cmd == "spawn"
+                    && let Some(n) = opts.get("command").cloned().filter(|n| !n.is_empty())
+                {
+                    let found = self
+                        .scope
+                        .as_ref()
+                        .and_then(|sc| sc.targets.commands().into_iter().find(|c| c.0 == n));
+                    let Some((_, line, program)) = found else {
+                        let _ = self
+                            .rest
+                            .respond(iid, token, &format!("You have no saved startup command called {n}. Save one on the dashboard."), true)
+                            .await;
+                        return;
+                    };
+                    opts.insert("command_line".into(), line);
+                    opts.insert("command_program".into(), program);
                 }
                 // A project with no channel yet has nowhere to show its agents: moving one there is refused until the dashboard has placed it.
                 if cmd == "move"

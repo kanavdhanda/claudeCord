@@ -18,7 +18,7 @@ const USER: u8 = 6;
 
 fn opt(name: &str, kind: u8, description: &str, required: bool) -> Value {
     // An agent's name is chosen from a list of the agents here (Discord asks the bridge for it as the person types).
-    let agent = kind == STRING && matches!(name, "agent" | "from");
+    let agent = kind == STRING && matches!(name, "agent" | "from" | "command");
     json!({"name": name, "description": description, "type": kind, "required": required, "autocomplete": agent})
 }
 
@@ -150,6 +150,7 @@ pub fn definitions() -> Value {
                 opt("model", STRING, "Model", false),
                 opt("role", STRING, "Its job", false),
                 opt("label", STRING, "Kind of machine, such as gpu", false),
+                opt("command", STRING, "A saved startup command", false),
             ],
         ),
     ])
@@ -433,10 +434,18 @@ pub fn handle(
             Err(d) => fail(d),
         },
         "spawn" => {
-            let adapter = match get("adapter").unwrap_or("claude") {
+            // A saved command was resolved by the bridge: the program it starts is what the agent is read as.
+            let adapter = match get("command_program")
+                .or_else(|| get("adapter"))
+                .unwrap_or("claude")
+            {
                 "agy" => AdapterId::Agy,
                 "codex" => AdapterId::Codex,
                 _ => AdapterId::Claude,
+            };
+            let extra = crate::hub::controls::SpawnExtra {
+                command: get("command_line").map(String::from),
+                pick: None,
             };
             let n = get("name").unwrap_or("").to_ascii_lowercase();
             let n = n.as_str();
@@ -451,7 +460,7 @@ pub fn handle(
                 model: get("model").map(String::from),
                 role: get("role").map(String::from),
             };
-            match core.spawn_auto(by, project, spec, get("label")) {
+            match core.spawn_auto_with(by, project, spec, get("label"), extra) {
                 Ok((Some(node), fx)) => (format!("Asked {node} to start {n}."), fx),
                 Ok((None, _)) => ("No machine has room (or the right label).".into(), vec![]),
                 Err(d) => fail(d),

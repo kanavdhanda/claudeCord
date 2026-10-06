@@ -1566,19 +1566,16 @@ async fn pressing_start_makes_the_hub_ask_the_machine_to_start_the_agent_with_th
     // The machine is asked, with the command's text, the code of the waiting `claudecord start`, and the page's choices.
     let mut asked = None;
     for _ in 0..80 {
-        match tokio::time::timeout(Duration::from_millis(100), ws.next()).await {
-            Ok(Some(Ok(Message::Text(t)))) => {
-                if let Some(HubFrame::Spawn {
-                    agent,
-                    command,
-                    pick,
-                }) = HubFrame::parse(t.as_str())
-                {
-                    asked = Some((agent, command, pick));
-                    break;
-                }
-            }
-            _ => {}
+        if let Ok(Some(Ok(Message::Text(t)))) =
+            tokio::time::timeout(Duration::from_millis(100), ws.next()).await
+            && let Some(HubFrame::Spawn {
+                agent,
+                command,
+                pick,
+            }) = HubFrame::parse(t.as_str())
+        {
+            asked = Some((agent, command, pick));
+            break;
         }
     }
     let (agent, command, pick) = asked.expect("the machine was never asked to start the agent");
@@ -1640,6 +1637,145 @@ async fn pressing_start_makes_the_hub_ask_the_machine_to_start_the_agent_with_th
             .unwrap_or_default()
             .contains("not connected"),
         "{body}"
+    );
+    gw.shutdown().await;
+}
+
+#[tokio::test]
+async fn discord_spawn_can_name_a_saved_startup_command_with_autocomplete_and_refuses_unknown_ones()
+{
+    let (gw, base, fake) = rig_discord().await;
+    let s = sign_in(&base, "111").await;
+    let (_, bot) = post_json(
+        &base,
+        "/api/v1/bots",
+        Some(&s),
+        json!({"token": bot_token("777777777777777777")}),
+    )
+    .await;
+    let bot_id = bot["id"].as_str().unwrap().to_string();
+    let (_, ch) = post_json(
+        &base,
+        &format!("/api/v1/bots/{bot_id}/guilds/g2/channels"),
+        Some(&s),
+        json!({"name": "alpha"}),
+    )
+    .await;
+    let chan = ch["id"].as_str().unwrap().to_string();
+    let placed = client()
+        .put(format!("{base}/api/v1/projects/alpha/target"))
+        .header("cookie", format!("cc_session={s}"))
+        .json(&json!({"bot": bot_id, "guild": "g2", "channel": chan}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(placed.status().as_u16(), 200);
+    let save = client()
+        .put(format!("{base}/api/v1/commands/opus"))
+        .header("cookie", format!("cc_session={s}"))
+        .json(&json!({"command": "source venv/bin/activate && codex -m big", "program": "codex"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(save.status().as_u16(), 200);
+    // A machine, so there is somewhere to start the agent.
+    let token = enroll(&base, &s, "mac").await;
+    let mut ws = connect(&base, &token).await.unwrap();
+    assert!(welcomed(&mut ws).await.is_some());
+    ws.send(Message::Text(
+        serde_json::to_string(&NodeFrame::Hello {
+            node_name: "mac".into(),
+            version: "0.2.6".into(),
+            features: vec!["hub-spawn".into()],
+        })
+        .unwrap()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let slash = |id: &str, kind: u64, options: Value| {
+        let _ = fake.events.send(
+            json!({"op": 0, "s": 5, "t": "INTERACTION_CREATE", "d": {
+                "id": id, "token": "tok", "type": kind, "channel_id": chan, "application_id": "app1",
+                "member": {"user": {"id": "111", "username": "owner"}},
+                "data": {"name": "spawn", "options": options}
+            }})
+            .to_string(),
+        );
+    };
+    let answer = |id: &str| {
+        let (fake, id) = (fake.clone(), id.to_string());
+        async move {
+            for _ in 0..200 {
+                if let Some(r) = fake
+                    .log
+                    .lock()
+                    .unwrap()
+                    .responses
+                    .iter()
+                    .find(|r| r["interaction"] == id.as_str())
+                    .cloned()
+                {
+                    return r;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            panic!("no answer to {id}");
+        }
+    };
+    // Autocomplete lists the account's saved commands that match what is typed.
+    slash(
+        "auto1",
+        4,
+        json!([{"name": "name", "type": 3, "value": "owl"}, {"name": "command", "type": 3, "value": "op", "focused": true}]),
+    );
+    assert_eq!(
+        answer("auto1").await["choices"],
+        json!([{"name": "opus", "value": "opus"}])
+    );
+    // A name the account does not have is refused in words, and nothing is asked of the machine.
+    slash(
+        "bad1",
+        2,
+        json!([{"name": "name", "type": 3, "value": "owl"}, {"name": "command", "type": 3, "value": "nothere"}]),
+    );
+    assert!(
+        answer("bad1").await["content"]
+            .as_str()
+            .unwrap()
+            .contains("no saved startup command called nothere")
+    );
+    // The saved one: the machine is asked with its line, and the agent is read as the program the command starts.
+    slash(
+        "ok1",
+        2,
+        json!([{"name": "name", "type": 3, "value": "owl"}, {"name": "command", "type": 3, "value": "opus"}]),
+    );
+    let mut got = None;
+    for _ in 0..80 {
+        if let Ok(Some(Ok(Message::Text(t)))) =
+            tokio::time::timeout(Duration::from_millis(100), ws.next()).await
+            && let Some(HubFrame::Spawn {
+                agent,
+                command,
+                pick,
+            }) = HubFrame::parse(t.as_str())
+        {
+            got = Some((agent, command, pick));
+            break;
+        }
+    }
+    let (agent, command, pick) = got.expect("the machine was never asked");
+    assert_eq!(agent.name, "owl");
+    assert_eq!(agent.adapter, claudecord::protocol::AdapterId::Codex);
+    assert_eq!(
+        command.as_deref(),
+        Some("source venv/bin/activate && codex -m big")
+    );
+    assert!(
+        pick.is_none(),
+        "a Discord spawn is not for a waiting claudecord start"
     );
     gw.shutdown().await;
 }

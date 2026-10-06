@@ -74,6 +74,15 @@ impl Targets for ControlTargets {
             .map(|p| (p.project.clone(), as_target(p)))
             .collect()
     }
+
+    fn commands(&self) -> Vec<(String, String, String)> {
+        self.control
+            .commands(&self.tenant)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, c)| (name, c.command, c.program))
+            .collect()
+    }
 }
 
 fn as_target(p: super::Placement) -> Target {
