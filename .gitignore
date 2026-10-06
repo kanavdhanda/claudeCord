@@ -18,3 +18,4 @@ __pycache__/
 *.pyc
 deploy/oauth-secret
 deploy/data/
+.claude/worktrees/
