@@ -4,6 +4,7 @@ name: pr-tests
 # instead of adding a new one each push, and fails the check so it is not missed.
 on:
   pull_request:
+    paths-ignore: ["**.md", "learnings/**", "docs/**", "LICENSE"]
 
 permissions:
   contents: read

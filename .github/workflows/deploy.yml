@@ -72,7 +72,7 @@ jobs:
             fi
             deployed=$(~/ssh_ "cd '$DIR' && git rev-parse HEAD" || true)
             if [ -n "$deployed" ] && changed=$(git diff --name-only "$deployed" "$REF" 2>/dev/null); then
-              hub=$(echo "$changed" | grep -vE '^(.*\.md|site/|deploy/baremetal/|src/device/|src/agents/|src/cli/machine\.rs|src/cli/verbs\.rs|npm/|pyproject\.toml|scripts/|\.github/workflows/release\.yml)' || true)
+              hub=$(echo "$changed" | grep -vE '^(.*\.md|deploy/baremetal/|src/device/|src/agents/|src/cli/machine\.rs|src/cli/verbs\.rs|npm/|pyproject\.toml|scripts/|\.github/workflows/release\.yml)' || true)
               if [ -z "$hub" ]; then
                 echo "only the machine side changed since $deployed; nothing for the hub"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0
               fi

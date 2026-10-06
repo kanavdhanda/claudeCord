@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds the ONE npm package, `claudecord`: the launcher (npm/claudecord/bin/claudecord.js) and, next to it, the program for each
+"""Builds the ONE npm package, `claudecord`: the launcher (scripts/npm/bin/claudecord.js) and, next to it, the program for each
 platform that was built, in bin/<platform>-<cpu>/. The launcher runs the one that fits the machine. There are no other packages to
 publish, so a token for `claudecord` alone is enough. The version always comes from Cargo.toml, so Rust, npm and pip can never disagree.
 
@@ -38,7 +38,7 @@ def build(binaries, out):
     binaries, out = Path(binaries), Path(out)
     shutil.rmtree(out, ignore_errors=True)
     main = out / "claudecord"
-    shutil.copytree(ROOT / "npm" / "claudecord", main)
+    shutil.copytree(ROOT / "scripts" / "npm", main)
     made = []
     for plat, cpu, src_name, exe in PLATFORMS:
         src = binaries / src_name

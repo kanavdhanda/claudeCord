@@ -4,35 +4,42 @@ name: docker
 # (deploy/compose.yml), so a change to the Dockerfile or to what goes into it is caught here and not on the server.
 # This repository holds two things in one program: the HUB (the server, in the container) and the machine side (the `claudecord` command and daemon,
 # shipped to npm and PyPI by release.yml). This workflow is the hub's, so it skips changes that only touch the machine side (src/device,
-# src/agents, the machine commands, the npm and pip packaging). Code both sides share (protocol, security) still runs it.
+# src/agents, the machine commands, the packaging). Code both sides share (protocol, security) still runs it. It lists what the image is built
+# from (see the Dockerfile) rather than what to skip, so documentation, tests, scripts and other workflows never start it.
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - "**.md"
-      - "site/**"
-      - "deploy/baremetal/**"
-      - "src/device/**"
-      - "src/agents/**"
-      - "src/cli/machine.rs"
-      - "src/cli/verbs.rs"
-      - "npm/**"
-      - "pyproject.toml"
-      - "scripts/**"
-      - ".github/workflows/release.yml"
+    paths:
+      - "src/**"
+      - "!src/device/**"
+      - "!src/agents/**"
+      - "!src/cli/machine.rs"
+      - "!src/cli/verbs.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "assets/**"
+      - "examples/**"
+      - "web/dist/**"
+      - "deploy/compose.yml"
+      - ".github/workflows/docker.yml"
   pull_request:
-    paths-ignore:
-      - "**.md"
-      - "site/**"
-      - "deploy/baremetal/**"
-      - "src/device/**"
-      - "src/agents/**"
-      - "src/cli/machine.rs"
-      - "src/cli/verbs.rs"
-      - "npm/**"
-      - "pyproject.toml"
-      - "scripts/**"
-      - ".github/workflows/release.yml"
+    paths:
+      - "src/**"
+      - "!src/device/**"
+      - "!src/agents/**"
+      - "!src/cli/machine.rs"
+      - "!src/cli/verbs.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "assets/**"
+      - "examples/**"
+      - "web/dist/**"
+      - "deploy/compose.yml"
+      - ".github/workflows/docker.yml"
   workflow_dispatch:
 
 permissions:

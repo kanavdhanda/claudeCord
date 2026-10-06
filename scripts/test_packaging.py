@@ -69,7 +69,7 @@ if (!p.endsWith('claudecord.exe') || !p.includes('win32-x64')) throw new Error('
 const m = find('darwin', 'arm64', {}, '/d', yes);
 if (!m.endsWith('claudecord') || !m.includes('darwin-arm64')) throw new Error('mac path ' + m);
 if (KEYS.length !== 5) throw new Error('five platforms');
-""" % str(ROOT / "npm/claudecord/bin/claudecord.js")
+""" % str(ROOT / "scripts/npm/bin/claudecord.js")
     run("node", "-e", script)
     print("npm launcher: platform choice, override and error messages")
 

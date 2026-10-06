@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths-ignore: ["**.md", "site/**", "learnings/**", "deploy/**"]
+    paths-ignore: ["**.md", "learnings/**", "docs/**", "deploy/**", "LICENSE", ".github/ISSUE_TEMPLATE/**", ".github/CODEOWNERS", ".github/dependabot.yml"]
   pull_request:
-    paths-ignore: ["**.md", "site/**", "learnings/**", "deploy/**"]
+    paths-ignore: ["**.md", "learnings/**", "docs/**", "deploy/**", "LICENSE", ".github/ISSUE_TEMPLATE/**", ".github/CODEOWNERS", ".github/dependabot.yml"]
 
 concurrency:
   group: rust-${{ github.ref }}
