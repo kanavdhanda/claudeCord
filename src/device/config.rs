@@ -205,10 +205,18 @@ mod setting_tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_command_runs_in_the_persons_login_shell() {
         let argv = shell_argv("echo hi && exit 3").unwrap();
         assert_eq!(&argv[1..], ["-lc", "echo hi && exit 3"]);
         assert!(std::path::Path::new(&argv[0]).is_file());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn saved_commands_are_refused_on_windows_with_the_reason() {
+        let why = shell_argv("echo hi").unwrap_err();
+        assert!(why.contains("Windows"), "{why}");
     }
 }

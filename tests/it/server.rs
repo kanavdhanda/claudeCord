@@ -1147,6 +1147,8 @@ async fn the_dashboard_route_pages_back_into_the_compressed_files() {
 
 /// A device that is connected and quiet must cost the hub a few kilobytes, not the 128 KB read buffer and 128 KB write buffer a WebSocket
 /// gets by default: at 100 KB each, 5,000 machines were 500 MB before they said anything.
+// Memory is read with `ps`, which Windows does not have.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_quiet_device_costs_the_hub_kilobytes_not_hundreds() {
     use tokio_tungstenite::connect_async_with_config;
