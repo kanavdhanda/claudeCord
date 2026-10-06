@@ -13,6 +13,13 @@ pub const DEFAULT_HUB: &str = match option_env!("CLAUDECORD_HUB") {
     None => "https://claudecord.example.com",
 };
 
+/// The default hub, as text that really sits in the program. Copied straight from the constant, the compiler on some platforms (x86_64) turns
+/// a short address into numbers inside the code, and then nothing can look at the finished program and see which address it was built for
+/// (the release check does exactly that). Passing it through `black_box` keeps it a string.
+pub fn default_hub() -> &'static str {
+    std::hint::black_box(DEFAULT_HUB)
+}
+
 /// An error with every cause under it ("error sending request: connection error: invalid peer certificate: UnknownIssuer"), because the top
 /// line alone ("error sending request") cannot tell a blocked network from a missing certificate store or a refusing proxy. Ends with the
 /// likely fix for the two that a person can do something about.

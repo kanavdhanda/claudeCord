@@ -73,7 +73,7 @@ pub async fn login(a: LoginArgs) -> Result<(), String> {
     let hub = a
         .hub
         .or_else(|| std::env::var("CLAUDECORD_HUB").ok())
-        .unwrap_or_else(|| enroll::DEFAULT_HUB.to_string());
+        .unwrap_or_else(|| enroll::default_hub().to_string());
     enroll::check_hub(&hub)?;
     let name = a.name.unwrap_or_else(enroll::default_node_name);
     let cfg = match a.token {
