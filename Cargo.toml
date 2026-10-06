@@ -1,6 +1,6 @@
 [package]
 name = "claudecord"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 description = "Run Claude Code, agy and Codex agents on any machine as a Discord team"
 license = "MIT"
