@@ -5,7 +5,7 @@
 use super::gateway::{Gateway, account_of, err, json_reply};
 use crate::control::seal;
 use crate::discord::api::Rest;
-use crate::hub::controls::MoveError;
+use crate::hub::controls::{MoveError, SpawnExtra};
 use crate::hub::{Chat, Effect, Human};
 use crate::protocol::{AdapterId, AgentSpec, is_slug};
 use crate::sync::Lock;
@@ -701,6 +701,9 @@ struct SpawnAsk {
     node: Option<String>,
     #[serde(default)]
     label: Option<String>,
+    /// The name of one of the account's saved startup commands, to run instead of the plain agent program.
+    #[serde(default)]
+    command: Option<String>,
 }
 
 /// Starts another agent on one of the account's machines, in a folder that machine already knows for the project (the machine decides).
@@ -721,7 +724,29 @@ async fn spawn(State(gw): State<Gateway>, headers: HeaderMap, Json(b): Json<Spaw
         name: b.name.to_ascii_lowercase(),
         ..b
     };
-    let adapter = match b.adapter.as_deref().unwrap_or("claude") {
+    // A saved command (kept on the hub) is named, never typed here; the program it starts is what the agent is read as.
+    let (line, program) = match b.command.as_deref().filter(|n| !n.is_empty()) {
+        Some(n) => match gw
+            .control
+            .commands(&a.id)
+            .ok()
+            .and_then(|m| m.get(n).cloned())
+        {
+            Some(c) => (Some(c.command), Some(c.program)),
+            None => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "you have no saved command by that name",
+                );
+            }
+        },
+        None => (None, None),
+    };
+    let adapter = match program
+        .as_deref()
+        .or(b.adapter.as_deref())
+        .unwrap_or("claude")
+    {
         "claude" => AdapterId::Claude,
         "codex" => AdapterId::Codex,
         "agy" => AdapterId::Agy,
@@ -752,11 +777,15 @@ async fn spawn(State(gw): State<Gateway>, headers: HeaderMap, Json(b): Json<Spaw
         .state
         .handle
         .call(move |c, _| {
+            let extra = SpawnExtra {
+                command: line,
+                pick: None,
+            };
             let out = match &node {
                 Some(n) => c
-                    .spawn(&by, &project, n, spec)
+                    .spawn_with(&by, &project, n, spec, extra)
                     .map(|(sent, fx)| (sent.then(|| n.clone()), fx)),
-                None => c.spawn_auto(&by, &project, spec, label.as_deref()),
+                None => c.spawn_auto_with(&by, &project, spec, label.as_deref(), extra),
             };
             match out {
                 Ok((n, fx)) => (Ok(n), fx),

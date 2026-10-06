@@ -570,6 +570,7 @@ async fn a_flood_of_frames_is_cut_off_by_the_rate_limit() {
     let hello = serde_json::to_string(&NodeFrame::Hello {
         node_name: "mac".into(),
         version: "t".into(),
+        features: vec![],
     })
     .unwrap();
     for _ in 0..3000 {

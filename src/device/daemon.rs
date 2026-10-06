@@ -602,7 +602,7 @@ impl State {
                 &data,
                 sha256,
             ),
-            HubFrame::Spawn { agent } => {
+            HubFrame::Spawn { agent, .. } => {
                 // Only in a folder this machine already knows for the project (the hub never chooses a folder). A folder with no agent in it
                 // is used first; if every known folder is busy, the first one is used with its own git worktree.
                 let folders = self

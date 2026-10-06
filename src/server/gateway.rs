@@ -11,6 +11,7 @@ use super::{Oauth, admit};
 use crate::control::registry::Registry;
 use crate::control::seal::KeyProvider;
 use crate::control::{Account, Control, Poll};
+use crate::hub::Human;
 use crate::protocol::NODE_CONNECT_PATH;
 use crate::security::limits::FailureLimiter;
 use crate::sync::Lock;
@@ -76,11 +77,6 @@ pub(crate) struct Pick {
     folder: String,
     /// The project the folder already belongs to on the machine, offered first on the page.
     hint: Option<String>,
-    /// The saved startup commands the machine offers for this folder: their names and which program each starts (never the command itself,
-    /// which stays on the machine; the page sends back only a name).
-    commands: Vec<(String, String, String)>,
-    /// Which of them the page chose.
-    command: Option<String>,
     chosen: Option<String>,
     /// What else the page asked for with the project: the agent's name, program and role.
     agent: Option<String>,
@@ -333,16 +329,6 @@ fn machine_auth(
 struct PickStart {
     folder: String,
     project: Option<String>,
-    #[serde(default)]
-    commands: Vec<OfferedCommand>,
-}
-
-/// One saved command a machine offers: a name, the program it starts, and where it is kept (`machine` or `folder`).
-#[derive(Deserialize)]
-struct OfferedCommand {
-    name: String,
-    program: String,
-    source: String,
 }
 
 /// `POST /api/device/pick`: `claudecord start` in a folder that belongs to no project yet asks for a short code. The person opens
@@ -366,18 +352,6 @@ async fn pick_start(
         .take(100)
         .collect();
     let hint = b.project.filter(|p| crate::protocol::is_slug(p));
-    // Only well-formed names of the three known programs are kept, and not many of them.
-    let commands: Vec<(String, String, String)> = b
-        .commands
-        .into_iter()
-        .filter(|c| {
-            crate::protocol::is_slug(&c.name)
-                && matches!(c.program.as_str(), "claude" | "codex" | "agy")
-                && matches!(c.source.as_str(), "machine" | "folder")
-        })
-        .take(50)
-        .map(|c| (c.name, c.program, c.source))
-        .collect();
     let mut picks = gw.picks.locked();
     picks.retain(|_, p| now - p.at < PICK_TTL_MS);
     if picks.len() >= 500 {
@@ -394,8 +368,6 @@ async fn pick_start(
             node,
             folder,
             hint,
-            commands,
-            command: None,
             chosen: None,
             agent: None,
             adapter: None,
@@ -426,19 +398,18 @@ async fn pick_poll(
         Some(p)
             if p.tenant == tenant && p.node == node && now - p.at < PICK_TTL_MS && !p.collected =>
         {
-            let (chosen, agent, adapter, role, command) = (
+            let (chosen, agent, adapter, role) = (
                 p.chosen.clone(),
                 p.agent.clone(),
                 p.adapter.clone(),
                 p.role.clone(),
-                p.command.clone(),
             );
             if chosen.is_some() {
                 p.collected = true;
             }
             json_reply(
                 StatusCode::OK,
-                json!({ "chosen": chosen, "agent": agent, "adapter": adapter, "role": role, "command": command }),
+                json!({ "chosen": chosen, "agent": agent, "adapter": adapter, "role": role }),
             )
         }
         _ => err(
@@ -504,7 +475,6 @@ async fn pick_view(
                 "folder": p.folder,
                 "node": p.node,
                 "project": p.hint,
-                "commands": p.commands.iter().map(|(name, program, source)| json!({ "name": name, "program": program, "source": source })).collect::<Vec<_>>(),
                 "collected": p.collected,
                 "result": p.result.as_ref().map(|(ok, message)| json!({ "ok": ok, "message": message })),
             }),
@@ -522,7 +492,7 @@ struct PickChoose {
     agent: Option<String>,
     adapter: Option<String>,
     role: Option<String>,
-    /// The name of one of the saved commands the machine offered.
+    /// The name of one of the account's saved startup commands (kept on the hub).
     command: Option<String>,
 }
 
@@ -570,34 +540,153 @@ async fn pick_choose(
     if let Err(why) = super::bots::account_ready(&gw, &a.id).await {
         return err(StatusCode::CONFLICT, &why);
     }
+    let agent = b
+        .agent
+        .filter(|n| !n.is_empty() && crate::protocol::agent_name_problem(n).is_none())
+        .map(|n| n.to_ascii_lowercase());
+    let role = b
+        .role
+        .map(|r| {
+            r.chars()
+                .filter(|c| !c.is_control())
+                .take(100)
+                .collect::<String>()
+        })
+        .map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty());
+    // A saved startup command is chosen by name from the account's own list on the hub; the program it starts is what the agent is read as.
+    let (command, adapter) = match b.command.as_deref().filter(|n| !n.is_empty()) {
+        Some(n) => match gw
+            .control
+            .commands(&a.id)
+            .ok()
+            .and_then(|m| m.get(n).cloned())
+        {
+            Some(c) => (Some(c.command), c.program),
+            None => {
+                return err(
+                    StatusCode::BAD_REQUEST,
+                    "you have no saved command by that name",
+                );
+            }
+        },
+        None => (
+            None,
+            b.adapter
+                .filter(|x| matches!(x.as_str(), "claude" | "codex" | "agy"))
+                .unwrap_or_else(|| "claude".into()),
+        ),
+    };
+    let Some(node) = gw.picks.locked().get(&code).map(|p| p.node.clone()) else {
+        return err(
+            StatusCode::NOT_FOUND,
+            "that choice expired; run the command again",
+        );
+    };
+    // The hub asks the machine to start the agent (a `claudecord start` only ever asks; it never starts one itself). A machine too old to be
+    // asked this way still collects the choice and starts the agent itself, as it always did.
+    let Ok(t) = gw.registry.hub(&a) else {
+        return err(StatusCode::SERVICE_UNAVAILABLE, "your hub could not start");
+    };
+    let by = Human {
+        id: a.discord_id.clone(),
+        name: a.name.clone(),
+    };
+    enum Outcome {
+        Spawned,
+        Legacy,
+        Offline,
+        Taken(String),
+        Denied(String),
+    }
+    let (project, pick_code, program, line, who) = (
+        b.project.clone(),
+        code.clone(),
+        adapter.clone(),
+        command.clone(),
+        agent.clone(),
+    );
+    let role_for_spec = role.clone();
+    let outcome = t
+        .state
+        .handle
+        .call(move |c, _| {
+            if !c.is_connected(&node) {
+                return (Outcome::Offline, vec![]);
+            }
+            if !c.node_can(&node, "hub-spawn") {
+                return (Outcome::Legacy, vec![]);
+            }
+            let taken: std::collections::HashSet<String> = c
+                .agents_of_project(&project)
+                .iter()
+                .map(|x| x.name.to_lowercase())
+                .collect();
+            let name = who.unwrap_or_else(|| {
+                crate::protocol::auto_name(&taken, |n| {
+                    let mut r = [0u8; 2];
+                    let _ = getrandom::fill(&mut r);
+                    usize::from(u16::from_le_bytes(r)) % n
+                })
+            });
+            if taken.contains(&name) {
+                return (Outcome::Taken(name), vec![]);
+            }
+            let adapter = match program.as_str() {
+                "codex" => crate::protocol::AdapterId::Codex,
+                "agy" => crate::protocol::AdapterId::Agy,
+                _ => crate::protocol::AdapterId::Claude,
+            };
+            let spec = crate::protocol::AgentSpec {
+                agent_id: format!("{project}/{name}"),
+                name,
+                project: project.clone(),
+                adapter,
+                model: None,
+                role: role_for_spec,
+            };
+            let extra = crate::hub::controls::SpawnExtra {
+                command: line,
+                pick: Some(pick_code),
+            };
+            match c.spawn_with(&by, &project, &node, spec, extra) {
+                Ok((true, fx)) => (Outcome::Spawned, fx),
+                Ok((false, _)) => (Outcome::Offline, vec![]),
+                Err(d) => (Outcome::Denied(format!("{d:?}")), vec![]),
+            }
+        })
+        .await;
+    match outcome {
+        Some(Outcome::Offline) => {
+            return err(
+                StatusCode::CONFLICT,
+                "your machine is not connected right now. Is `claudecord start` still running there?",
+            );
+        }
+        Some(Outcome::Taken(n)) => {
+            return err(
+                StatusCode::CONFLICT,
+                &format!(
+                    "{} already has an agent called {n}: choose another name",
+                    b.project
+                ),
+            );
+        }
+        Some(Outcome::Denied(d)) => return err(StatusCode::FORBIDDEN, &d),
+        None => return err(StatusCode::SERVICE_UNAVAILABLE, "your hub is not answering"),
+        Some(Outcome::Legacy) if command.is_some() => {
+            return err(
+                StatusCode::CONFLICT,
+                "that machine runs an older claudecord that cannot run saved commands: update it (claudecord prints how)",
+            );
+        }
+        Some(Outcome::Legacy) | Some(Outcome::Spawned) => {}
+    }
     if let Some(p) = gw.picks.locked().get_mut(&code) {
         p.chosen = Some(b.project);
-        p.agent = b
-            .agent
-            .filter(|n| crate::protocol::agent_name_problem(n).is_none() && !n.is_empty());
-        p.adapter = b
-            .adapter
-            .filter(|a| matches!(a.as_str(), "claude" | "codex" | "agy"));
-        // Only a command this machine offered can be chosen; its program is what the agent is read as.
-        if let Some(c) = b
-            .command
-            .as_deref()
-            .and_then(|n| p.commands.iter().find(|c| c.0 == n))
-            .cloned()
-        {
-            p.command = Some(c.0);
-            p.adapter = Some(c.1);
-        }
-        p.role = b
-            .role
-            .map(|r| {
-                r.chars()
-                    .filter(|c| !c.is_control())
-                    .take(100)
-                    .collect::<String>()
-            })
-            .map(|r| r.trim().to_string())
-            .filter(|r| !r.is_empty());
+        p.agent = agent;
+        p.adapter = Some(adapter);
+        p.role = role;
     }
     json_reply(StatusCode::OK, json!({ "ok": true }))
 }

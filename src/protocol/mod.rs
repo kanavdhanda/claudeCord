@@ -154,7 +154,14 @@ impl AgentSpec {
 #[serde(tag = "t")]
 pub enum NodeFrame {
     #[serde(rename = "hello", rename_all = "camelCase")]
-    Hello { node_name: String, version: String },
+    Hello {
+        node_name: String,
+        version: String,
+        /// What this machine can do beyond the basics (`hub-spawn`: it starts agents when the hub asks and never on its own). The hub only
+        /// relies on what is listed, so an older machine that lists nothing keeps working the way it did.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
+    },
     #[serde(rename = "agent.register")]
     AgentRegister { agent: AgentSpec, cwd: String },
     #[serde(rename = "agent.status", rename_all = "camelCase")]
@@ -562,7 +569,16 @@ pub enum HubFrame {
     },
     /// The hub never chooses a directory. Devices only start agents in folders they registered themselves.
     #[serde(rename = "spawn")]
-    Spawn { agent: AgentSpec },
+    Spawn {
+        agent: AgentSpec,
+        /// A startup command the account saved on the hub: the shell line to run in place of the plain agent program. A machine runs it only
+        /// if its owner allowed that (`claudecord settings custom-commands on`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        /// The code of a `claudecord start` waiting on this machine: the agent goes in the folder that command was run in.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pick: Option<String>,
+    },
     #[serde(rename = "stop", rename_all = "camelCase")]
     Stop { agent_id: String },
     /// Start this agent's program again from its base: a new session in a new terminal, same name and folder.
@@ -614,7 +630,19 @@ impl HubFrame {
     /// Whether the value meets its size and format limits.
     pub fn is_valid(&self) -> bool {
         match self {
-            Self::Spawn { agent } => agent.is_valid(),
+            Self::Spawn {
+                agent,
+                command,
+                pick,
+            } => {
+                agent.is_valid()
+                    && command
+                        .as_deref()
+                        .is_none_or(|c| c.chars().count() <= 2000 && !c.contains('\0'))
+                    && pick.as_deref().is_none_or(|p| {
+                        p.len() <= 64 && p.bytes().all(|b| b.is_ascii_alphanumeric())
+                    })
+            }
             _ => true,
         }
     }

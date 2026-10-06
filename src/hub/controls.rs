@@ -8,6 +8,15 @@ use super::effects::{Chat, Effect, Persist};
 use super::model::*;
 use crate::protocol::{AgentSpec, AgentStatus, HubFrame};
 
+/// What a request to start an agent can carry besides the agent itself.
+#[derive(Debug, Default, Clone)]
+pub struct SpawnExtra {
+    /// The shell line of a saved startup command, to run instead of the plain agent program.
+    pub command: Option<String>,
+    /// The code of a `claudecord start` waiting on the machine, so the agent goes in the folder it was run in.
+    pub pick: Option<String>,
+}
+
 /// Why an agent could not be moved to another project.
 #[derive(Debug)]
 pub enum MoveError {
@@ -408,13 +417,29 @@ impl HubCore {
         node: &str,
         spec: AgentSpec,
     ) -> Result<(bool, Vec<Effect>), Denied> {
+        self.spawn_with(by, project, node, spec, SpawnExtra::default())
+    }
+
+    /// Like `spawn`, with what a request can add: a saved startup command, and the `claudecord start` waiting on that machine.
+    pub fn spawn_with(
+        &self,
+        by: &Human,
+        project: &str,
+        node: &str,
+        spec: AgentSpec,
+        extra: SpawnExtra,
+    ) -> Result<(bool, Vec<Effect>), Denied> {
         self.require(project, &by.id, Role::Owner)?;
         Ok(match self.conns.get(node) {
             Some(&conn) => (
                 true,
                 vec![Effect::Send {
                     conn,
-                    frame: HubFrame::Spawn { agent: spec },
+                    frame: HubFrame::Spawn {
+                        agent: spec,
+                        command: extra.command,
+                        pick: extra.pick,
+                    },
                 }],
             ),
             None => (false, vec![]),
@@ -484,11 +509,23 @@ impl HubCore {
         spec: AgentSpec,
         label: Option<&str>,
     ) -> Result<(Option<String>, Vec<Effect>), Denied> {
+        self.spawn_auto_with(by, project, spec, label, SpawnExtra::default())
+    }
+
+    /// Like `spawn_auto`, with a saved startup command to run instead of the plain agent program.
+    pub fn spawn_auto_with(
+        &self,
+        by: &Human,
+        project: &str,
+        spec: AgentSpec,
+        label: Option<&str>,
+        extra: SpawnExtra,
+    ) -> Result<(Option<String>, Vec<Effect>), Denied> {
         self.require(project, &by.id, Role::Owner)?;
         let Some(node) = self.pick_node(label) else {
             return Ok((None, vec![]));
         };
-        let (_, fx) = self.spawn(by, project, &node, spec)?;
+        let (_, fx) = self.spawn_with(by, project, &node, spec, extra)?;
         Ok((Some(node), fx))
     }
 

@@ -2573,6 +2573,7 @@ fn a_machine_running_an_older_version_is_told_the_newest_and_a_current_one_is_no
             NodeFrame::Hello {
                 node_name: node.into(),
                 version: version.into(),
+                features: vec![],
             },
             T0,
         )
@@ -2820,4 +2821,66 @@ fn a_moving_agents_open_tasks_go_back_to_the_lead_or_are_closed() {
     );
     w.core.move_agent(&kd, "p", "otter", "q", T0 + 2).unwrap();
     assert!(w.core.find_by_name("p", "fox").unwrap().is_lead);
+}
+
+#[test]
+fn a_spawn_carries_the_saved_command_and_the_waiting_start_and_only_well_formed_ones_are_valid() {
+    use claudecord::hub::controls::SpawnExtra;
+    let mut w = World::new();
+    w.core.node_connected("mac", 1);
+    assert!(
+        !w.core.node_can("mac", "hub-spawn"),
+        "nothing is assumed of a machine that did not say"
+    );
+    w.core.on_node_frame(
+        "mac",
+        NodeFrame::Hello {
+            node_name: "mac".into(),
+            version: "0.2.6".into(),
+            features: vec!["hub-spawn".into()],
+        },
+        T0,
+    );
+    assert!(w.core.node_can("mac", "hub-spawn") && !w.core.node_can("mac", "something-else"));
+    let kd = w.kd.clone();
+    let extra = SpawnExtra {
+        command: Some("claude --model opus".into()),
+        pick: Some("abc123".into()),
+    };
+    let (sent, fx) = w
+        .core
+        .spawn_with(&kd, "p", "mac", spec("p", "fox"), extra)
+        .unwrap();
+    assert!(sent);
+    assert!(matches!(
+        frames(&fx).as_slice(),
+        [HubFrame::Spawn { command: Some(c), pick: Some(p), .. }] if c == "claude --model opus" && p == "abc123"
+    ));
+    // What a machine says about itself is forgotten when it disconnects.
+    w.core.node_disconnected("mac", 1);
+    assert!(!w.core.node_can("mac", "hub-spawn"));
+    // The frame is checked like every other: a huge command, a NUL, a code with odd characters.
+    let frame = |command: Option<String>, pick: Option<String>| HubFrame::Spawn {
+        agent: spec("p", "fox"),
+        command,
+        pick,
+    };
+    assert!(frame(Some("ok".into()), Some("abc".into())).is_valid());
+    assert!(!frame(Some("a".repeat(2001)), None).is_valid());
+    assert!(!frame(Some("a\0b".into()), None).is_valid());
+    assert!(!frame(None, Some("a/b".into())).is_valid());
+    // A frame without the new fields (what an older hub sends) still reads, and one with neither is as small as before.
+    let bare = serde_json::to_string(&frame(None, None)).unwrap();
+    assert!(
+        !bare.contains("command") && !bare.contains("pick"),
+        "{bare}"
+    );
+    assert!(matches!(
+        HubFrame::parse(&bare),
+        Some(HubFrame::Spawn {
+            command: None,
+            pick: None,
+            ..
+        })
+    ));
 }

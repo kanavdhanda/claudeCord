@@ -67,6 +67,8 @@ pub struct HubCore {
     pub(super) accept_timeout_ms: u64,
     pub(super) grant_ttl_ms: i64,
     pub(super) conns: HashMap<String, u64>,
+    /// What each connected machine said it can do (see `NodeFrame::Hello`). Gone when it disconnects.
+    pub(super) features: HashMap<String, Vec<String>>,
     /// When each device last gave a sign of life.
     pub(super) seen_at: HashMap<String, i64>,
     /// What each machine said it can take on. Not saved: a machine says it again every time it connects.
@@ -130,6 +132,7 @@ impl HubCore {
             accept_timeout_ms,
             grant_ttl_ms,
             conns: HashMap::new(),
+            features: HashMap::new(),
             seen_at: HashMap::new(),
             capacity: HashMap::new(),
             agents: TrackedMap::new("agents", &dirty),
@@ -253,6 +256,13 @@ impl HubCore {
         self.status
             .get(agent_id)
             .map_or(AgentStatus::Offline, |s| s.0)
+    }
+
+    /// Whether a connected machine said it has `feature` (see `NodeFrame::Hello`).
+    pub fn node_can(&self, node: &str, feature: &str) -> bool {
+        self.features
+            .get(node)
+            .is_some_and(|f| f.iter().any(|x| x == feature))
     }
 
     /// Whether a device is currently connected.
@@ -481,6 +491,7 @@ impl HubCore {
             return fx;
         }
         self.conns.remove(node);
+        self.features.remove(node);
         let mine: Vec<(String, String, String)> = self
             .agents
             .values()
@@ -672,7 +683,10 @@ impl HubCore {
             return fx;
         }
         match frame {
-            NodeFrame::Hello { version, .. } => {
+            NodeFrame::Hello {
+                version, features, ..
+            } => {
+                self.features.insert(node.to_string(), features);
                 // A machine running an older claudeCord than this hub is told the newest version (it words the update itself).
                 if crate::protocol::version_older(&version, env!("CARGO_PKG_VERSION"))
                     && let Some(&conn) = self.conns.get(node)

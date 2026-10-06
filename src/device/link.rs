@@ -373,6 +373,7 @@ async fn session(
     let hello = NodeFrame::Hello {
         node_name: node.to_string(),
         version: env!("CARGO_PKG_VERSION").into(),
+        features: vec!["hub-spawn".into()],
     };
     if tx
         .send(Message::Text(

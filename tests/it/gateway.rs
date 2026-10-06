@@ -252,6 +252,7 @@ async fn a_machine_is_approved_by_code_and_connects_to_its_owners_hub() {
     let hello = NodeFrame::Hello {
         node_name: "mac".into(),
         version: "t".into(),
+        features: vec![],
     };
     ws.send(Message::Text(serde_json::to_string(&hello).unwrap().into()))
         .await
@@ -964,16 +965,25 @@ async fn a_project_is_chosen_on_the_dashboard_by_the_owner_of_the_machine_and_no
     let alice = sign_in(&base, "1").await;
     let bob = sign_in(&base, "2").await;
     let token = enroll(&base, &alice, "mac").await;
+    // An older machine: connected, but it does not say it can be asked to start agents, so it collects the choice and starts the agent itself.
+    let mut ws = connect(&base, &token).await.unwrap();
+    assert!(welcomed(&mut ws).await.is_some());
+    ws.send(Message::Text(
+        serde_json::to_string(&NodeFrame::Hello {
+            node_name: "mac".into(),
+            version: "0.2.5".into(),
+            features: vec![],
+        })
+        .unwrap()
+        .into(),
+    ))
+    .await
+    .unwrap();
     let c = client();
     let ask: Value = c
         .post(format!("{base}/api/device/pick"))
         .bearer_auth(&token)
-        .json(&json!({"folder": "shop", "project": "eeg", "commands": [
-            {"name": "opus-yolo", "program": "claude", "source": "folder"},
-            {"name": "fast", "program": "codex", "source": "machine"},
-            {"name": "bad name!", "program": "claude", "source": "machine"},
-            {"name": "evil", "program": "bash", "source": "machine"}
-        ]}))
+        .json(&json!({"folder": "shop", "project": "eeg"}))
         .send()
         .await
         .unwrap()
@@ -1007,15 +1017,6 @@ async fn a_project_is_chosen_on_the_dashboard_by_the_owner_of_the_machine_and_no
     assert_eq!(get_json(&base, &path, &alice).await.1["folder"], "shop");
     // The page is told which project the folder already belongs to, to offer it first.
     assert_eq!(get_json(&base, &path, &alice).await.1["project"], "eeg");
-    // ...and which saved startup commands the machine offers (names and programs only; a malformed one or an unknown program is dropped).
-    let offered = get_json(&base, &path, &alice).await.1["commands"].clone();
-    assert_eq!(
-        offered,
-        json!([
-            {"name": "opus-yolo", "program": "claude", "source": "folder"},
-            {"name": "fast", "program": "codex", "source": "machine"}
-        ])
-    );
     assert_eq!(
         get_json(&base, &path, &bob).await.0,
         404,
@@ -1064,7 +1065,7 @@ async fn a_project_is_chosen_on_the_dashboard_by_the_owner_of_the_machine_and_no
             &base,
             &path,
             Some(&alice),
-            json!({"project": "shopfront", "agent": "otter", "adapter": "claude", "role": "lead", "command": "fast"})
+            json!({"project": "shopfront", "agent": "otter", "adapter": "codex", "role": "lead"})
         )
         .await
         .0,
@@ -1074,8 +1075,6 @@ async fn a_project_is_chosen_on_the_dashboard_by_the_owner_of_the_machine_and_no
     let got = poll(token.clone(), code.clone()).await.1;
     assert_eq!(got["chosen"], "shopfront");
     assert_eq!(got["agent"], "otter");
-    // A command the machine offered is chosen by name, and the program it starts is what the agent is read as (not what the page said).
-    assert_eq!(got["command"], "fast");
     assert_eq!(got["adapter"], "codex");
     assert_eq!(got["role"], "lead");
     // A choice is made once.
@@ -1182,6 +1181,20 @@ async fn nothing_goes_ahead_with_a_bot_that_is_not_in_a_server_or_lacks_what_it_
     assert!(why["error"].as_str().unwrap().contains("missing"), "{why}");
     // Picking a project for a folder is refused too, since no server of this account is usable.
     let token = enroll(&base, &s, "mac").await;
+    // (The machine is connected: a choice for one that is not is refused for that reason, whatever the server.)
+    let mut ws = connect(&base, &token).await.unwrap();
+    assert!(welcomed(&mut ws).await.is_some());
+    ws.send(Message::Text(
+        serde_json::to_string(&NodeFrame::Hello {
+            node_name: "mac".into(),
+            version: "0.2.5".into(),
+            features: vec![],
+        })
+        .unwrap()
+        .into(),
+    ))
+    .await
+    .unwrap();
     let ask: Value = client()
         .post(format!("{base}/api/device/pick"))
         .bearer_auth(&token)
@@ -1467,4 +1480,166 @@ fn a_database_from_before_commands_gets_the_column_and_keeps_its_accounts() {
         assert_eq!(r.is_ok(), i < 49, "{i}: {r:?}");
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn pressing_start_makes_the_hub_ask_the_machine_to_start_the_agent_with_the_saved_command() {
+    let (gw, base, _fake) = rig_discord().await;
+    let s = sign_in(&base, "1").await;
+    assert_eq!(
+        post_json(
+            &base,
+            "/api/v1/bots",
+            Some(&s),
+            json!({"token": bot_token("555555555555555555")})
+        )
+        .await
+        .0,
+        200
+    );
+    let save = client()
+        .put(format!("{base}/api/v1/commands/opus"))
+        .header("cookie", format!("cc_session={s}"))
+        .json(&json!({"command": "source venv/bin/activate && claude --model opus"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(save.status().as_u16(), 200);
+    // A machine that can be asked to start agents.
+    let token = enroll(&base, &s, "mac").await;
+    let mut ws = connect(&base, &token).await.unwrap();
+    assert!(welcomed(&mut ws).await.is_some());
+    ws.send(Message::Text(
+        serde_json::to_string(&NodeFrame::Hello {
+            node_name: "mac".into(),
+            version: "0.2.6".into(),
+            features: vec!["hub-spawn".into()],
+        })
+        .unwrap()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let ask = |tok: String, folder: &str| {
+        let (c, url, folder) = (
+            client(),
+            format!("{base}/api/device/pick"),
+            folder.to_string(),
+        );
+        async move {
+            c.post(url)
+                .bearer_auth(tok)
+                .json(&json!({"folder": folder}))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()["code"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+    };
+    let code = ask(token.clone(), "shop").await;
+    let path = format!("/api/v1/pick/{code}");
+    // A saved command the account does not have is refused, and so is a name already taken once the agent exists.
+    assert_eq!(
+        post_json(
+            &base,
+            &path,
+            Some(&s),
+            json!({"project": "shopfront", "command": "nothere"})
+        )
+        .await
+        .0,
+        400
+    );
+    let (st, body) = post_json(
+        &base,
+        &path,
+        Some(&s),
+        json!({"project": "shopfront", "agent": "Fox", "role": "lead", "command": "opus"}),
+    )
+    .await;
+    assert_eq!(st, 200, "{body}");
+    // The machine is asked, with the command's text, the code of the waiting `claudecord start`, and the page's choices.
+    let mut asked = None;
+    for _ in 0..80 {
+        match tokio::time::timeout(Duration::from_millis(100), ws.next()).await {
+            Ok(Some(Ok(Message::Text(t)))) => {
+                if let Some(HubFrame::Spawn {
+                    agent,
+                    command,
+                    pick,
+                }) = HubFrame::parse(t.as_str())
+                {
+                    asked = Some((agent, command, pick));
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let (agent, command, pick) = asked.expect("the machine was never asked to start the agent");
+    assert_eq!(
+        (
+            agent.name.as_str(),
+            agent.project.as_str(),
+            agent.role.as_deref()
+        ),
+        ("fox", "shopfront", Some("lead"))
+    );
+    assert_eq!(
+        command.as_deref(),
+        Some("source venv/bin/activate && claude --model opus")
+    );
+    assert_eq!(pick.as_deref(), Some(code.as_str()));
+    // It registers; asking for the same name again is refused before anything is sent.
+    ws.send(Message::Text(
+        serde_json::to_string(&NodeFrame::AgentRegister {
+            agent,
+            cwd: "/x".into(),
+        })
+        .unwrap()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let again = ask(token.clone(), "shop").await;
+    let (st, body) = post_json(
+        &base,
+        &format!("/api/v1/pick/{again}"),
+        Some(&s),
+        json!({"project": "shopfront", "agent": "fox"}),
+    )
+    .await;
+    assert_eq!(st, 409, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("already has an agent called fox"),
+        "{body}"
+    );
+    // A machine that is not connected is told so instead of being waited for.
+    let ghost = enroll(&base, &s, "ghost").await;
+    let lost = ask(ghost, "elsewhere").await;
+    let (st, body) = post_json(
+        &base,
+        &format!("/api/v1/pick/{lost}"),
+        Some(&s),
+        json!({"project": "shopfront"}),
+    )
+    .await;
+    assert_eq!(st, 409, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not connected"),
+        "{body}"
+    );
+    gw.shutdown().await;
 }
