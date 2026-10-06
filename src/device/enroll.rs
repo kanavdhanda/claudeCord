@@ -13,6 +13,28 @@ pub const DEFAULT_HUB: &str = match option_env!("CLAUDECORD_HUB") {
     None => "https://claudecord.example.com",
 };
 
+/// An error with every cause under it ("error sending request: connection error: invalid peer certificate: UnknownIssuer"), because the top
+/// line alone ("error sending request") cannot tell a blocked network from a missing certificate store or a refusing proxy. Ends with the
+/// likely fix for the two that a person can do something about.
+pub fn why(e: &dyn std::error::Error) -> String {
+    let mut text = e.to_string();
+    let mut cause = e.source();
+    while let Some(c) = cause {
+        text.push_str(&format!(": {c}"));
+        cause = c.source();
+    }
+    let low = text.to_lowercase();
+    if low.contains("certificate") || low.contains("unknownissuer") {
+        text.push_str(" (this machine does not trust the certificate: install the system CA certificates, e.g. `apt install ca-certificates`)");
+    } else if std::env::var("HTTPS_PROXY")
+        .or_else(|_| std::env::var("https_proxy"))
+        .is_ok_and(|v| !v.is_empty())
+    {
+        text.push_str(" (an HTTPS_PROXY is set; if it blocks this address, ask for it to be allowed or set NO_PROXY)");
+    }
+    text
+}
+
 /// The `http(s)` form of a hub address, whatever form it was given in (`wss://x`, `https://x`, or just `x`).
 pub fn http_base(hub: &str) -> String {
     let h = hub.trim().trim_end_matches('/');
@@ -104,7 +126,7 @@ pub async fn enroll(hub: &str, node: &str, show: impl Fn(&str, &str)) -> Result<
         .json(&json!({ "node": node }))
         .send()
         .await
-        .map_err(|e| format!("cannot reach {base}: {e}"))?;
+        .map_err(|e| format!("cannot reach {base}: {}", why(&e)))?;
     if !r.status().is_success() {
         return Err(format!("{base} refused the request ({})", r.status()));
     }
