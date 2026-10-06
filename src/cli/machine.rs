@@ -78,7 +78,7 @@ pub async fn login(a: LoginArgs) -> Result<(), String> {
         None => browser_login(&hub, &name).await?,
     };
     cfg.save(&home_dir()).map_err(|e| e.to_string())?;
-    println!("saved. Next: claudecord start (in a project folder)");
+    println!("saved. Next: {} start (in a project folder)", me());
     Ok(())
 }
 
@@ -104,13 +104,13 @@ pub async fn home() -> Result<(), String> {
                     );
                 }
                 if !rows.is_empty() {
-                    println!("Open one:  claudecord attach NAME");
+                    println!("Open one:  {} attach NAME", me());
                 }
             }
             _ => println!("\nNothing is running here (the daemon is off)."),
         }
-        println!("\nStart an agent in a project folder:  claudecord start");
-        println!("Everything else:                      claudecord --help");
+        println!("\nStart an agent in a project folder:  {} start", me());
+        println!("Everything else:                      {} --help", me());
         return Ok(());
     }
     login(LoginArgs {
@@ -120,7 +120,8 @@ pub async fn home() -> Result<(), String> {
     })
     .await?;
     println!(
-        "Connected. Open the dashboard to pick where your project lives, then run `claudecord start` in a project folder."
+        "Connected. Open the dashboard to pick where your project lives, then run `{} start` in a project folder.",
+        me()
     );
     Ok(())
 }
@@ -140,7 +141,8 @@ async fn browser_login(hub: &str, name: &str) -> Result<Config, String> {
 /// Runs the daemon in the foreground.
 pub async fn run_daemon() -> Result<(), String> {
     let dir = home_dir();
-    let cfg = Config::load(&dir).ok_or("not logged in: run claudecord login first")?;
+    let cfg =
+        Config::load(&dir).ok_or_else(|| format!("not logged in: run {} login first", me()))?;
     // The daemon logs to the terminal, which `claudecord start` points at daemon.log when it starts the daemon for you.
     crate::log::init(None);
     daemon::run(cfg, dir, Options::default())
@@ -243,7 +245,7 @@ pub async fn start(a: StartArgs) -> Result<(), String> {
     let agent = expect_ok(r)?.msg;
     println!("started {agent}");
     if a.detach {
-        println!("attach later with: claudecord attach {agent}");
+        println!("attach later with: {} attach {agent}", me());
         return Ok(());
     }
     attach(&agent).await
@@ -297,7 +299,8 @@ pub async fn down() -> Result<(), String> {
 
 /// Checks whether this machine can reach the hub and prints each step.
 pub async fn doctor() -> Result<(), String> {
-    let cfg = Config::load(&home_dir()).ok_or("not logged in: run claudecord login first")?;
+    let cfg = Config::load(&home_dir())
+        .ok_or_else(|| format!("not logged in: run {} login first", me()))?;
     let checks = doctor::run(&cfg, &LinkOpts::default()).await;
     let mut bad = false;
     for c in &checks {
@@ -435,7 +438,10 @@ pub async fn attach(agent: &str) -> Result<(), String> {
             }
         }
     }
-    println!("\r\nleft {agent}; it is still running (claudecord attach {agent} to return)");
+    println!(
+        "\r\nleft {agent}; it is still running ({} attach {agent} to return)",
+        me()
+    );
     Ok(())
 }
 
@@ -594,7 +600,7 @@ pub async fn attach_or_pick(agent: Option<String>) -> Result<(), String> {
         );
     }
     if !std::io::stdin().is_terminal() {
-        return Err("name one: claudecord attach NAME".into());
+        return Err(format!("name one: {} attach NAME", me()));
     }
     loop {
         print!("Open which? (number or name, Enter to cancel): ");
@@ -740,4 +746,13 @@ mod guide_tests {
         assert!(b.contains("claudecord team") && !b.contains("XXXX") && b.ends_with("after\n"));
         assert_eq!(b.matches(GUIDE_START).count(), 1);
     }
+}
+
+/// What to type to run this program again. A person who ran it with `npx claudecord` has no `claudecord` command in their shell, so the
+/// launcher says how it was started (`CLAUDECORD_RUN`) and the hints repeat that instead of a command that would not be found.
+fn me() -> String {
+    std::env::var("CLAUDECORD_RUN")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "claudecord".into())
 }

@@ -29,7 +29,10 @@ if (require.main === module) {
   }
   // npm keeps the executable bit, but a file that lost it is made runnable again rather than failing.
   if (process.platform !== "win32") { try { require("fs").chmodSync(bin, 0o755); } catch (e) { /* read-only install: it may already be runnable */ } }
-  const r = spawnSync(bin, process.argv.slice(2), { stdio: "inherit" });
+  // `npx claudecord` leaves no `claudecord` command behind, so the program is told how it was started and prints hints that work.
+  const env = Object.assign({}, process.env);
+  if (process.env.npm_command === "exec" && !env.CLAUDECORD_RUN) env.CLAUDECORD_RUN = "npx claudecord";
+  const r = spawnSync(bin, process.argv.slice(2), { stdio: "inherit", env });
   if (r.error) {
     console.error("could not start " + bin + ": " + r.error.message);
     process.exit(1);
