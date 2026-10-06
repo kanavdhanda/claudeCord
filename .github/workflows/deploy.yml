@@ -91,6 +91,8 @@ jobs:
             [ "$code" = "200" ] && { echo "ready after $i checks"; exit 0; }
             sleep 4
           done
-          echo "the new version never became ready, putting the previous one back"
+          echo "the new version never became ready. Its log, so the reason is in this run:"
+          ~/ssh_ "cd '$DIR/deploy' && docker compose logs --tail 40 hub 2>&1" || true
+          echo "putting the previous one back"
           ~/ssh_ "set -e; cd '$DIR' && git checkout --detach \$(cat .previous) && docker tag claudecord:previous claudecord:local && cd deploy && docker compose up -d --no-build"
           exit 1
