@@ -16,6 +16,7 @@ mod gateway;
 mod health;
 mod hub;
 mod logs;
+mod procs;
 mod races;
 mod resilience;
 mod robust;

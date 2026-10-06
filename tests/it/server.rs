@@ -1144,3 +1144,52 @@ async fn the_dashboard_route_pages_back_into_the_compressed_files() {
     assert_eq!(seen, 300, "paging back reached every row exactly once");
     hub.shutdown().await;
 }
+
+/// A device that is connected and quiet must cost the hub a few kilobytes, not the 128 KB read buffer and 128 KB write buffer a WebSocket
+/// gets by default: at 100 KB each, 5,000 machines were 500 MB before they said anything.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_quiet_device_costs_the_hub_kilobytes_not_hundreds() {
+    use tokio_tungstenite::connect_async_with_config;
+    use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+    const N: usize = 400;
+    let names: Vec<String> = (0..N).map(|i| format!("m{i}")).collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let dir = tmp("quiet");
+    let (hub, tokens) = boot(
+        Config {
+            ping_every: Duration::from_secs(30),
+            ..cfg()
+        },
+        &dir.join("t.db"),
+        &refs,
+    )
+    .await;
+    // The test's own end of each link is as small as it can be, so what is measured is the hub's.
+    let small = WebSocketConfig::default()
+        .read_buffer_size(4096)
+        .write_buffer_size(0);
+    let mut links = Vec::new();
+    let before = super::procs::rss_kb();
+    for t in &tokens {
+        let mut req = format!("ws://{}/api/v1/node/connect", hub.addr)
+            .into_client_request()
+            .unwrap();
+        req.headers_mut()
+            .insert("authorization", format!("Bearer {t}").parse().unwrap());
+        let (ws, _) = connect_async_with_config(req, Some(small), false)
+            .await
+            .unwrap();
+        links.push(Ws::new(ws));
+    }
+    wait_for("all connected", async || {
+        hub.devices().await.iter().filter(|d| d.connected).count() == N
+    })
+    .await;
+    let per_device = (super::procs::rss_kb().saturating_sub(before)) / N;
+    assert!(
+        per_device < 48,
+        "{per_device} KB of memory per quiet device (this program, hub and test ends together)"
+    );
+    drop(links);
+    hub.shutdown().await;
+}

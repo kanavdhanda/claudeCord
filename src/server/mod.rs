@@ -486,6 +486,9 @@ pub(crate) fn admit(
     let to_actor = st.to_actor.clone();
     ws.max_message_size(cfg.max_frame)
         .max_frame_size(cfg.max_frame)
+        // The defaults are 128 KB each way, for every connection: 5,000 quiet machines cost 500 MB. Frames are small, and a bigger one just grows the buffer.
+        .read_buffer_size(4096)
+        .write_buffer_size(0)
         .on_upgrade(move |socket| async move {
             let _slot = slot;
             session::run(socket, node, conn, to_actor, cfg).await
