@@ -80,17 +80,14 @@ pub fn set_keep_running(dir: &Path, on: bool) -> std::io::Result<()> {
 }
 
 /// The folders this machine has started agents in, by project, most recently used first. Older saves held one folder per project; those are read too.
+/// A folder may be listed under several projects (the same code can serve more than one team); `read_last` says which was used last.
 pub fn read_projects(dir: &Path) -> BTreeMap<String, Vec<PathBuf>> {
-    let Some(v) = std::fs::read_to_string(dir.join("projects.json"))
-        .ok()
-        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-    else {
-        return BTreeMap::new();
-    };
-    let Some(map) = v.as_object() else {
+    let Some(map) = read_projects_json(dir) else {
         return BTreeMap::new();
     };
     map.iter()
+        // Keys that start with an underscore are bookkeeping, never a project (a project's name starts with a letter or digit).
+        .filter(|(k, _)| !k.starts_with('_'))
         .map(|(k, v)| {
             let list = match v {
                 serde_json::Value::String(s) => vec![PathBuf::from(s)],
@@ -105,10 +102,44 @@ pub fn read_projects(dir: &Path) -> BTreeMap<String, Vec<PathBuf>> {
         .collect()
 }
 
+fn read_projects_json(dir: &Path) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let text = std::fs::read_to_string(dir.join("projects.json")).ok()?;
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()?
+        .as_object()
+        .cloned()
+}
+
+/// For each folder, the projects it was started for, the most recent first.
+pub fn read_last(dir: &Path) -> BTreeMap<String, Vec<String>> {
+    read_projects_json(dir)
+        .and_then(|m| m.get("_last").cloned())
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
+
+/// Saves the folders of each project and which project each folder was last used for.
+pub fn write_projects(
+    dir: &Path,
+    folders: &BTreeMap<String, Vec<PathBuf>>,
+    last: &BTreeMap<String, Vec<String>>,
+) -> std::io::Result<()> {
+    let mut v = serde_json::to_value(folders).expect("plain data");
+    v["_last"] = serde_json::to_value(last).expect("plain data");
+    std::fs::write(dir.join("projects.json"), v.to_string())
+}
+
 /// The project a folder was last started for on this machine, if any.
 pub fn project_of_folder(dir: &Path, folder: &Path) -> Option<String> {
-    read_projects(dir)
-        .into_iter()
-        .find(|(_, folders)| folders.iter().any(|f| f == folder))
-        .map(|(p, _)| p)
+    let folders = read_projects(dir);
+    let has = |p: &String| {
+        folders
+            .get(p)
+            .is_some_and(|l| l.iter().any(|f| f == folder))
+    };
+    read_last(dir)
+        .get(folder.to_string_lossy().as_ref())
+        .and_then(|l| l.iter().find(|p| has(p)).cloned())
+        // Saved before recency was kept: the first project (by name) that lists the folder.
+        .or_else(|| folders.keys().find(|p| has(p)).cloned())
 }

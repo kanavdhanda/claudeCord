@@ -385,13 +385,13 @@ async fn a_file_sent_from_chat_lands_in_the_agents_inbox_and_the_agent_is_told_w
         })
         .await;
     eventually("file saved", async || {
-        std::fs::read(r.project.join(".claudecord/files/t1-plan.txt"))
+        std::fs::read(r.project.join(".claudecord/files/demo/t1-plan.txt"))
             .is_ok_and(|b| b == b"the plan")
     })
     .await;
     eventually("agent told", async || {
         std::fs::read_to_string(r.project.join("fake.log"))
-            .is_ok_and(|s| s.contains(".claudecord/files/t1-plan.txt"))
+            .is_ok_and(|s| s.contains(".claudecord/files/demo/t1-plan.txt"))
     })
     .await;
     r.hub.shutdown().await;
@@ -1501,7 +1501,7 @@ async fn a_file_that_loses_a_piece_on_the_way_is_not_kept_and_the_agent_is_told(
             .is_ok_and(|s| s.contains("big.bin did not arrive complete"))
     })
     .await;
-    let dir = r.project.join(".claudecord/files");
+    let dir = r.project.join(".claudecord/files/demo");
     let left: Vec<_> = std::fs::read_dir(&dir)
         .map(|d| d.filter_map(|e| e.ok()).map(|e| e.file_name()).collect())
         .unwrap_or_default();
@@ -1545,7 +1545,7 @@ async fn a_file_changed_on_the_way_fails_its_checksum_and_is_not_kept() {
             .is_ok_and(|s| s.contains("arrived damaged"))
     })
     .await;
-    let left: Vec<_> = std::fs::read_dir(r.project.join(".claudecord/files"))
+    let left: Vec<_> = std::fs::read_dir(r.project.join(".claudecord/files/demo"))
         .map(|d| d.filter_map(|e| e.ok()).map(|e| e.file_name()).collect())
         .unwrap_or_default();
     assert!(left.is_empty(), "nothing damaged is kept: {left:?}");
@@ -1639,7 +1639,7 @@ async fn two_agents_send_each_other_files_in_the_thread_of_the_pair() {
         assert!(sent.ok, "{}", sent.msg);
     }
     let landed = |dir: &std::path::Path, name: &str, body: &[u8]| {
-        std::fs::read_dir(dir.join(".claudecord/files"))
+        std::fs::read_dir(dir.join(".claudecord/files/demo"))
             .ok()
             .into_iter()
             .flatten()
@@ -1676,47 +1676,92 @@ async fn two_agents_send_each_other_files_in_the_thread_of_the_pair() {
 }
 
 #[tokio::test]
-async fn a_folder_belongs_to_the_project_it_was_last_used_for() {
-    let r = rig("onefolder").await;
-    // First started as project "demo", then, after that agent is gone, as "other" from the same folder.
-    up(&r, "otter").await;
-    assert_eq!(
-        claudecord::device::config::project_of_folder(&r.dir, &r.project).as_deref(),
-        Some("demo")
+async fn one_folder_serves_several_projects_and_offers_the_one_used_last() {
+    let r = rig("manyprojects").await;
+    let up_in = async |project: &str, name: &str| {
+        ipc::call(
+            &r.dir,
+            &Req::Up {
+                project: project.into(),
+                name: Some(name.into()),
+                adapter: "claude".into(),
+                model: None,
+                role: None,
+                cwd: r.project.to_string_lossy().into(),
+                policy: "autonomous".into(),
+                rows: 24,
+                cols: 80,
+                opts: UpOpts::default(),
+            },
+        )
+        .await
+        .unwrap()
+    };
+    // The same folder, started for "demo", then (after that agent ended) for "other", then for "demo" again.
+    assert!(up_in("demo", "otter").await.ok);
+    let cfg = claudecord::device::config::project_of_folder;
+    assert_eq!(cfg(&r.dir, &r.project).as_deref(), Some("demo"));
+    assert!(
+        ipc::call(
+            &r.dir,
+            &Req::Stop {
+                agent: "demo/otter".into()
+            }
+        )
+        .await
+        .unwrap()
+        .ok
     );
-    let stopped = ipc::call(
-        &r.dir,
-        &Req::Stop {
-            agent: "demo/otter".into(),
-        },
-    )
-    .await
-    .unwrap();
-    assert!(stopped.ok, "{}", stopped.msg);
-    let resp = ipc::call(
-        &r.dir,
-        &Req::Up {
-            project: "other".into(),
-            name: Some("fox".into()),
-            adapter: "claude".into(),
-            model: None,
-            role: None,
-            cwd: r.project.to_string_lossy().into(),
-            policy: "autonomous".into(),
-            rows: 24,
-            cols: 80,
-            opts: UpOpts::default(),
-        },
-    )
-    .await
-    .unwrap();
-    assert!(resp.ok, "{}", resp.msg);
-    // "demo" sorts before "other", so a folder left under both would keep resolving to "demo".
+    assert!(up_in("other", "fox").await.ok);
+    // Both projects keep the folder; "demo" sorts first, but "other" was used last and is what is offered.
     let map = claudecord::device::config::read_projects(&r.dir);
-    assert!(!map.contains_key("demo"), "{map:?}");
-    assert_eq!(
-        claudecord::device::config::project_of_folder(&r.dir, &r.project).as_deref(),
-        Some("other")
+    assert!(
+        map["demo"].contains(&r.project) && map["other"].contains(&r.project),
+        "{map:?}"
     );
+    assert_eq!(cfg(&r.dir, &r.project).as_deref(), Some("other"));
+    assert!(
+        ipc::call(
+            &r.dir,
+            &Req::Stop {
+                agent: "other/fox".into()
+            }
+        )
+        .await
+        .unwrap()
+        .ok
+    );
+    assert!(up_in("demo", "heron").await.ok);
+    assert_eq!(cfg(&r.dir, &r.project).as_deref(), Some("demo"));
+    // The bookkeeping key is never taken for a project.
+    assert!(!claudecord::device::config::read_projects(&r.dir).contains_key("_last"));
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn files_sent_to_an_agent_land_in_the_inbox_of_its_project_only() {
+    let r = rig("projectinbox").await;
+    up(&r, "otter").await;
+    eventually("registered", async || {
+        r.hub
+            .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    r.hub
+        .call(|c, _| {
+            let (_, fx) = c
+                .send_file(&kd(), "demo", "x", "a.txt", b"mine", None, "t9")
+                .unwrap();
+            ((), fx)
+        })
+        .await;
+    eventually("saved in the project's own inbox", async || {
+        std::fs::read(r.project.join(".claudecord/files/demo/t9-a.txt")).is_ok_and(|b| b == b"mine")
+    })
+    .await;
+    // Nothing is put loose in the shared folder, where another project's agent would find it.
+    assert!(!r.project.join(".claudecord/files/t9-a.txt").exists());
     r.hub.shutdown().await;
 }

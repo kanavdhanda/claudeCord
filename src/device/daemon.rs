@@ -22,7 +22,7 @@ use crate::sync::Lock;
 use base64::Engine;
 use interprocess::local_socket::tokio::{RecvHalf, SendHalf, Stream as LocalStream};
 use interprocess::local_socket::traits::tokio::{Listener as _, Stream as _};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -250,6 +250,8 @@ struct State {
     /// Folders this machine has started agents in, by project, so the hub can start more there later. The hub never
     /// chooses a folder: only one the person already used on this machine.
     folders: HashMap<String, Vec<PathBuf>>,
+    /// For each folder, the projects it was started for, the most recent first.
+    last: BTreeMap<String, Vec<String>>,
     link: Link,
     /// Since when no agent has been running, so the daemon can go away by itself (see `Options::idle_exit`).
     idle_since: Option<i64>,
@@ -299,8 +301,10 @@ pub async fn run(cfg: Config, dir: PathBuf, opts: Options) -> std::io::Result<()
         }
     });
     let folders = super::config::read_projects(&dir).into_iter().collect();
+    let last = super::config::read_last(&dir);
     let mut st = State {
         folders,
+        last,
         idle_since: None,
         tidied: 0,
         dir,
@@ -689,7 +693,7 @@ impl State {
         let Some(a) = self.agents.get_mut(agent_id) else {
             return;
         };
-        let dir = a.cwd.join(crate::hub::routing::INBOX_DIR);
+        let dir = a.cwd.join(crate::hub::routing::inbox_dir(&a.spec.project));
         if std::fs::create_dir_all(&dir).is_err() {
             return;
         }
@@ -921,7 +925,7 @@ impl State {
             let dirs: Vec<PathBuf> = self
                 .agents
                 .values()
-                .map(|a| a.cwd.join(crate::hub::routing::INBOX_DIR))
+                .map(|a| a.cwd.join(crate::hub::routing::inbox_dir(&a.spec.project)))
                 .collect();
             let _ = tokio::task::spawn_blocking(move || {
                 for d in dirs {
@@ -1762,21 +1766,23 @@ impl State {
         crate::info!("daemon", "{agent_id}: started {} in {cwd}", argv[0]);
         // Remember the folder, so the hub can start more agents for this project here later. Only now that the agent is running: a start that was
         // refused or failed must not leave the folder attached to the project.
-        // A folder belongs to one project at a time, the one it was last used for. Left under both, the lookup by folder would keep finding
-        // whichever project comes first by name, however often the person chose another.
-        for (p, list) in self.folders.iter_mut() {
-            if p != &project {
-                list.retain(|f| f != &origin);
-            }
-        }
-        self.folders.retain(|_, list| !list.is_empty());
+        // A folder may serve several projects; each keeps the folder in its own list, and the folder remembers which project came last (what
+        // the menu offers first). Nothing of one project is shared with another's: messages, files and notes are all kept per project.
         let list = self.folders.entry(project.clone()).or_default();
         list.retain(|f| f != &origin);
         list.insert(0, origin.clone());
-        let _ = std::fs::write(
-            self.dir.join("projects.json"),
-            serde_json::to_string(&self.folders).expect("plain data"),
-        );
+        let recent = self
+            .last
+            .entry(origin.to_string_lossy().into_owned())
+            .or_default();
+        recent.retain(|p| p != &project);
+        recent.insert(0, project.clone());
+        let sorted: BTreeMap<String, Vec<PathBuf>> = self
+            .folders
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let _ = super::config::write_projects(&self.dir, &sorted, &self.last);
         let log = AgentLog::new(&self.dir, &agent_id);
         log.prepare();
         watch_terminal(&proc, &log);

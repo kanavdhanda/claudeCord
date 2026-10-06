@@ -1147,10 +1147,10 @@ fn attachments_reach_the_agent_as_one_short_line_each_and_links_pass_through_as_
     );
     assert_eq!(
         lines[1],
-        "[pdf plan.pdf 2149KB at .claudecord/files/a1b2-plan.pdf]"
+        "[pdf plan.pdf 2149KB at .claudecord/files/p/a1b2-plan.pdf]"
     );
     assert_eq!(
-        lines[2], "[image shot.png 83KB at .claudecord/files/c3d4-shot.png]",
+        lines[2], "[image shot.png 83KB at .claudecord/files/p/c3d4-shot.png]",
         "path tricks in names are stripped"
     );
     assert!(
@@ -1185,7 +1185,7 @@ fn a_message_that_is_only_an_attachment_is_still_delivered() {
     assert_eq!(res.targets, vec!["otter"]);
     assert_eq!(
         deliveries(&fx).pop().unwrap().2,
-        "[file log.txt 1KB at .claudecord/files/z9-log.txt]"
+        "[file log.txt 1KB at .claudecord/files/p/z9-log.txt]"
     );
 }
 

@@ -36,12 +36,17 @@ pub(super) fn status_name(s: AgentStatus) -> &'static str {
     }
 }
 
-/// Where on the device an attached file is placed, relative to the project folder.
+/// Where on the device attached files are placed, relative to the folder an agent works in.
 pub const INBOX_DIR: &str = ".claudecord/files";
+
+/// The inbox of one project inside a folder. A folder may serve several projects, and what one project's people sent never lands among another's.
+pub fn inbox_dir(project: &str) -> String {
+    format!("{INBOX_DIR}/{project}")
+}
 
 /// One short line telling an agent a file arrived: its kind, name, size and where to find it. The content is never
 /// put in the agent's context, so an image or a PDF costs tokens only if and when the agent opens it.
-pub fn describe_attachment(a: &Attachment) -> String {
+pub fn describe_attachment(a: &Attachment, project: &str) -> String {
     let kind = if a.mime.starts_with("image/") {
         "image"
     } else if a.mime == "application/pdf" {
@@ -52,19 +57,20 @@ pub fn describe_attachment(a: &Attachment) -> String {
     let name = crate::agents::text::safe_name(&a.name);
     let kb = a.size.div_ceil(1024);
     format!(
-        "[{kind} {name} {kb}KB at {INBOX_DIR}/{}-{name}]",
+        "[{kind} {name} {kb}KB at {}/{}-{name}]",
+        inbox_dir(project),
         crate::agents::text::safe_name(&a.id)
     )
 }
 
 /// The text of a message with a reference line added for each attached file.
-fn body_with_attachments(text: &str, attachments: &[Attachment]) -> String {
+fn body_with_attachments(text: &str, attachments: &[Attachment], project: &str) -> String {
     let mut body = text.trim().to_string();
     for a in attachments {
         if !body.is_empty() {
             body.push('\n');
         }
-        body.push_str(&describe_attachment(a));
+        body.push_str(&describe_attachment(a, project));
     }
     body
 }
@@ -278,7 +284,7 @@ impl HubCore {
             ));
         }
         let from = self.label(project, by);
-        let body = body_with_attachments(text, opts.attachments);
+        let body = body_with_attachments(text, opts.attachments, project);
         fx.push(Effect::Persist(Persist::History {
             project: project.into(),
             thread: opts.thread.map(String::from),
