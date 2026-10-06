@@ -63,6 +63,9 @@ pub struct StartArgs {
     /// Do not write the team-chat guide into this folder's AGENTS.md.
     #[arg(long)]
     pub no_guide: bool,
+    /// Start with a saved startup command by name (see `claudecord commands`), instead of the agent program.
+    #[arg(long)]
+    pub saved: Option<String>,
     /// Run this command instead of the agent program (anything that runs in a terminal). Put it after `--`.
     #[arg(last = true)]
     pub command: Vec<String>,
@@ -209,6 +212,134 @@ fn update_command(exe: &str) -> &'static str {
     }
 }
 
+/// The argv and agent program of a saved command, ready to start. A command kept in the folder must be agreed to once (a repository that was
+/// downloaded could carry one): it is shown, and asked about on the terminal; where nobody can be asked it is refused.
+fn resolve_saved(name: &str, folder: &std::path::Path) -> Result<(Vec<String>, String), String> {
+    use crate::device::config::{
+        CommandSource, approve, command_fingerprint, commands_for, is_approved, shell_argv,
+    };
+    let dir = home_dir();
+    let all = commands_for(&dir, folder);
+    let Some((cmd, source)) = all.get(name).cloned() else {
+        let known: Vec<&str> = all.keys().map(String::as_str).collect();
+        return Err(format!(
+            "no saved command called {name} here (saved: {}). `{} commands` lists them",
+            if known.is_empty() {
+                "none".into()
+            } else {
+                known.join(", ")
+            },
+            me()
+        ));
+    };
+    if source == CommandSource::Folder {
+        let fp = command_fingerprint(folder, name, &cmd);
+        if !is_approved(&dir, &fp) {
+            use std::io::{BufRead, IsTerminal, Write};
+            if !std::io::stdin().is_terminal() {
+                return Err(format!(
+                    "the command {name} comes from this folder (.claudecord/commands.json) and has not been agreed to yet. Run `{} start --saved {name}` in a terminal to look at it and agree",
+                    me()
+                ));
+            }
+            println!(
+                "The command {name} is kept in this folder and will run on your machine:\n\n  {}\n",
+                cmd.command
+            );
+            print!("Run it? It is remembered until the command changes. [y/N] ");
+            let _ = std::io::stdout().flush();
+            let mut line = String::new();
+            let yes = std::io::stdin().lock().read_line(&mut line).is_ok()
+                && line.trim().eq_ignore_ascii_case("y");
+            if !yes {
+                return Err("not run".into());
+            }
+            approve(&dir, &fp);
+        }
+    }
+    Ok((shell_argv(&cmd.command)?, cmd.program))
+}
+
+/// `claudecord commands`: lists, adds or removes saved startup commands.
+pub fn commands(action: Option<CommandsCmd>) -> Result<(), String> {
+    use crate::device::config::{
+        CommandSource, SavedCommand, commands_file, commands_for, remove_command, save_command,
+    };
+    let dir = home_dir();
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    match action {
+        None => {
+            let all = commands_for(&dir, &cwd);
+            if all.is_empty() {
+                println!(
+                    "No saved commands. Add one:  {} commands add NAME \"source venv/bin/activate && claude\"",
+                    me()
+                );
+            }
+            for (name, (c, src)) in all {
+                let at = if src == CommandSource::Folder {
+                    "this folder"
+                } else {
+                    "this machine"
+                };
+                println!("{name:20} {:7} {at:13} {}", c.program, c.command);
+            }
+            Ok(())
+        }
+        Some(CommandsCmd::Add {
+            name,
+            command,
+            program,
+            here,
+        }) => {
+            let file = commands_file(&dir, here.then_some(cwd.as_path()));
+            save_command(&file, &name, SavedCommand { command, program })?;
+            println!("saved {name} in {}", file.display());
+            println!(
+                "Use it:  {} start --saved {name}   (or choose it on the dashboard)",
+                me()
+            );
+            Ok(())
+        }
+        Some(CommandsCmd::Rm { name, here }) => {
+            let file = commands_file(&dir, here.then_some(cwd.as_path()));
+            if remove_command(&file, &name)? {
+                println!("removed {name}");
+                Ok(())
+            } else {
+                Err(format!(
+                    "no saved command called {name} in {}",
+                    file.display()
+                ))
+            }
+        }
+    }
+}
+
+/// What `claudecord commands` can do besides list.
+#[derive(clap::Subcommand)]
+pub enum CommandsCmd {
+    /// Save a startup command: any shell line, such as setup steps followed by the agent's launch.
+    Add {
+        name: String,
+        /// The line to run, in quotes.
+        command: String,
+        /// Which agent program it starts (so it is read correctly): claude, codex or agy.
+        #[arg(long, default_value = "claude")]
+        program: String,
+        /// Keep it in this folder (.claudecord/commands.json) instead of for the whole machine.
+        #[arg(long)]
+        here: bool,
+    },
+    /// Remove a saved command.
+    Rm {
+        name: String,
+        /// It is the one kept in this folder.
+        #[arg(long)]
+        here: bool,
+    },
+}
+
 /// Whether `program` is found in a folder of the PATH.
 fn program_on_path(program: &str) -> bool {
     let exts: &[&str] = if cfg!(windows) {
@@ -344,7 +475,18 @@ pub async fn start(a: StartArgs) -> Result<(), String> {
             .clone()
             .filter(|_| a.adapter == "claude")
             .unwrap_or(a.adapter.clone());
-        require_program(&adapter, !a.command.is_empty())?;
+        // A saved startup command (asked for here or chosen on the page) replaces the agent program; its own program says how to read it.
+        let (adapter, command) = match a.saved.clone().or(chosen.command.clone()) {
+            Some(n) => {
+                let (argv, program) = resolve_saved(&n, &cwd)?;
+                (program, Some(argv))
+            }
+            None => (
+                adapter,
+                (!a.command.is_empty()).then_some(a.command.clone()),
+            ),
+        };
+        require_program(&adapter, command.is_some())?;
         ensure_daemon().await?;
         let (cols, rows) = terminal_size();
         let r = ipc::call(
@@ -360,7 +502,7 @@ pub async fn start(a: StartArgs) -> Result<(), String> {
                 rows,
                 cols,
                 opts: UpOpts {
-                    command: (!a.command.is_empty()).then_some(a.command.clone()),
+                    command,
                     worktree: a.worktree,
                     pickup: a.pickup,
                     restart: a.restart,
@@ -412,6 +554,8 @@ struct Picked {
     agent: Option<String>,
     adapter: Option<String>,
     role: Option<String>,
+    /// A saved startup command the page chose (its name; the command itself never left this machine).
+    command: Option<String>,
     /// The page's code, so what happens next can be reported back to it.
     code: String,
 }
@@ -426,10 +570,21 @@ async fn pick_on_dashboard(cwd: &std::path::Path, current: Option<&str>) -> Resu
     let cfg = Config::load(&home_dir()).ok_or("not logged in")?;
     let base = enroll::http_base(&cfg.hub_url);
     let http = reqwest::Client::new();
+    // The saved startup commands usable in this folder: only their names and programs go to the page, never the commands.
+    let offered: Vec<serde_json::Value> = crate::device::config::commands_for(&home_dir(), cwd)
+        .into_iter()
+        .map(|(name, (c, src))| {
+            serde_json::json!({
+                "name": name,
+                "program": c.program,
+                "source": if src == crate::device::config::CommandSource::Folder { "folder" } else { "machine" },
+            })
+        })
+        .collect();
     let asked = http
         .post(format!("{base}/api/device/pick"))
         .bearer_auth(&cfg.token)
-        .json(&serde_json::json!({ "folder": folder, "project": current }))
+        .json(&serde_json::json!({ "folder": folder, "project": current, "commands": offered }))
         .timeout(Duration::from_secs(10))
         .send()
         .await;
@@ -477,6 +632,7 @@ async fn pick_on_dashboard(cwd: &std::path::Path, current: Option<&str>) -> Resu
                 agent: v["agent"].as_str().map(String::from),
                 adapter: v["adapter"].as_str().map(String::from),
                 role: v["role"].as_str().map(String::from),
+                command: v["command"].as_str().map(String::from),
                 code: code.clone(),
             });
         }

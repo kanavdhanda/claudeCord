@@ -76,6 +76,11 @@ pub(crate) struct Pick {
     folder: String,
     /// The project the folder already belongs to on the machine, offered first on the page.
     hint: Option<String>,
+    /// The saved startup commands the machine offers for this folder: their names and which program each starts (never the command itself,
+    /// which stays on the machine; the page sends back only a name).
+    commands: Vec<(String, String, String)>,
+    /// Which of them the page chose.
+    command: Option<String>,
     chosen: Option<String>,
     /// What else the page asked for with the project: the agent's name, program and role.
     agent: Option<String>,
@@ -328,6 +333,16 @@ fn machine_auth(
 struct PickStart {
     folder: String,
     project: Option<String>,
+    #[serde(default)]
+    commands: Vec<OfferedCommand>,
+}
+
+/// One saved command a machine offers: a name, the program it starts, and where it is kept (`machine` or `folder`).
+#[derive(Deserialize)]
+struct OfferedCommand {
+    name: String,
+    program: String,
+    source: String,
 }
 
 /// `POST /api/device/pick`: `claudecord start` in a folder that belongs to no project yet asks for a short code. The person opens
@@ -351,6 +366,18 @@ async fn pick_start(
         .take(100)
         .collect();
     let hint = b.project.filter(|p| crate::protocol::is_slug(p));
+    // Only well-formed names of the three known programs are kept, and not many of them.
+    let commands: Vec<(String, String, String)> = b
+        .commands
+        .into_iter()
+        .filter(|c| {
+            crate::protocol::is_slug(&c.name)
+                && matches!(c.program.as_str(), "claude" | "codex" | "agy")
+                && matches!(c.source.as_str(), "machine" | "folder")
+        })
+        .take(50)
+        .map(|c| (c.name, c.program, c.source))
+        .collect();
     let mut picks = gw.picks.locked();
     picks.retain(|_, p| now - p.at < PICK_TTL_MS);
     if picks.len() >= 500 {
@@ -367,6 +394,8 @@ async fn pick_start(
             node,
             folder,
             hint,
+            commands,
+            command: None,
             chosen: None,
             agent: None,
             adapter: None,
@@ -397,18 +426,19 @@ async fn pick_poll(
         Some(p)
             if p.tenant == tenant && p.node == node && now - p.at < PICK_TTL_MS && !p.collected =>
         {
-            let (chosen, agent, adapter, role) = (
+            let (chosen, agent, adapter, role, command) = (
                 p.chosen.clone(),
                 p.agent.clone(),
                 p.adapter.clone(),
                 p.role.clone(),
+                p.command.clone(),
             );
             if chosen.is_some() {
                 p.collected = true;
             }
             json_reply(
                 StatusCode::OK,
-                json!({ "chosen": chosen, "agent": agent, "adapter": adapter, "role": role }),
+                json!({ "chosen": chosen, "agent": agent, "adapter": adapter, "role": role, "command": command }),
             )
         }
         _ => err(
@@ -474,6 +504,7 @@ async fn pick_view(
                 "folder": p.folder,
                 "node": p.node,
                 "project": p.hint,
+                "commands": p.commands.iter().map(|(name, program, source)| json!({ "name": name, "program": program, "source": source })).collect::<Vec<_>>(),
                 "collected": p.collected,
                 "result": p.result.as_ref().map(|(ok, message)| json!({ "ok": ok, "message": message })),
             }),
@@ -491,6 +522,8 @@ struct PickChoose {
     agent: Option<String>,
     adapter: Option<String>,
     role: Option<String>,
+    /// The name of one of the saved commands the machine offered.
+    command: Option<String>,
 }
 
 /// `POST /api/v1/pick/{code}`: the person chooses the project on the dashboard.
@@ -545,6 +578,16 @@ async fn pick_choose(
         p.adapter = b
             .adapter
             .filter(|a| matches!(a.as_str(), "claude" | "codex" | "agy"));
+        // Only a command this machine offered can be chosen; its program is what the agent is read as.
+        if let Some(c) = b
+            .command
+            .as_deref()
+            .and_then(|n| p.commands.iter().find(|c| c.0 == n))
+            .cloned()
+        {
+            p.command = Some(c.0);
+            p.adapter = Some(c.1);
+        }
         p.role = b
             .role
             .map(|r| {

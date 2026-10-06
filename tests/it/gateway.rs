@@ -968,7 +968,12 @@ async fn a_project_is_chosen_on_the_dashboard_by_the_owner_of_the_machine_and_no
     let ask: Value = c
         .post(format!("{base}/api/device/pick"))
         .bearer_auth(&token)
-        .json(&json!({"folder": "shop", "project": "eeg"}))
+        .json(&json!({"folder": "shop", "project": "eeg", "commands": [
+            {"name": "opus-yolo", "program": "claude", "source": "folder"},
+            {"name": "fast", "program": "codex", "source": "machine"},
+            {"name": "bad name!", "program": "claude", "source": "machine"},
+            {"name": "evil", "program": "bash", "source": "machine"}
+        ]}))
         .send()
         .await
         .unwrap()
@@ -1002,6 +1007,15 @@ async fn a_project_is_chosen_on_the_dashboard_by_the_owner_of_the_machine_and_no
     assert_eq!(get_json(&base, &path, &alice).await.1["folder"], "shop");
     // The page is told which project the folder already belongs to, to offer it first.
     assert_eq!(get_json(&base, &path, &alice).await.1["project"], "eeg");
+    // ...and which saved startup commands the machine offers (names and programs only; a malformed one or an unknown program is dropped).
+    let offered = get_json(&base, &path, &alice).await.1["commands"].clone();
+    assert_eq!(
+        offered,
+        json!([
+            {"name": "opus-yolo", "program": "claude", "source": "folder"},
+            {"name": "fast", "program": "codex", "source": "machine"}
+        ])
+    );
     assert_eq!(
         get_json(&base, &path, &bob).await.0,
         404,
@@ -1050,7 +1064,7 @@ async fn a_project_is_chosen_on_the_dashboard_by_the_owner_of_the_machine_and_no
             &base,
             &path,
             Some(&alice),
-            json!({"project": "shopfront", "agent": "otter", "adapter": "codex", "role": "lead"})
+            json!({"project": "shopfront", "agent": "otter", "adapter": "claude", "role": "lead", "command": "fast"})
         )
         .await
         .0,
@@ -1060,6 +1074,8 @@ async fn a_project_is_chosen_on_the_dashboard_by_the_owner_of_the_machine_and_no
     let got = poll(token.clone(), code.clone()).await.1;
     assert_eq!(got["chosen"], "shopfront");
     assert_eq!(got["agent"], "otter");
+    // A command the machine offered is chosen by name, and the program it starts is what the agent is read as (not what the page said).
+    assert_eq!(got["command"], "fast");
     assert_eq!(got["adapter"], "codex");
     assert_eq!(got["role"], "lead");
     // A choice is made once.

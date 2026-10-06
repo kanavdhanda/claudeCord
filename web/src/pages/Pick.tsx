@@ -102,7 +102,8 @@ export function Pick() {
         if (!channel) return
         await api.place(project, bot.id, guild.id, channel.id)
       }
-      await api.choose(code, project, agent, program, role)
+      const saved = program.startsWith('cmd:') ? program.slice(4) : undefined
+      await api.choose(code, project, agent, saved ? what.data?.commands?.find((c) => c.name === saved)?.program ?? 'claude' : program, role, saved)
       setDone(project)
       setWaiting(true)
     })
@@ -219,6 +220,13 @@ export function Pick() {
             <option value="claude">Claude Code</option>
             <option value="codex">Codex</option>
             <option value="agy">agy</option>
+            {(what.data?.commands ?? []).length > 0 && (
+              <optgroup label="Saved commands on this machine">
+                {what.data!.commands!.map((c) => (
+                  <option key={c.name} value={`cmd:${c.name}`}>{c.name} ({c.program}{c.source === 'folder' ? ', this folder' : ''})</option>
+                ))}
+              </optgroup>
+            )}
           </select>
         </label>
       </div>
