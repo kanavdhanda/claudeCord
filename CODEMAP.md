@@ -169,6 +169,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | File | What it is |
 |---|---|
 | `tests/it/bucket.rs` | The bucket client: the signature is checked against the worked examples AWS publishes (so it is right for every S3-compatible service), and the upload, download and delete path is checked against a stand-in bucket server. |
+| `tests/it/capacity.rs` | How much a hub carries from a person in chat to an agent's machine and back, with the stand-in Discord at one end and real device links at the other. |
 | `tests/it/conformance.rs` | Checks the code against golden vectors in `testdata/conformance`: for each case, the exact output the program must give for a given input (frames, redaction, terminal screens, rate limits, metrics and more). |
 | `tests/it/device_link.rs` | The device side of the connection, run against the real hub: it connects, it comes back by itself after the hub restarts or drops it, and it does not hammer a hub that is down. |
 | `tests/it/device_pty.rs` | The terminal side, with real pseudo-terminals and a stand-in agent (`cat`, which echoes what it is given). |
@@ -183,6 +184,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | `tests/it/hub.rs` | Behaviour tests for the hub core. |
 | `tests/it/logs.rs` | The per-agent log files: what they keep, how they are trimmed and what is removed before anyone reads them. |
 | `tests/it/main.rs` | Every integration test, built as ONE program so the whole tree is compiled and linked once (twenty separate test programs meant twenty links, which is most of the time a CI run spends, above all on Windows). |
+| `tests/it/procs.rs` | What this test program itself holds, read from the operating system: open files, threads and resident memory. |
 | `tests/it/races.rs` | Races: many things happening at the same moment. |
 | `tests/it/resilience.rs` | Behaviour on difficult machines: ones behind a web proxy, ones that were asleep, ones with no route to the hub. |
 | `tests/it/robust.rs` | The hub as a real program, started and stopped the way an operator does it: a normal stop (SIGTERM, which is what `systemctl stop` and Docker send) saves everything and is recorded as a stop, while a kill is recorded as a crash from the last heartbeat. |
@@ -209,6 +211,8 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | `scripts/cost/coalescing.py` | Spends real tokens: runs Claude Code (tools off) about a dozen times. |
 | `scripts/cost/overhead.py` | Spends real tokens: runs Claude Code (haiku, tools off) a few dozen times. |
 | `scripts/cost/team_benchmark.py` | Spends real tokens (about 100 short Claude Code calls per model). |
+| `scripts/load/capacity.sh` | Capacity, leak and chaos runs against ONE hub process on this machine: starts a hub on a random port with a throw-away data folder, drives it with simulated machines (machines.mjs, Node 22+), and samples the hub's memory, open files and threads every few seconds. |
+| `scripts/load/daemon.sh` | What one machine's daemon costs with many agents: starts a hub and ONE daemon (private tmux socket, private CLAUDECORD_HOME) and adds agents running `cat` in steps, then samples the daemon's CPU, memory, threads and the tmux server's CPU at each step. |
 | `scripts/load/profile.sh` | Runs the k6 load test against a hub limited to the size of a free server, so the result says what that server can carry. |
 | `scripts/load/smoke.sh` | A small, cheap run of the k6 load test, fit for every push: a few hundred users with three bots each for under a minute. |
 | `scripts/package_npm.py` | (no header comment) |
