@@ -54,7 +54,7 @@ on your own computer with no Discord at all: `claudecord serve --demo --public-u
 
 The older single-team mode still exists for one team on one server: `claudecord hub`, `claudecord discord set`, `claudecord token`.
 
-`claudecord` on its own lists the agents running here (the one in this folder highlighted) and the ways to start one; Enter takes the highlighted line and each line shows the command it runs. `claudecord stop` lists what is running, asks, then stops everything here (every agent, and the connection to the hub; `-y` skips the question); `claudecord stop NAME` stops one. `claudecord restart` starts every
+`claudecord` on its own lists the agents running here (the one in this folder highlighted) and a "+ new agent" line; Enter takes the highlighted line. A new agent opens the dashboard, where you choose the project (new or existing), the agent's name, program and role; nothing is asked in the terminal. `claudecord stop` lists what is running, asks, then stops everything here (every agent, and the connection to the hub; `-y` skips the question); `claudecord stop NAME` stops one. `claudecord restart` starts every
 agent's program again with the same name and folder (`claudecord restart NAME` for one).
 
 `claudecord start` does exactly what you ask and nothing more. Every extra is a flag you choose:

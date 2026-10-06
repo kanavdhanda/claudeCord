@@ -95,7 +95,7 @@ fn intro(spec: &AgentSpec) -> Option<Delivery> {
     })
 }
 
-pub const RULES: &str = "Team chat is the shell command claudecord: say <text>, ask <question>, assign <agent> <task>, done <id> <summary>, dump (save state), team (who else is here), send <file>. Answer people with say: just the words, even \"on it\". For several lines pipe them in: say - <<'EOF'. Put @theirname before a person's name only when you need their attention; never @ yourself. @agentname addresses ANOTHER agent, in a thread of its own, so keep it short and only when you need them. Ask a person only what you cannot decide yourself, and ask once. Your say on a task goes to its thread; ask, done and report go to the main chat.";
+pub const RULES: &str = "Team chat is the shell command claudecord: say <text>, ask <question>, assign <agent> <task>, done <id> <summary>, dump (save state), team (who else is here), send <file> (to the chat) or send <file> --to <agent> (to another agent: it lands in their .claudecord inbox and is shown in your thread with them). Answer people with say: just the words, even \"on it\". For several lines pipe them in: say - <<'EOF'. Put @theirname before a person's name only when you need their attention; never @ yourself. @agentname addresses ANOTHER agent, in a thread of its own, so keep it short and only when you need them. Ask a person only what you cannot decide yourself, and ask once. Your say on a task goes to its thread; ask, done and report go to the main chat.";
 
 /// Choices that tests change.
 #[derive(Clone)]
@@ -1751,6 +1751,14 @@ impl State {
         crate::info!("daemon", "{agent_id}: started {} in {cwd}", argv[0]);
         // Remember the folder, so the hub can start more agents for this project here later. Only now that the agent is running: a start that was
         // refused or failed must not leave the folder attached to the project.
+        // A folder belongs to one project at a time, the one it was last used for. Left under both, the lookup by folder would keep finding
+        // whichever project comes first by name, however often the person chose another.
+        for (p, list) in self.folders.iter_mut() {
+            if p != &project {
+                list.retain(|f| f != &origin);
+            }
+        }
+        self.folders.retain(|_, list| !list.is_empty());
         let list = self.folders.entry(project.clone()).or_default();
         list.retain(|f| f != &origin);
         list.insert(0, origin.clone());

@@ -74,10 +74,13 @@ pub(crate) struct Pick {
     tenant: String,
     node: String,
     folder: String,
+    /// The project the folder already belongs to on the machine, offered first on the page.
+    hint: Option<String>,
     chosen: Option<String>,
-    /// What else the page asked for with the project: the first agent's name and program.
+    /// What else the page asked for with the project: the agent's name, program and role.
     agent: Option<String>,
     adapter: Option<String>,
+    role: Option<String>,
     at: i64,
 }
 
@@ -319,6 +322,7 @@ fn machine_auth(
 #[derive(Deserialize)]
 struct PickStart {
     folder: String,
+    project: Option<String>,
 }
 
 /// `POST /api/device/pick`: `claudecord start` in a folder that belongs to no project yet asks for a short code. The person opens
@@ -341,6 +345,7 @@ async fn pick_start(
         .filter(|c| !c.is_control())
         .take(100)
         .collect();
+    let hint = b.project.filter(|p| crate::protocol::is_slug(p));
     let mut picks = gw.picks.locked();
     picks.retain(|_, p| now - p.at < PICK_TTL_MS);
     if picks.len() >= 500 {
@@ -356,9 +361,11 @@ async fn pick_start(
             tenant,
             node,
             folder,
+            hint,
             chosen: None,
             agent: None,
             adapter: None,
+            role: None,
             at: now,
         },
     );
@@ -380,13 +387,18 @@ async fn pick_poll(
     let mut picks = gw.picks.locked();
     match picks.get(&code) {
         Some(p) if p.tenant == tenant && p.node == node && now - p.at < PICK_TTL_MS => {
-            let (chosen, agent, adapter) = (p.chosen.clone(), p.agent.clone(), p.adapter.clone());
+            let (chosen, agent, adapter, role) = (
+                p.chosen.clone(),
+                p.agent.clone(),
+                p.adapter.clone(),
+                p.role.clone(),
+            );
             if chosen.is_some() {
                 picks.remove(&code);
             }
             json_reply(
                 StatusCode::OK,
-                json!({ "chosen": chosen, "agent": agent, "adapter": adapter }),
+                json!({ "chosen": chosen, "agent": agent, "adapter": adapter, "role": role }),
             )
         }
         _ => err(
@@ -409,7 +421,7 @@ async fn pick_view(
     match gw.picks.locked().get(&code) {
         Some(p) if p.tenant == a.id && now - p.at < PICK_TTL_MS => json_reply(
             StatusCode::OK,
-            json!({ "folder": p.folder, "node": p.node }),
+            json!({ "folder": p.folder, "node": p.node, "project": p.hint }),
         ),
         _ => err(
             StatusCode::NOT_FOUND,
@@ -423,6 +435,7 @@ struct PickChoose {
     project: String,
     agent: Option<String>,
     adapter: Option<String>,
+    role: Option<String>,
 }
 
 /// `POST /api/v1/pick/{code}`: the person chooses the project on the dashboard.
@@ -466,6 +479,16 @@ async fn pick_choose(
         p.adapter = b
             .adapter
             .filter(|a| matches!(a.as_str(), "claude" | "codex" | "agy"));
+        p.role = b
+            .role
+            .map(|r| {
+                r.chars()
+                    .filter(|c| !c.is_control())
+                    .take(100)
+                    .collect::<String>()
+            })
+            .map(|r| r.trim().to_string())
+            .filter(|r| !r.is_empty());
     }
     json_reply(StatusCode::OK, json!({ "ok": true }))
 }

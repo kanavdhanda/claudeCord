@@ -24,13 +24,14 @@ export function Pick() {
   const [channelId, setChannelId] = useState('')
   const [channels, setChannels] = useState<Channel[]>([])
   const [agent, setAgent] = useState('')
+  const [role, setRole] = useState('')
   const [program, setProgram] = useState('claude')
   const [done, setDone] = useState<string | null>(null)
   const addBot = useAction()
   const go = useAction()
 
-  // The folder's name is the first guess for the project's name.
-  useEffect(() => { if (what.data && !project) setProject(clean(what.data.folder)) }, [what.data])
+  // The project this folder already belongs to comes first; a new folder's name is the first guess.
+  useEffect(() => { if (what.data && !project) setProject(what.data.project || clean(what.data.folder)) }, [what.data])
   // One bot needs no question.
   useEffect(() => { if (!botId && bots.data?.length) setBotId(bots.data[0].id) }, [bots.data])
   const bot = bots.data?.find((b) => b.id === botId) ?? null
@@ -76,7 +77,7 @@ export function Pick() {
         if (!channel) return
         await api.place(project, bot.id, guild.id, channel.id)
       }
-      await api.choose(code, project, agent, program)
+      await api.choose(code, project, agent, program, role)
       setDone(project)
     })
 
@@ -183,7 +184,7 @@ export function Pick() {
 
       <div className="row">
         <label>
-          First agent <span className="muted small">(a friendly name if empty)</span>
+          Agent <span className="muted small">(a friendly name if empty)</span>
           <input value={agent} placeholder="otter" onChange={(e) => setAgent(e.target.value)} />
         </label>
         <label>
@@ -195,6 +196,10 @@ export function Pick() {
           </select>
         </label>
       </div>
+      <label>
+        Role <span className="muted small">(optional, such as lead, reviewer, tests)</span>
+        <input value={role} placeholder="lead" onChange={(e) => setRole(e.target.value)} />
+      </label>
       {!nameOk && <p className="error">Names use letters, digits, dots, dashes and underscores.</p>}
       {go.error && <p className="error">{go.error}</p>}
       <button className="btn primary" disabled={go.busy || !nameOk || !ready} onClick={start}>

@@ -152,6 +152,10 @@ pub async fn run_daemon() -> Result<(), String> {
         idle_exit: Some(Duration::from_secs(20)),
         ..Options::default()
     };
+    // The daemon is started from a terminal. Closing that terminal sends it a hangup, whose default is to end it (and with it every agent's
+    // supervision): a daemon is meant to outlive the window it was started in.
+    #[cfg(unix)]
+    let _hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()).ok();
     daemon::run(cfg, dir, opts).await.map_err(|e| e.to_string())
 }
 
@@ -240,14 +244,18 @@ pub async fn start(a: StartArgs) -> Result<(), String> {
     let mut chosen = Picked::default();
     let project = match a.project.clone() {
         Some(p) => p,
-        None => match crate::device::config::project_of_folder(&dir, &cwd).filter(|_| !a.pick) {
-            Some(p) => p,
-            None => {
-                picked = true;
-                chosen = pick_on_dashboard(&cwd).await?;
-                chosen.project.clone()
+        None => {
+            let known = crate::device::config::project_of_folder(&dir, &cwd);
+            match known.clone().filter(|_| !a.pick) {
+                Some(p) => p,
+                None => {
+                    picked = true;
+                    // The folder's own project (if it has one) is what the page offers first; the person can change it there.
+                    chosen = pick_on_dashboard(&cwd, known.as_deref()).await?;
+                    chosen.project.clone()
+                }
             }
-        },
+        }
     };
     // No name given: the daemon makes a friendly one (shown below and in the agent's window).
     wait_until_connected(&project, picked).await?;
@@ -266,7 +274,7 @@ pub async fn start(a: StartArgs) -> Result<(), String> {
             name,
             adapter,
             model: a.model,
-            role: a.role,
+            role: a.role.or(chosen.role),
             cwd: cwd.to_string_lossy().into(),
             policy: a.policy,
             rows,
@@ -314,11 +322,12 @@ struct Picked {
     project: String,
     agent: Option<String>,
     adapter: Option<String>,
+    role: Option<String>,
 }
 
 /// Has the person choose, on the dashboard, which project this folder belongs to: the hub gives a short code, the dashboard's pick page shows
 /// it, and this waits for the answer. If the hub is an older one with no such page, the folder's name is used.
-async fn pick_on_dashboard(cwd: &std::path::Path) -> Result<Picked, String> {
+async fn pick_on_dashboard(cwd: &std::path::Path, current: Option<&str>) -> Result<Picked, String> {
     let folder = cwd
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -329,7 +338,7 @@ async fn pick_on_dashboard(cwd: &std::path::Path) -> Result<Picked, String> {
     let asked = http
         .post(format!("{base}/api/device/pick"))
         .bearer_auth(&cfg.token)
-        .json(&serde_json::json!({ "folder": folder }))
+        .json(&serde_json::json!({ "folder": folder, "project": current }))
         .timeout(Duration::from_secs(10))
         .send()
         .await;
@@ -376,6 +385,7 @@ async fn pick_on_dashboard(cwd: &std::path::Path) -> Result<Picked, String> {
                 project: p.to_string(),
                 agent: v["agent"].as_str().map(String::from),
                 adapter: v["adapter"].as_str().map(String::from),
+                role: v["role"].as_str().map(String::from),
             });
         }
     }
@@ -865,10 +875,9 @@ async fn pick_and_attach(rows: &[serde_json::Value], with_new: bool) -> Result<(
         })
         .collect();
     if with_new {
-        labels.push(format!("{:56} start", "+ new agent in this folder"));
         labels.push(format!(
             "{:56} start --pick",
-            "+ new agent, different project"
+            "+ new agent (choose project, name, program on the dashboard)"
         ));
     }
     let first = if any_here { 0 } else { names.len() };
@@ -882,10 +891,12 @@ async fn pick_and_attach(rows: &[serde_json::Value], with_new: bool) -> Result<(
         .map_err(|e| e.to_string())??;
     match picked {
         Some(i) if i < names.len() => attach(&names[i]).await,
-        Some(i) => match new_agent_args(i > names.len(), &names).await? {
-            Some(a) => start(a).await,
-            None => Ok(()),
-        },
+        Some(_) => {
+            // Everything about the new agent (project, name, program, role) is chosen on the dashboard, so nothing is typed here twice.
+            let mut a = default_start_args();
+            a.pick = true;
+            start(a).await
+        }
         None => Ok(()),
     }
 }
@@ -1287,89 +1298,9 @@ fn confirm(rows: &[serde_json::Value]) -> bool {
     std::io::stdin().lock().read_line(&mut line).is_ok() && line.trim().eq_ignore_ascii_case("y")
 }
 
-/// What a new agent is asked on the terminal. When the dashboard will open (the folder has no project yet, or `--pick`) it asks for the agent's
-/// name and program itself, so only the role is asked here: nothing is typed twice. Otherwise the program, name and role are asked here.
-/// None means the person backed out (Esc, or end of input).
-async fn new_agent_args(pick: bool, running: &[String]) -> Result<Option<StartArgs>, String> {
-    let mut a = default_start_args();
-    a.pick = pick;
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let project = crate::device::config::project_of_folder(&home_dir(), &cwd);
-    let dashboard = pick || project.is_none();
-    if dashboard {
-        println!("The name and program of the agent are chosen on the dashboard that opens next.");
-    } else {
-        let programs = [
-            ("claude", "Claude Code"),
-            ("codex", "OpenAI Codex"),
-            ("agy", "Antigravity"),
-        ];
-        let labels: Vec<String> = programs
-            .iter()
-            .map(|(id, name)| format!("{id:8} {name}"))
-            .collect();
-        let Some(p) =
-            tokio::task::spawn_blocking(move || pick_with_keys("Which agent program?", &labels, 0))
-                .await
-                .map_err(|e| e.to_string())??
-        else {
-            return Ok(None);
-        };
-        a.adapter = programs[p].0.into();
-        // A name an agent here already has (ids are project/name), or one the hub would refuse, is turned down now, not after the role too.
-        a.name = loop {
-            let Some(name) = ask_line("Agent name (Enter for a random one): ") else {
-                return Ok(None);
-            };
-            if name.is_empty() {
-                break None;
-            }
-            if !valid_name(&name) {
-                println!(
-                    "A name is letters, digits, dots, dashes and underscores, up to 50, starting with a letter or digit."
-                );
-            } else if project
-                .as_ref()
-                .is_some_and(|p| running.contains(&format!("{p}/{name}")))
-            {
-                println!(
-                    "{name} is already running here; pick another name, or Enter for a random one."
-                );
-            } else {
-                break Some(name);
-            }
-        };
-    }
-    let Some(role) = ask_line("Role, e.g. lead, reviewer, tests (Enter for none): ") else {
-        return Ok(None);
-    };
-    a.role = Some(role).filter(|r| !r.is_empty());
-    Ok(Some(a))
-}
-
-/// The same rule as the dashboard's name boxes.
-fn valid_name(n: &str) -> bool {
-    n.len() <= 50
-        && n.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
-        && n.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-}
-
-/// Asks one question on the terminal. An empty answer is Some(""); None means there is no more input (Ctrl-D), so the person backed out.
-fn ask_line(question: &str) -> Option<String> {
-    use std::io::{BufRead, Write};
-    print!("{question}");
-    let _ = std::io::stdout().flush();
-    let mut line = String::new();
-    match std::io::stdin().lock().read_line(&mut line) {
-        Ok(0) | Err(_) => None,
-        Ok(_) => Some(line.trim().to_string()),
-    }
-}
-
 #[cfg(test)]
-mod name_tests {
-    use super::{cut_to_width, valid_name, window_top};
+mod picker_tests {
+    use super::{cut_to_width, window_top};
 
     #[test]
     fn a_list_line_fits_the_columns_and_a_long_list_scrolls_with_the_highlight() {
@@ -1389,16 +1320,5 @@ mod name_tests {
             let top = window_top(sel, 30, 8);
             assert!(top <= sel && sel < top + 8 && top + 8 <= 30, "{sel} {top}");
         }
-    }
-
-    #[test]
-    fn a_name_follows_the_dashboards_rule() {
-        assert!(valid_name("thinker") && valid_name("a.b_c-1"));
-        assert!(
-            !valid_name("")
-                && !valid_name("-x")
-                && !valid_name("two words")
-                && !valid_name(&"a".repeat(51))
-        );
     }
 }

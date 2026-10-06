@@ -1570,3 +1570,153 @@ async fn a_second_daemon_does_not_take_over_a_running_ones_socket() {
     );
     r.hub.shutdown().await;
 }
+
+#[tokio::test]
+async fn two_agents_send_each_other_files_in_the_thread_of_the_pair() {
+    use claudecord::hub::effects::Chat;
+    let r = rig("peerfile").await;
+    let mut chat = r.hub.chat();
+    // Two agents on one machine, each in a folder of its own (two agents never share a folder).
+    let other = r.project.parent().unwrap().join("demo2");
+    std::fs::create_dir_all(&other).unwrap();
+    let otter_key = up(&r, "otter").await;
+    let resp = ipc::call(
+        &r.dir,
+        &Req::Up {
+            project: "demo".into(),
+            name: Some("fox".into()),
+            adapter: "claude".into(),
+            model: None,
+            role: None,
+            cwd: other.to_string_lossy().into(),
+            policy: "autonomous".into(),
+            rows: 24,
+            cols: 80,
+            opts: UpOpts::default(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(resp.ok, "{}", resp.msg);
+    let fox_key = resp.data.unwrap()["key"].as_str().unwrap().to_string();
+    eventually("both registered", async || {
+        r.hub
+            .call(|c, _| {
+                (
+                    c.agent("demo/otter").is_some() && c.agent("demo/fox").is_some(),
+                    vec![],
+                )
+            })
+            .await
+            .unwrap()
+    })
+    .await;
+    // otter -> fox, then fox -> otter.
+    std::fs::write(r.project.join("from-otter.txt"), b"hello fox").unwrap();
+    std::fs::write(other.join("from-fox.txt"), b"hello otter").unwrap();
+    for (agent, key, path, to, caption) in [
+        (
+            "demo/otter",
+            &otter_key,
+            "from-otter.txt",
+            "fox",
+            "the data",
+        ),
+        ("demo/fox", &fox_key, "from-fox.txt", "otter", "thanks"),
+    ] {
+        let sent = ipc::call_as(
+            &r.dir,
+            Some(key),
+            &Req::Send {
+                agent: agent.into(),
+                path: path.into(),
+                to: Some(to.into()),
+                caption: Some(caption.into()),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(sent.ok, "{}", sent.msg);
+    }
+    let landed = |dir: &std::path::Path, name: &str, body: &[u8]| {
+        std::fs::read_dir(dir.join(".claudecord/files"))
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|e| {
+                e.file_name().to_string_lossy().ends_with(name)
+                    && std::fs::read(e.path()).is_ok_and(|b| b == body)
+            })
+    };
+    eventually("fox has otter's file", async || {
+        landed(&other, "from-otter.txt", b"hello fox")
+    })
+    .await;
+    eventually("otter has fox's file", async || {
+        landed(&r.project, "from-fox.txt", b"hello otter")
+    })
+    .await;
+    // The chat shows both transfers in the pair's thread, not in the main channel.
+    let mut shown = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while shown.len() < 2 && std::time::Instant::now() < deadline {
+        if let Ok(Ok(Chat::Post { text, thread, .. })) =
+            tokio::time::timeout(Duration::from_millis(200), chat.recv()).await
+            && text.starts_with("Sent ")
+        {
+            shown.push((text, thread));
+        }
+    }
+    assert_eq!(shown.len(), 2, "{shown:?}");
+    for (text, thread) in &shown {
+        assert_eq!(thread.as_deref(), Some("fox & otter"), "{text}");
+    }
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_folder_belongs_to_the_project_it_was_last_used_for() {
+    let r = rig("onefolder").await;
+    // First started as project "demo", then, after that agent is gone, as "other" from the same folder.
+    up(&r, "otter").await;
+    assert_eq!(
+        claudecord::device::config::project_of_folder(&r.dir, &r.project).as_deref(),
+        Some("demo")
+    );
+    let stopped = ipc::call(
+        &r.dir,
+        &Req::Stop {
+            agent: "demo/otter".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(stopped.ok, "{}", stopped.msg);
+    let resp = ipc::call(
+        &r.dir,
+        &Req::Up {
+            project: "other".into(),
+            name: Some("fox".into()),
+            adapter: "claude".into(),
+            model: None,
+            role: None,
+            cwd: r.project.to_string_lossy().into(),
+            policy: "autonomous".into(),
+            rows: 24,
+            cols: 80,
+            opts: UpOpts::default(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(resp.ok, "{}", resp.msg);
+    // "demo" sorts before "other", so a folder left under both would keep resolving to "demo".
+    let map = claudecord::device::config::read_projects(&r.dir);
+    assert!(!map.contains_key("demo"), "{map:?}");
+    assert_eq!(
+        claudecord::device::config::project_of_folder(&r.dir, &r.project).as_deref(),
+        Some("other")
+    );
+    r.hub.shutdown().await;
+}

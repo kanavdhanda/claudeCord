@@ -73,6 +73,13 @@ impl HubCore {
                 }
                 return;
             };
+            // A file between two agents goes in the thread of that pair, the same one their messages use, so the chat shows it next to what
+            // they said about it and the main channel stays for people.
+            let thread = thread.or_else(|| {
+                let mut pair = [a.name.clone(), peer.name.clone()];
+                pair.sort();
+                Some(pair.join(" & ").chars().take(90).collect())
+            });
             let frame = HubFrame::FileChunk {
                 transfer_id: transfer_id.into(),
                 agent_id: peer.agent_id.clone(),

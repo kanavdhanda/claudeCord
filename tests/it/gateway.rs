@@ -891,7 +891,7 @@ async fn a_project_is_chosen_on_the_dashboard_by_the_owner_of_the_machine_and_no
     let ask: Value = c
         .post(format!("{base}/api/device/pick"))
         .bearer_auth(&token)
-        .json(&json!({"folder": "shop"}))
+        .json(&json!({"folder": "shop", "project": "eeg"}))
         .send()
         .await
         .unwrap()
@@ -923,6 +923,8 @@ async fn a_project_is_chosen_on_the_dashboard_by_the_owner_of_the_machine_and_no
     // The page sees the folder and the machine, for the owner only.
     let path = format!("/api/v1/pick/{code}");
     assert_eq!(get_json(&base, &path, &alice).await.1["folder"], "shop");
+    // The page is told which project the folder already belongs to, to offer it first.
+    assert_eq!(get_json(&base, &path, &alice).await.1["project"], "eeg");
     assert_eq!(
         get_json(&base, &path, &bob).await.0,
         404,
@@ -967,16 +969,22 @@ async fn a_project_is_chosen_on_the_dashboard_by_the_owner_of_the_machine_and_no
         400
     );
     assert_eq!(
-        post_json(&base, &path, Some(&alice), json!({"project": "shopfront"}))
-            .await
-            .0,
+        post_json(
+            &base,
+            &path,
+            Some(&alice),
+            json!({"project": "shopfront", "agent": "otter", "adapter": "codex", "role": "lead"})
+        )
+        .await
+        .0,
         200
     );
-    // The machine collects it exactly once.
-    assert_eq!(
-        poll(token.clone(), code.clone()).await.1["chosen"],
-        "shopfront"
-    );
+    // The machine collects it exactly once, with the agent's name, program and role the page asked for.
+    let got = poll(token.clone(), code.clone()).await.1;
+    assert_eq!(got["chosen"], "shopfront");
+    assert_eq!(got["agent"], "otter");
+    assert_eq!(got["adapter"], "codex");
+    assert_eq!(got["role"], "lead");
     assert_eq!(poll(token, code).await.0, 404);
 }
 
