@@ -12,6 +12,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY examples ./examples
+COPY assets ./assets
 COPY web/dist ./web/dist
 # The cache mounts keep downloaded crates and compiled dependencies between builds on the same machine.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
