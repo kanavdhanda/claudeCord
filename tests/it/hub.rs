@@ -2018,3 +2018,46 @@ fn a_task_gets_its_own_thread_by_itself_and_what_the_worker_says_goes_there_unti
         "with no open task, it is the main chat"
     );
 }
+
+#[test]
+fn a_worker_is_told_about_the_other_workers_and_can_ask_who_is_here_and_who_can_be_reached() {
+    let mut w = World::new();
+    w.join("mac", 1, "otter");
+    w.join("gpu", 2, "heron");
+    w.join("box", 3, "ibis");
+    // heron's first input carries its brief: the lead, and the other worker it can @name.
+    let fx = w
+        .core
+        .human_message(
+            &w.kd.clone(),
+            "p",
+            "@heron start",
+            &MessageOpts::default(),
+            T0,
+        )
+        .unwrap()
+        .1;
+    let brief = deliveries(&fx)
+        .into_iter()
+        .find(|d| d.1 == "system")
+        .expect("the brief came with the first message")
+        .2;
+    assert!(brief.contains("otter leads p"), "{brief}");
+    assert!(brief.contains("Also here: ibis"), "{brief}");
+    // ibis's machine drops off; heron asks who is here.
+    w.core.node_disconnected("box", 3);
+    let fx = w.core.on_node_frame(
+        "gpu",
+        NodeFrame::AgentTeam {
+            agent_id: "p/heron".into(),
+        },
+        T0 + 1,
+    );
+    let team = deliveries(&fx)
+        .into_iter()
+        .find(|d| d.2.starts_with("team:"))
+        .expect("the answer arrives as an input")
+        .2;
+    assert!(team.contains("otter, lead"), "{team}");
+    assert!(team.contains("ibis") && team.contains("offline"), "{team}");
+}

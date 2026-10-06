@@ -4,7 +4,13 @@
 #   1. put the Discord application's client secret in a file called oauth-secret next to this file and let the container's user read it:
 #        sudo chown 65532:65532 oauth-secret && sudo chmod 400 oauth-secret
 #   2. make a file called .env next to it with:   DISCORD_CLIENT_ID=<the application id>
-#   3. docker compose up -d --build          (the first build takes several minutes; to update: git pull, then the same command)
+#   3. make the folder the hub keeps everything in, which is a plain folder on this machine and not a Docker volume, so replacing or upgrading
+#      the container (or even deleting it with `docker compose down -v`) never touches it:
+#        mkdir -p data && sudo chown 65532:65532 data
+#   4. docker compose up -d --build          (the first build takes several minutes; to update: git pull, then the same command)
+#
+# Inside data/ is the file `kek`, which seals every saved bot token. BACK IT UP somewhere else too (and control.db): lose it and every saved
+# bot token is gone. There is no database container: the hub's database is SQLite, a file in data/, written by the hub itself.
 #
 # The port is published on 127.0.0.1 only, so the only way in is the proxy on the same machine (nginx, doing TLS); it must pass the client's
 # address on in X-Forwarded-For. The hub trusts that header only from this machine or a private network address.
@@ -27,7 +33,7 @@ services:
     ports:
       - "127.0.0.1:8787:8787"
     volumes:
-      - claudecord-data:/data
+      - ./data:/data
       - ./oauth-secret:/run/secrets/oauth-secret:ro
     read_only: true
     tmpfs:
@@ -38,6 +44,3 @@ services:
     ulimits:
       nofile: 65535
     stop_grace_period: 30s
-
-volumes:
-  claudecord-data:

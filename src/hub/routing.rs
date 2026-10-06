@@ -480,3 +480,36 @@ impl HubCore {
         }
     }
 }
+
+impl HubCore {
+    /// `claudecord team`: tells the agent who is in its project, with jobs, who leads and who is reachable. It arrives as the agent's next input.
+    pub(super) fn on_team(&mut self, agent_id: &str, now: i64, fx: &mut Vec<Effect>) {
+        let Some(a) = self.agents.get(agent_id).cloned() else {
+            return;
+        };
+        let rows: Vec<(AgentRow, String, bool)> = self
+            .agents_of_project(&a.project)
+            .into_iter()
+            .map(|p| {
+                let status = format!("{:?}", self.status_of(&p.agent_id)).to_lowercase();
+                (p.clone(), status, self.conns.contains_key(&p.node_name))
+            })
+            .collect();
+        let view: Vec<(&AgentRow, &str, bool)> =
+            rows.iter().map(|(p, s, o)| (p, s.as_str(), *o)).collect();
+        self.queues
+            .entry(agent_id.to_string())
+            .or_default()
+            .push(Queued {
+                from: "system".into(),
+                text: briefs::team(&view),
+                thread: None,
+                reference: None,
+                task_id: None,
+                handoff: None,
+                wake: true,
+                at: now,
+            });
+        self.flush(agent_id, now, fx);
+    }
+}

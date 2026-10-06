@@ -30,7 +30,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 /// The short standing instruction added to every agent: the verbs it has and the one rule about replies.
-pub const RULES: &str = "Team chat is the shell command claudecord: say <text> (FYI), ask <question>, assign <agent> <task>, done <id> <summary>, dump (save state), send <file>. Your say while you work on a task goes to that task's thread by itself; ask, done and report go to the main chat. Plain say is FYI: @name someone to need a reply.";
+pub const RULES: &str = "Team chat is the shell command claudecord: say <text> (FYI), ask <question>, assign <agent> <task>, done <id> <summary>, dump (save state), team (who else is here and what they do), send <file>. Your say while you work on a task goes to that task's thread by itself; ask, done and report go to the main chat. Plain say is FYI: @name someone to need a reply.";
 
 /// Choices that tests change.
 #[derive(Clone)]
@@ -1032,6 +1032,10 @@ impl State {
                 self.verb(&agent, |id| NodeFrame::AgentPickup { agent_id: id })
                     .await
             }
+            Req::Team { agent } => {
+                self.verb(&agent, |id| NodeFrame::AgentTeam { agent_id: id })
+                    .await
+            }
             Req::Permission {
                 agent,
                 kind,
@@ -1455,6 +1459,7 @@ fn describe(req: &Req) -> Option<(&str, &'static str, String)> {
         } => (agent, "report", format!("{title}: {summary}")),
         Req::Dump { agent, text } => (agent, "dump", text.clone()),
         Req::Pickup { agent } => (agent, "pickup", "asked for a handoff".into()),
+        Req::Team { agent } => (agent, "team", "asked who is in the project".into()),
         Req::Answer { agent, ask, text } => (agent, "answer", format!("{ask}: {text}")),
         Req::Usage { agent, kind, pct } => (agent, "usage", format!("{kind} {pct}%")),
         Req::Permission {

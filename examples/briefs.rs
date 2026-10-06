@@ -23,7 +23,7 @@ fn main() {
     let (lead, a, b) = (row("otter"), row("heron"), row("wren"));
     let out = serde_json::json!({
         "lead_brief": briefs::lead(&lead, &[&a, &b]),
-        "worker_brief": briefs::worker(&a, &lead),
+        "worker_brief": briefs::worker(&a, &lead, &[]),
         "rules": RULES,
     });
     println!("{out}");

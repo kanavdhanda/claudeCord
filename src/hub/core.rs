@@ -625,6 +625,7 @@ impl HubCore {
             | NodeFrame::AgentUsage { agent_id, .. }
             | NodeFrame::AgentHandoff { agent_id, .. }
             | NodeFrame::AgentPickup { agent_id }
+            | NodeFrame::AgentTeam { agent_id }
             | NodeFrame::AgentAnswer { agent_id, .. }
             | NodeFrame::FileChunk { agent_id, .. } => Some(agent_id.as_str()),
             NodeFrame::Hello { .. }
@@ -760,6 +761,7 @@ impl HubCore {
                 self.on_handoff(&agent_id, &text, now, &mut fx)
             }
             NodeFrame::AgentPickup { agent_id } => self.on_pickup(&agent_id, now, &mut fx),
+            NodeFrame::AgentTeam { agent_id } => self.on_team(&agent_id, now, &mut fx),
             NodeFrame::AgentAnswer {
                 agent_id,
                 ask,
@@ -904,7 +906,14 @@ impl HubCore {
             .collect();
         match all.iter().copied().find(|p| p.is_lead) {
             Some(lead) if lead.agent_id == a.agent_id => briefs::lead(a, &peers),
-            Some(lead) => briefs::worker(a, lead),
+            Some(lead) => {
+                let others: Vec<&AgentRow> = peers
+                    .iter()
+                    .copied()
+                    .filter(|p| p.agent_id != lead.agent_id)
+                    .collect();
+                briefs::worker(a, lead, &others)
+            }
             None => String::new(),
         }
     }

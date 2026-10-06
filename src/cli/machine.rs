@@ -649,3 +649,90 @@ mod tests {
         assert_eq!(choose(&n, "9"), None);
     }
 }
+
+const GUIDE_START: &str = "<!-- claudecord:start -->";
+const GUIDE_END: &str = "<!-- claudecord:end -->";
+
+/// `claudecord init`: the guide for agents goes into AGENTS.md here, and CLAUDE.md here points at it. Only the part between the markers is ever
+/// replaced; anything else in either file is left as it is.
+pub async fn init() -> Result<(), String> {
+    let dir = std::env::current_dir().map_err(|e| e.to_string())?;
+    for line in install_guide(&dir)? {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// Writes the guide and returns what was done, one line each.
+fn install_guide(dir: &std::path::Path) -> Result<Vec<String>, String> {
+    let block = format!(
+        "{GUIDE_START}\n{}{GUIDE_END}\n",
+        crate::agents::AGENTS_GUIDE
+    );
+    let mut done = Vec::new();
+    let agents = dir.join("AGENTS.md");
+    let old = std::fs::read_to_string(&agents).unwrap_or_default();
+    let new = match (old.find(GUIDE_START), old.find(GUIDE_END)) {
+        (Some(a), Some(b)) if a < b => {
+            format!(
+                "{}{}{}",
+                &old[..a],
+                block,
+                old[b + GUIDE_END.len()..].trim_start_matches('\n')
+            )
+        }
+        _ if old.is_empty() => block.clone(),
+        _ => format!("{}\n\n{block}", old.trim_end()),
+    };
+    if new != old {
+        std::fs::write(&agents, new).map_err(|e| e.to_string())?;
+        done.push("wrote the team guide to AGENTS.md".to_string());
+    } else {
+        done.push("AGENTS.md already has the current guide".to_string());
+    }
+    // Claude reads CLAUDE.md, not AGENTS.md; a line there pulls AGENTS.md in.
+    let claude = dir.join("CLAUDE.md");
+    let c = std::fs::read_to_string(&claude).unwrap_or_default();
+    if !c.contains("@AGENTS.md") {
+        let joined = if c.is_empty() {
+            "@AGENTS.md\n".to_string()
+        } else {
+            format!("{}\n\n@AGENTS.md\n", c.trim_end())
+        };
+        std::fs::write(&claude, joined).map_err(|e| e.to_string())?;
+        done.push("CLAUDE.md now includes AGENTS.md".to_string());
+    }
+    Ok(done)
+}
+
+#[cfg(test)]
+mod guide_tests {
+    use super::*;
+
+    #[test]
+    fn the_guide_is_added_once_updated_in_place_and_never_overwrites_the_users_own_text() {
+        let d = std::env::temp_dir().join(format!("cc-guide-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("AGENTS.md"), "# My project\nuse tabs\n").unwrap();
+        install_guide(&d).unwrap();
+        let a = std::fs::read_to_string(d.join("AGENTS.md")).unwrap();
+        assert!(
+            a.starts_with("# My project\nuse tabs"),
+            "their text stays first"
+        );
+        assert_eq!(a.matches(GUIDE_START).count(), 1);
+        assert_eq!(
+            std::fs::read_to_string(d.join("CLAUDE.md")).unwrap(),
+            "@AGENTS.md\n"
+        );
+        // Again: nothing changes. After an edit inside the markers: put back; text outside them is kept.
+        install_guide(&d).unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("AGENTS.md")).unwrap(), a);
+        let edited = a.replace("claudecord team", "claudecord XXXX") + "\nafter\n";
+        std::fs::write(d.join("AGENTS.md"), &edited).unwrap();
+        install_guide(&d).unwrap();
+        let b = std::fs::read_to_string(d.join("AGENTS.md")).unwrap();
+        assert!(b.contains("claudecord team") && !b.contains("XXXX") && b.ends_with("after\n"));
+        assert_eq!(b.matches(GUIDE_START).count(), 1);
+    }
+}

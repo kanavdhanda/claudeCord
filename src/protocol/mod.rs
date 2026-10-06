@@ -275,6 +275,9 @@ pub enum NodeFrame {
     /// A fresh session asking for whatever it should carry on from (the `pickup` verb).
     #[serde(rename = "agent.pickup", rename_all = "camelCase")]
     AgentPickup { agent_id: String },
+    /// An agent asking who else is in its project and whether they can be reached now (the `team` verb).
+    #[serde(rename = "agent.team", rename_all = "camelCase")]
+    AgentTeam { agent_id: String },
     /// The same prompt was answered at the terminal instead, so the chat message can be closed.
     #[serde(rename = "agent.permission.done", rename_all = "camelCase")]
     AgentPermissionDone { agent_id: String, perm_id: String },
@@ -382,7 +385,7 @@ impl NodeFrame {
             } => *max_agents <= 1000 && labels.len() <= 16 && labels.iter().all(|l| within(l, 32)),
             AgentHandoff { text, .. } => within(text, 8000),
             AgentAnswer { ask, text, .. } => within(ask, 300) && within(text, 4000),
-            AgentPickup { .. } => true,
+            AgentPickup { .. } | AgentTeam { .. } => true,
             FileChunk {
                 transfer_id,
                 name,

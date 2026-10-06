@@ -83,6 +83,11 @@ pub async fn dump(text: String) -> Result<(), String> {
     send(Req::Dump { agent: me()?, text }).await
 }
 
+/// `claudecord team`: who else is in this project, what they do and whether they can be reached. The answer arrives as your next input.
+pub async fn team() -> Result<(), String> {
+    send(Req::Team { agent: me()? }).await
+}
+
 /// `claudecord pickup`: ask what to carry on from.
 pub async fn pickup() -> Result<(), String> {
     send(Req::Pickup { agent: me()? }).await

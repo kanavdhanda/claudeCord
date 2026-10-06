@@ -1,7 +1,7 @@
 //! The command line: what each command is, and where it is handled. Commands fall in three groups:
 //! - running things: `hub` (the central server), `daemon` (the program on a machine)
 //! - working with agents: `login`, `up`, `ls`, `attach`, `stop`, `down`, `doctor`
-//! - what an agent runs in its own shell: `say`, `ask`, `assign`, `done`, `report`, `dump`, `pickup`, `send`
+//! - what an agent runs in its own shell: `say`, `ask`, `assign`, `done`, `report`, `dump`, `pickup`, `team`, `send`
 //!
 //! Files: `hub` (server commands), `discord` (connect to Discord), `storage` (where old history goes), `machine` (daemon, login, up, attach and friends), `verbs` (the agent's commands).
 
@@ -50,6 +50,8 @@ pub enum Cmd {
     Daemon,
     /// Save which hub this machine talks to.
     Login(machine::LoginArgs),
+    /// Put the team-chat guide for agents into this folder's AGENTS.md (and CLAUDE.md, for Claude). Never overwrites your own text; run it again to update.
+    Init,
     /// Start an agent in the current folder and open its terminal (starting the daemon if needed, and saying so).
     Start(machine::StartArgs),
     /// Show the tail of an agent's log: what it was sent and did, or what its terminal showed.
@@ -104,6 +106,8 @@ pub enum Cmd {
     Dump { text: String },
     /// Ask what a fresh session should carry on from.
     Pickup,
+    /// Ask who else is in this project, what they do and whether they can be reached. The answer arrives as your next input.
+    Team,
     /// Send a file to the chat, or to a peer with --to.
     Send {
         path: String,
@@ -139,6 +143,7 @@ pub async fn run(cli: Cli) -> Result<(), String> {
             terminal,
         } => machine::logs(&agent, lines, terminal).await,
         Cmd::Handoff { agent, out } => machine::handoff(&agent, out).await,
+        Cmd::Init => machine::init().await,
         Cmd::Ls => machine::ls().await,
         Cmd::Attach { agent } => machine::attach_or_pick(agent).await,
         Cmd::Stop { agent } => machine::stop(&agent).await,
@@ -153,6 +158,7 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         Cmd::Report { title, summary } => verbs::report(title, summary).await,
         Cmd::Dump { text } => verbs::dump(text).await,
         Cmd::Pickup => verbs::pickup().await,
+        Cmd::Team => verbs::team().await,
         Cmd::Send { path, to, caption } => verbs::send_file(path, to, caption).await,
     }
 }

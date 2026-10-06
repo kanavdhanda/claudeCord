@@ -99,6 +99,10 @@ pub enum Req {
     Pickup {
         agent: String,
     },
+    /// Ask who else is in the project.
+    Team {
+        agent: String,
+    },
     Usage {
         agent: String,
         kind: String,
