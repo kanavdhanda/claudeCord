@@ -6,35 +6,29 @@
 const { spawnSync } = require("child_process");
 const path = require("path");
 
-// Which package holds the program for which machine. Linux builds are static, so they run on any distribution.
-const PACKAGES = {
-  "linux-x64": "claudecord-linux-x64",
-  "linux-arm64": "claudecord-linux-arm64",
-  "darwin-x64": "claudecord-darwin-x64",
-  "darwin-arm64": "claudecord-darwin-arm64",
-  "win32-x64": "claudecord-win32-x64",
-};
+// The program for each machine lives next to this file, in bin/<platform>-<cpu>/. Linux builds are static, so they run on any distribution.
+const KEYS = ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64"];
 
-/** The path of the program to run, or an Error saying what is wrong. */
-function find(platform, arch, env, resolve) {
+/** The path of the program to run, or an Error saying what is wrong. `dir` is where the programs are, `exists` says whether a file is there. */
+function find(platform, arch, env, dir, exists) {
   if (env.CLAUDECORD_BINARY) return env.CLAUDECORD_BINARY;
-  const pkg = PACKAGES[platform + "-" + arch];
-  if (!pkg) return new Error("claudecord has no build for " + platform + " " + arch + ". Build it with: cargo install --git https://github.com/kanavdhanda/claudeCord");
-  try {
-    return path.join(path.dirname(resolve(pkg + "/package.json")), "bin", platform === "win32" ? "claudecord.exe" : "claudecord");
-  } catch (e) {
-    return new Error("the package " + pkg + " is not installed. Reinstall without --omit=optional (or --no-optional), or set CLAUDECORD_BINARY to the program's path.");
-  }
+  const key = platform + "-" + arch;
+  if (!KEYS.includes(key)) return new Error("claudecord has no build for " + platform + " " + arch + ". Build it with: cargo install --git https://github.com/kanavdhanda/claudeCord");
+  const file = path.join(dir, key, platform === "win32" ? "claudecord.exe" : "claudecord");
+  if (!exists(file)) return new Error("the program for " + key + " is missing from this install (" + file + "). Reinstall claudecord, or set CLAUDECORD_BINARY to the program's path.");
+  return file;
 }
 
-module.exports = { find, PACKAGES };
+module.exports = { find, KEYS };
 
 if (require.main === module) {
-  const bin = find(process.platform, process.arch, process.env, require.resolve);
+  const bin = find(process.platform, process.arch, process.env, __dirname, require("fs").existsSync);
   if (bin instanceof Error) {
     console.error(bin.message);
     process.exit(1);
   }
+  // npm keeps the executable bit, but a file that lost it is made runnable again rather than failing.
+  if (process.platform !== "win32") { try { require("fs").chmodSync(bin, 0o755); } catch (e) { /* read-only install: it may already be runnable */ } }
   const r = spawnSync(bin, process.argv.slice(2), { stdio: "inherit" });
   if (r.error) {
     console.error("could not start " + bin + ": " + r.error.message);

@@ -38,18 +38,15 @@ def test_npm(binary, tmp):
     shutil.copy(binary, bins / f"claudecord-{plat}-{cpu}{'.exe' if plat == 'windows' else ''}")
     version, made = package_npm.build(bins, tmp / "npm")
     assert version == package_npm.cargo_version() and len(made) == 1, made
+    assert sorted(p.name for p in (tmp / "npm").iterdir()) == ["claudecord"], "only one package is made"
     main = json.loads((tmp / "npm/claudecord/package.json").read_text())
-    assert main["version"] == version and set(main["optionalDependencies"]) == set(made)
-    plat_pkg = json.loads((tmp / "npm" / made[0] / "package.json").read_text())
-    assert plat_pkg["os"] and plat_pkg["cpu"], "a platform package says which machines it is for"
+    assert main["version"] == version and "optionalDependencies" not in main
     tars = tmp / "tars"
     tars.mkdir()
-    for d in [*made, "claudecord"]:
-        run("npm", "pack", str(tmp / "npm" / d), "--pack-destination", str(tars))
+    run("npm", "pack", str(tmp / "npm" / "claudecord"), "--pack-destination", str(tars))
     site = tmp / "site"
     site.mkdir()
     run("npm", "init", "-y", cwd=site)
-    # The main package alone cannot fetch its platform package offline, so both tarballs are installed, as npm would.
     run("npm", "install", "--no-audit", "--no-fund", *map(str, sorted(tars.glob("*.tgz"))), cwd=site)
     launcher = site / "node_modules/.bin" / ("claudecord.cmd" if platform.system() == "Windows" else "claudecord")
     out = run(str(launcher), "--help")
@@ -57,18 +54,21 @@ def test_npm(binary, tmp):
     # The exit code of the program comes through the launcher.
     bad = subprocess.run([str(launcher), "no-such-command"], capture_output=True)
     assert bad.returncode != 0
-    print("npm: installed from tarballs and ran claudecord --help")
+    print("npm: installed the one package from its tarball and ran claudecord --help")
 
 
 def test_launcher():
     script = """
-const { find, PACKAGES } = require(%r);
-const none = () => { throw new Error('x'); };
-if (find('linux', 'x64', { CLAUDECORD_BINARY: '/x/y' }, none) !== '/x/y') throw new Error('override ignored');
-if (!(find('freebsd', 'x64', {}, none) instanceof Error)) throw new Error('unknown platform accepted');
-if (!/not installed/.test(find('linux', 'x64', {}, none).message)) throw new Error('missing package message');
-const p = find('win32', 'x64', {}, (n) => '/n/' + n);
-if (!p.endsWith('claudecord.exe') || !p.includes(PACKAGES['win32-x64'])) throw new Error('windows path ' + p);
+const { find, KEYS } = require(%r);
+const no = () => false, yes = () => true;
+if (find('linux', 'x64', { CLAUDECORD_BINARY: '/x/y' }, '/d', no) !== '/x/y') throw new Error('override ignored');
+if (!(find('freebsd', 'x64', {}, '/d', yes) instanceof Error)) throw new Error('unknown platform accepted');
+if (!/missing from this install/.test(find('linux', 'x64', {}, '/d', no).message)) throw new Error('missing program message');
+const p = find('win32', 'x64', {}, '/d', yes);
+if (!p.endsWith('claudecord.exe') || !p.includes('win32-x64')) throw new Error('windows path ' + p);
+const m = find('darwin', 'arm64', {}, '/d', yes);
+if (!m.endsWith('claudecord') || !m.includes('darwin-arm64')) throw new Error('mac path ' + m);
+if (KEYS.length !== 5) throw new Error('five platforms');
 """ % str(ROOT / "npm/claudecord/bin/claudecord.js")
     run("node", "-e", script)
     print("npm launcher: platform choice, override and error messages")
