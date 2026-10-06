@@ -321,6 +321,23 @@ impl HubCore {
         }
     }
 
+    /// How many entries each table that is keyed by an agent or a transfer holds, for the leak tests: once every agent is gone, each of these
+    /// must be empty again.
+    pub fn table_sizes(&self) -> Vec<(&'static str, usize)> {
+        vec![
+            ("agents", self.agents.len()),
+            ("by_project", self.by_project.len()),
+            ("status", self.status.len()),
+            ("streak", self.streak.len()),
+            ("queues", self.queues.len()),
+            ("pending", self.pending.len()),
+            ("briefed", self.briefed.len()),
+            ("dump_asked", self.dump_asked.len()),
+            ("roster_dirty", self.roster_dirty.len()),
+            ("uploads", self.uploads.len()),
+        ]
+    }
+
     /// How many devices are connected right now.
     pub fn connected_nodes(&self) -> usize {
         self.conns.len()
@@ -551,6 +568,9 @@ impl HubCore {
         self.queues.remove(id);
         self.briefed.remove(id);
         self.roster_dirty.remove(id);
+        // Without these two, every agent that ever spoke or was sent something would leave a row behind for as long as the hub runs.
+        self.streak.remove(id);
+        self.pending.retain(|_, p| p.agent_id != id);
     }
 
     /// An agent announces itself. Registering again is harmless: nothing is announced and nothing is re-briefed.

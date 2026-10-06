@@ -37,6 +37,30 @@ pub(super) struct Upload {
 }
 
 impl HubCore {
+    /// A transfer that stopped part way (the machine lost its connection, say) is dropped, and the chat is told. Also run by the clock, so a
+    /// half-sent file does not sit in memory until somebody happens to send another.
+    pub(super) fn expire_uploads(&mut self, now: i64, fx: &mut Vec<Effect>) {
+        let stale: Vec<String> = self
+            .uploads
+            .iter()
+            .filter(|(_, u)| now - u.at > UPLOAD_TTL_MS)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in stale {
+            if let Some(u) = self.uploads.remove(&k) {
+                Self::notice(
+                    &u.project,
+                    format!(
+                        "{} did not finish sending {}: it stopped part way, so nothing was posted.",
+                        u.from, u.name
+                    ),
+                    false,
+                    fx,
+                );
+            }
+        }
+    }
+
     /// One chunk from an agent. With a peer named, it is relayed to that peer. Otherwise it is collected, and when the
     /// last chunk arrives the whole file is checked and posted to the chat.
     #[allow(clippy::too_many_arguments)]
@@ -109,26 +133,7 @@ impl HubCore {
             }
             return;
         }
-        // A transfer that stopped part way (the machine lost its connection, say) is dropped, and the chat is told.
-        let stale: Vec<String> = self
-            .uploads
-            .iter()
-            .filter(|(_, u)| now - u.at > UPLOAD_TTL_MS)
-            .map(|(k, _)| k.clone())
-            .collect();
-        for k in stale {
-            if let Some(u) = self.uploads.remove(&k) {
-                Self::notice(
-                    &u.project,
-                    format!(
-                        "{} did not finish sending {}: it stopped part way, so nothing was posted.",
-                        u.from, u.name
-                    ),
-                    false,
-                    fx,
-                );
-            }
-        }
+        self.expire_uploads(now, fx);
         if !self.uploads.contains_key(transfer_id) {
             if seq != 0 {
                 return;

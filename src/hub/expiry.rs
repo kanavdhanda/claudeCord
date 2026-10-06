@@ -23,6 +23,7 @@ impl HubCore {
         self.grants.retain(|g| g.expires_at > now);
         // A delivery nobody accepted for an hour is forgotten rather than kept forever.
         self.pending.retain(|_, p| now - p.at < PENDING_KEEP_MS);
+        self.expire_uploads(now, &mut fx);
         // Informing-only messages that waited long enough are delivered now.
         let waiting: Vec<String> = self
             .queues

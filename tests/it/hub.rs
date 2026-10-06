@@ -2884,3 +2884,103 @@ fn a_spawn_carries_the_saved_command_and_the_waiting_start_and_only_well_formed_
         })
     ));
 }
+
+fn sizes(core: &HubCore) -> Vec<(&'static str, usize)> {
+    core.table_sizes()
+        .into_iter()
+        .filter(|(_, n)| *n > 0)
+        .collect()
+}
+
+/// Agents come and go all day on a hub that never restarts, so every table the core keeps per agent must be empty again once they are gone:
+/// whatever stays behind grows by one entry per agent, for ever.
+#[test]
+fn nothing_is_kept_for_an_agent_after_it_is_gone() {
+    let mut w = World::new();
+    w.core.node_connected("mac", 1);
+    for i in 0..50 {
+        let (x, y) = (format!("x{i}"), format!("y{i}"));
+        for n in [&x, &y] {
+            w.core.on_node_frame(
+                "mac",
+                NodeFrame::AgentRegister {
+                    agent: spec("p", n),
+                    cwd: "/x".into(),
+                },
+                T0,
+            );
+        }
+        let say = |w: &mut World, who: &str, text: String| {
+            w.core.on_node_frame(
+                "mac",
+                NodeFrame::AgentSay {
+                    agent_id: format!("p/{who}"),
+                    text,
+                    thread: None,
+                },
+                T0,
+            )
+        };
+        w.core.on_node_frame(
+            "mac",
+            NodeFrame::AgentStatus {
+                agent_id: format!("p/{x}"),
+                status: AgentStatus::Thinking,
+                detail: None,
+            },
+            T0,
+        );
+        // A person speaks (queues and deliveries), then the agent talks to its peer (the loop guard counts it).
+        w.say_hi(&w.kd.clone(), &format!("@{y} please look"));
+        say(&mut w, &x, format!("@{y} here is a note"));
+        say(&mut w, &y, format!("@{x} thanks"));
+        for n in [&x, &y] {
+            w.core.on_node_frame(
+                "mac",
+                NodeFrame::AgentGone {
+                    agent_id: format!("p/{n}"),
+                },
+                T0,
+            );
+        }
+    }
+    assert_eq!(
+        sizes(&w.core),
+        vec![],
+        "left behind by 100 agents that are gone"
+    );
+}
+
+/// A file sent half way and never finished must not stay in memory until somebody happens to send another file: the clock drops it, and
+/// the room is told.
+#[test]
+fn a_file_abandoned_part_way_is_dropped_by_the_clock() {
+    let mut w = World::new();
+    w.join("mac", 1, "otter");
+    for i in 0..10 {
+        w.core.on_node_frame(
+            "mac",
+            NodeFrame::FileChunk {
+                transfer_id: format!("t{i}"),
+                agent_id: "p/otter".into(),
+                name: "big.bin".into(),
+                seq: 0,
+                last: false,
+                data: "AAAA".into(),
+                sha256: None,
+                to: None,
+                caption: None,
+                thread: None,
+            },
+            T0,
+        );
+    }
+    let held = |w: &World| sizes(&w.core).into_iter().find(|(t, _)| *t == "uploads");
+    assert_eq!(held(&w), Some(("uploads", 10)));
+    let fx = w.core.tick(T0 + 10 * 60_000);
+    assert_eq!(held(&w), None, "still held after the clock moved on");
+    assert!(
+        fx.iter().any(|e| matches!(e, Effect::Chat(_))),
+        "the room is told that nothing was posted"
+    );
+}
