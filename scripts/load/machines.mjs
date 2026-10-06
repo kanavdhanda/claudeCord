@@ -91,11 +91,11 @@ async function main() {
       let n = 0, prev = null;
       machine(i, (m) => m.timers.push(setInterval(() => {
         // register a new agent and drop the last one: ids are never reused.
-        const id = `${m.me.node}/x${OFFSET}-${n++}`;
-        m.send({ t: 'agent.register', agent: { agentId: id, name: `x${n}`, project: m.me.node, adapter: 'claude' }, cwd: '/w' });
+        const name = `x${OFFSET}n${n++}`, id = `${m.me.node}/${name}`;
+        m.send({ t: 'agent.register', agent: { agentId: id, name, project: m.me.node, adapter: 'claude' }, cwd: '/w' });
         if (prev) m.send({ t: 'agent.gone', agentId: prev });
         // each registered id also speaks once (leaves a streak entry behind), as a real agent does
-        m.send({ t: 'agent.say', agentId: id, text: 'hello @a0 ' + n });
+        m.send({ t: 'agent.say', agentId: id, text: 'hello ' + n });
         prev = id;
       }, 1000)));
     });
