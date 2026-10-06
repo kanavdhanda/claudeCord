@@ -58,6 +58,7 @@ fn kd() -> Human {
 
 fn fast(extra: Vec<PathBuf>, max_agents: usize, labels: Vec<String>) -> Options {
     Options {
+        dev_spawn: true,
         link: LinkOpts {
             ping_every: Duration::from_millis(200),
             connect_timeout: Duration::from_millis(500),
@@ -113,6 +114,18 @@ async fn rig_backend(
     labels: Vec<String>,
     backend: Backend,
 ) -> Rig {
+    rig_tuned(name, script, max_agents, labels, backend, |_| {}).await
+}
+
+/// A rig whose daemon's options a test may change before it runs (the dev switch, the idle exit).
+async fn rig_tuned(
+    name: &str,
+    script: &str,
+    max_agents: usize,
+    labels: Vec<String>,
+    backend: Backend,
+    tweak: impl FnOnce(&mut Options) + Send + 'static,
+) -> Rig {
     let root = tmp(name);
     let bin = fake_claude(&root, script);
     let mut store = Store::open(&root.join("hub.db"), None).unwrap();
@@ -141,6 +154,7 @@ async fn rig_backend(
     tokio::spawn(async move {
         let mut opts = fast(vec![bin], max_agents, labels);
         opts.backend = backend;
+        tweak(&mut opts);
         daemon::run(cfg, d, opts).await.unwrap()
     });
     eventually("daemon socket", async || {
@@ -1834,5 +1848,267 @@ async fn a_moved_agent_is_filed_under_its_new_project_and_still_speaks_with_its_
         }
     }
     assert_eq!(seen.as_deref(), Some("other"));
+    r.hub.shutdown().await;
+}
+
+fn spec_of(project: &str, name: &str) -> claudecord::protocol::AgentSpec {
+    claudecord::protocol::AgentSpec {
+        agent_id: format!("{project}/{name}"),
+        name: name.into(),
+        project: project.into(),
+        adapter: claudecord::protocol::AdapterId::Claude,
+        model: None,
+        role: None,
+    }
+}
+
+/// A rig whose daemon does what a real one does: it starts no agent on its own, only when the hub asks.
+async fn rig_hub_only(name: &str) -> Rig {
+    rig_tuned(name, NORMAL, 8, vec![], Backend::Pty, |o| {
+        o.dev_spawn = false
+    })
+    .await
+}
+
+/// What a waiting `claudecord start` tells the daemon about where the agent goes.
+fn expect(code: &str, cwd: &Path) -> Req {
+    Req::Expect {
+        code: code.into(),
+        cwd: cwd.to_string_lossy().into(),
+        rows: 24,
+        cols: 80,
+        opts: claudecord::device::ipc::ExpectOpts {
+            policy: "autonomous".into(),
+            ..Default::default()
+        },
+    }
+}
+
+async fn pending(r: &Rig, code: &str) -> serde_json::Value {
+    let resp = ipc::call(&r.dir, &Req::Pending { code: code.into() })
+        .await
+        .unwrap();
+    assert!(resp.ok, "{}", resp.msg);
+    resp.data.unwrap()
+}
+
+#[tokio::test]
+async fn nothing_starts_an_agent_on_a_machine_but_the_hub() {
+    let r = rig_hub_only("hubonly").await;
+    // The local socket refuses, whoever asks and however it asks.
+    let refused = ipc::call(
+        &r.dir,
+        &Req::Up {
+            project: "demo".into(),
+            name: Some("otter".into()),
+            adapter: "claude".into(),
+            model: None,
+            role: None,
+            cwd: r.project.to_string_lossy().into(),
+            policy: "autonomous".into(),
+            rows: 24,
+            cols: 80,
+            opts: UpOpts {
+                command: Some(vec!["cat".into()]),
+                ..Default::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        !refused.ok && refused.msg.contains("started by the hub"),
+        "{}",
+        refused.msg
+    );
+    let list = ipc::call(&r.dir, &Req::List).await.unwrap().data.unwrap();
+    assert_eq!(list.as_array().unwrap().len(), 0);
+    // The hub can: with a waiting `claudecord start`, in its folder, and the start is told.
+    assert!(
+        ipc::call(&r.dir, &expect("abc123", &r.project))
+            .await
+            .unwrap()
+            .ok
+    );
+    assert_eq!(pending(&r, "abc123").await["state"], "waiting");
+    eventually("the machine is connected", async || {
+        r.hub
+            .call(|c, _| (c.is_connected("mac"), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    r.hub
+        .call(|c, _| {
+            let mut spec = spec_of("demo", "fox");
+            spec.role = Some("lead".into());
+            let (sent, fx) = c
+                .spawn_with(
+                    &kd(),
+                    "demo",
+                    "mac",
+                    spec,
+                    claudecord::hub::controls::SpawnExtra {
+                        command: None,
+                        pick: Some("abc123".into()),
+                    },
+                )
+                .unwrap();
+            assert!(sent);
+            ((), fx)
+        })
+        .await;
+    eventually("started", async || {
+        pending(&r, "abc123").await["state"] == "started"
+    })
+    .await;
+    assert_eq!(pending(&r, "abc123").await["agent"], "demo/fox");
+    eventually("registered with the hub", async || {
+        r.hub
+            .call(|c, _| {
+                (
+                    c.agent("demo/fox")
+                        .is_some_and(|a| a.role.as_deref() == Some("lead")),
+                    vec![],
+                )
+            })
+            .await
+            .unwrap()
+    })
+    .await;
+    // A code nobody is waiting under starts nothing in a folder it names itself: the hub never chooses a folder.
+    r.hub
+        .call(|c, _| {
+            let (_, fx) = c
+                .spawn_with(
+                    &kd(),
+                    "demo",
+                    "mac",
+                    spec_of("elsewhere", "ghost"),
+                    claudecord::hub::controls::SpawnExtra {
+                        command: None,
+                        pick: Some("nobody".into()),
+                    },
+                )
+                .unwrap();
+            ((), fx)
+        })
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let list = ipc::call(&r.dir, &Req::List).await.unwrap().data.unwrap();
+    assert_eq!(list.as_array().unwrap().len(), 1, "only fox");
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_saved_command_runs_only_on_a_machine_that_allowed_hub_commands() {
+    let r = rig_hub_only("savedcmd").await;
+    eventually("the machine is connected", async || {
+        r.hub
+            .call(|c, _| (c.is_connected("mac"), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    let spawn_with_command = async |code: &str, name: &str| {
+        assert!(
+            ipc::call(&r.dir, &expect(code, &r.project))
+                .await
+                .unwrap()
+                .ok
+        );
+        let (code, name) = (code.to_string(), name.to_string());
+        r.hub
+            .call(move |c, _| {
+                let (_, fx) = c
+                    .spawn_with(
+                        &kd(),
+                        "demo",
+                        "mac",
+                        spec_of("demo", &name),
+                        claudecord::hub::controls::SpawnExtra {
+                            command: Some("echo SAVED-COMMAND-RAN-$((6*7)); exec cat".into()),
+                            pick: Some(code),
+                        },
+                    )
+                    .unwrap();
+                ((), fx)
+            })
+            .await;
+    };
+    // Not allowed (the default): refused, with the way to allow it, and the hub's chat is told too.
+    let mut chat = r.hub.chat();
+    spawn_with_command("c1", "first").await;
+    eventually("refused", async || {
+        pending(&r, "c1").await["state"] == "failed"
+    })
+    .await;
+    let why = pending(&r, "c1").await["error"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(why.contains("custom-commands on"), "{why}");
+    let mut told = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while !told && std::time::Instant::now() < deadline {
+        if let Ok(Ok(claudecord::hub::effects::Chat::Notice { text, .. })) =
+            tokio::time::timeout(Duration::from_millis(200), chat.recv()).await
+        {
+            told = text.contains("custom-commands on");
+        }
+    }
+    assert!(told, "the chat never said why");
+    assert_eq!(
+        ipc::call(&r.dir, &Req::List)
+            .await
+            .unwrap()
+            .data
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    // Allowed on this machine: it runs, in a login shell, as the line says.
+    claudecord::device::config::set_custom_commands(&r.dir, true).unwrap();
+    spawn_with_command("c2", "second").await;
+    eventually("started", async || {
+        pending(&r, "c2").await["state"] == "started"
+    })
+    .await;
+    eventually("the line ran", async || {
+        std::fs::read_dir(r.dir.join("logs"))
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|d| {
+                std::fs::read_to_string(d.path().join("terminal.log"))
+                    .is_ok_and(|t| t.contains("SAVED-COMMAND-RAN-42"))
+            })
+    })
+    .await;
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_start_that_is_waiting_for_the_hub_keeps_the_daemon_from_leaving() {
+    let r = rig_tuned("waitkeeps", NORMAL, 8, vec![], Backend::Pty, |o| {
+        o.dev_spawn = false;
+        o.idle_exit = Some(Duration::from_millis(600));
+    })
+    .await;
+    assert!(
+        ipc::call(&r.dir, &expect("held", &r.project))
+            .await
+            .unwrap()
+            .ok
+    );
+    // With no agent and a start waiting, well past the idle limit, it is still there.
+    tokio::time::sleep(Duration::from_millis(2000)).await;
+    assert!(
+        ipc::call(&r.dir, &Req::Ping).await.is_ok(),
+        "the daemon left while a start was waiting"
+    );
     r.hub.shutdown().await;
 }

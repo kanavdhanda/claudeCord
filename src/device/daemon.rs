@@ -101,6 +101,8 @@ pub const RULES: &str = "Team chat is the shell command claudecord: say <text>, 
 #[derive(Clone)]
 pub struct Options {
     pub link: LinkOpts,
+    /// Development and tests only (`CLAUDECORD_DEV_SPAWN=1`): lets the local socket start agents, which otherwise only the hub may ask for.
+    pub dev_spawn: bool,
     /// How often terminals are looked at.
     pub tick: Duration,
     /// How long after pasting a message to wait for a sign the agent started on it, before saying it did.
@@ -126,6 +128,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             link: LinkOpts::default(),
+            dev_spawn: false,
             tick: Duration::from_millis(250),
             accept_after: Duration::from_secs(3),
             quiet: (
@@ -203,6 +206,29 @@ struct Launch {
     cols: u16,
 }
 
+/// What became of a `claudecord start` that is waiting for the hub to start an agent.
+enum PendingState {
+    Waiting,
+    Started {
+        agent: String,
+        worktree: Option<String>,
+    },
+    Failed(String),
+}
+
+/// A `claudecord start` waiting on the dashboard: where it was run, and the choices that belong to this machine (see `ExpectOpts`).
+struct PendingStart {
+    cwd: String,
+    rows: u16,
+    cols: u16,
+    opts: super::ipc::ExpectOpts,
+    at: i64,
+    state: PendingState,
+}
+
+/// How long a waiting `claudecord start` is remembered (the page's own code expires after the same time).
+const PENDING_TTL_MS: i64 = 60 * 60_000;
+
 /// Restarts (when asked for with `--restart N`) are counted over this long. Past the count the agent is left stopped, because
 /// an agent that dies at once every time will not be fixed by trying faster.
 const RESTART_WINDOW_MS: i64 = 10 * 60_000;
@@ -252,6 +278,8 @@ struct State {
     folders: HashMap<String, Vec<PathBuf>>,
     /// For each folder, the projects it was started for, the most recent first.
     last: BTreeMap<String, Vec<String>>,
+    /// The `claudecord start`s waiting for the hub to start an agent for them, by the code of the page they opened.
+    pending: HashMap<String, PendingStart>,
     link: Link,
     /// Since when no agent has been running, so the daemon can go away by itself (see `Options::idle_exit`).
     idle_since: Option<i64>,
@@ -305,6 +333,7 @@ pub async fn run(cfg: Config, dir: PathBuf, opts: Options) -> std::io::Result<()
     let mut st = State {
         folders,
         last,
+        pending: HashMap::new(),
         idle_since: None,
         tidied: 0,
         dir,
@@ -602,9 +631,19 @@ impl State {
                 &data,
                 sha256,
             ),
-            HubFrame::Spawn { agent, .. } => {
-                // Only in a folder this machine already knows for the project (the hub never chooses a folder). A folder with no agent in it
-                // is used first; if every known folder is busy, the first one is used with its own git worktree.
+            HubFrame::Spawn {
+                agent,
+                command,
+                pick,
+            } => {
+                // The agent goes in the folder of the `claudecord start` that is waiting for it (the hub sent its code). Otherwise only in a
+                // folder this machine already knows for the project (the hub never chooses a folder): one with no agent in it first, and if
+                // every known folder is busy, the first one with its own git worktree.
+                let waiting = pick
+                    .as_deref()
+                    .and_then(|c| self.pending.get(c))
+                    .filter(|p| matches!(p.state, PendingState::Waiting))
+                    .map(|p| (p.cwd.clone(), p.rows, p.cols, p.opts.clone()));
                 let folders = self
                     .folders
                     .get(&agent.project)
@@ -614,15 +653,74 @@ impl State {
                     .iter()
                     .find(|f| !self.agents.values().any(|a| &a.origin == *f))
                     .cloned();
-                let pick = free
+                let known = free
                     .map(|f| (f, false))
                     .or_else(|| folders.first().cloned().map(|f| (f, true)));
-                let result = match pick {
-                    None => Err(format!(
-                        "this machine has no folder for project {} yet. Run `claudecord start` in one once",
-                        agent.project
-                    )),
-                    Some((cwd, worktree)) => {
+                // A saved startup command is a line of shell sent by the hub: it runs only on a machine whose owner turned that on.
+                let line = match command.as_deref() {
+                    None => Ok(None),
+                    Some(_) if !super::config::custom_commands_allowed(&self.dir) => Err(
+                        "this machine does not run startup commands sent by the hub. Allow them with `claudecord settings custom-commands on`"
+                            .to_string(),
+                    ),
+                    Some(c) => super::config::shell_argv(c).map(Some),
+                };
+                let result = match (line, waiting, known) {
+                    (Err(why), ..) => Err(why),
+                    (Ok(command), Some((cwd, rows, cols, ex)), _) => {
+                        let folder = cwd.clone();
+                        let r = self
+                            .up_agent(
+                                agent.project.clone(),
+                                Some(agent.name.clone()),
+                                agent.adapter.as_str().into(),
+                                ex.model.clone().or(agent.model.clone()),
+                                agent.role.clone(),
+                                cwd,
+                                if ex.policy.is_empty() { "ask".into() } else { ex.policy },
+                                rows,
+                                cols,
+                                UpOpts {
+                                    command,
+                                    worktree: ex.worktree,
+                                    pickup: ex.pickup,
+                                    restart: ex.restart,
+                                },
+                            )
+                            .await;
+                        if r.ok {
+                            if let Some(p) = pick.as_deref().and_then(|c| self.pending.get_mut(c)) {
+                                p.state = PendingState::Started {
+                                    agent: r.msg.clone(),
+                                    worktree: r.data.as_ref().and_then(|d| d["worktree"].as_str().map(String::from)),
+                                };
+                            }
+                            self.remember_agent(
+                                &agent.name,
+                                (
+                                    agent.project.clone(),
+                                    agent.adapter.as_str().into(),
+                                    agent.model.clone(),
+                                    agent.role.clone(),
+                                    folder,
+                                ),
+                            );
+                            Ok(())
+                        } else {
+                            Err(r.msg)
+                        }
+                    }
+                    (Ok(_), None, _) if pick.is_some() => Err(
+                        "the `claudecord start` this was for is not waiting here any more. Run it again".to_string(),
+                    ),
+                    (Ok(command), None, None) => {
+                        let _ = command;
+                        Err(format!(
+                            "this machine has no folder for project {} yet. Run `claudecord start` in one",
+                            agent.project
+                        ))
+                    }
+                    (Ok(command), None, Some((cwd, worktree))) => {
                         let r = self
                             .up_agent(
                                 agent.project.clone(),
@@ -635,6 +733,7 @@ impl State {
                                 30,
                                 100,
                                 UpOpts {
+                                    command,
                                     worktree,
                                     ..UpOpts::default()
                                 },
@@ -649,6 +748,9 @@ impl State {
                         "{}: spawn from the hub failed: {reason}",
                         agent.agent_id
                     );
+                    if let Some(p) = pick.as_deref().and_then(|c| self.pending.get_mut(c)) {
+                        p.state = PendingState::Failed(reason.clone());
+                    }
                     self.link
                         .send(NodeFrame::SpawnFailed {
                             project: agent.project.clone(),
@@ -976,7 +1078,13 @@ impl State {
         // With no agent running, the daemon (which holds the connection to the hub) goes away by itself after a short while, unless the person
         // chose to keep it running (`claudecord settings keep-running on`).
         if let Some(limit) = self.opts.idle_exit {
-            if self.agents.is_empty() && !super::config::keep_running(&self.dir) {
+            // A `claudecord start` still waiting for the hub counts as something to wait for.
+            self.pending.retain(|_, p| now - p.at < PENDING_TTL_MS);
+            let waiting = self
+                .pending
+                .values()
+                .any(|p| matches!(p.state, PendingState::Waiting));
+            if self.agents.is_empty() && !waiting && !super::config::keep_running(&self.dir) {
                 let since = *self.idle_since.get_or_insert(now);
                 if now - since > limit.as_millis() as i64 {
                     crate::info!("daemon", "no agent is running, so this machine disconnects");
@@ -1266,6 +1374,48 @@ impl State {
                     data: Some(serde_json::Value::Array(list)),
                 }
             }
+            Req::Expect {
+                code,
+                cwd,
+                rows,
+                cols,
+                opts,
+            } => {
+                self.pending.insert(
+                    code,
+                    PendingStart {
+                        cwd,
+                        rows,
+                        cols,
+                        opts,
+                        at: crate::now_ms(),
+                        state: PendingState::Waiting,
+                    },
+                );
+                Resp::ok("waiting for the hub")
+            }
+            Req::Pending { code } => match self.pending.get(&code) {
+                None => Resp::err("nothing is waiting under that code"),
+                Some(p) => {
+                    let data = match &p.state {
+                        PendingState::Waiting => serde_json::json!({ "state": "waiting" }),
+                        PendingState::Started { agent, worktree } => {
+                            serde_json::json!({ "state": "started", "agent": agent, "worktree": worktree })
+                        }
+                        PendingState::Failed(why) => {
+                            serde_json::json!({ "state": "failed", "error": why })
+                        }
+                    };
+                    Resp {
+                        ok: true,
+                        msg: String::new(),
+                        data: Some(data),
+                    }
+                }
+            },
+            Req::Up { .. } if !self.opts.dev_spawn => Resp::err(
+                "agents are started by the hub, never from this machine: run `claudecord start` and press Start on the dashboard page it opens",
+            ),
             Req::Up {
                 project,
                 name,

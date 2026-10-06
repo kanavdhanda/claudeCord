@@ -77,6 +77,8 @@ pub(crate) struct Pick {
     folder: String,
     /// The project the folder already belongs to on the machine, offered first on the page.
     hint: Option<String>,
+    /// What the command line gave for the agent, for the page to start with (the person still chooses).
+    prefill: (Option<String>, Option<String>, Option<String>),
     chosen: Option<String>,
     /// What else the page asked for with the project: the agent's name, program and role.
     agent: Option<String>,
@@ -329,6 +331,10 @@ fn machine_auth(
 struct PickStart {
     folder: String,
     project: Option<String>,
+    /// What the command line already says about the agent, for the page to start with.
+    name: Option<String>,
+    adapter: Option<String>,
+    role: Option<String>,
 }
 
 /// `POST /api/device/pick`: `claudecord start` in a folder that belongs to no project yet asks for a short code. The person opens
@@ -352,6 +358,18 @@ async fn pick_start(
         .take(100)
         .collect();
     let hint = b.project.filter(|p| crate::protocol::is_slug(p));
+    let prefill = (
+        b.name
+            .filter(|n| crate::protocol::agent_name_problem(n).is_none()),
+        b.adapter
+            .filter(|a| matches!(a.as_str(), "claude" | "codex" | "agy")),
+        b.role.map(|r| {
+            r.chars()
+                .filter(|c| !c.is_control())
+                .take(100)
+                .collect::<String>()
+        }),
+    );
     let mut picks = gw.picks.locked();
     picks.retain(|_, p| now - p.at < PICK_TTL_MS);
     if picks.len() >= 500 {
@@ -368,6 +386,7 @@ async fn pick_start(
             node,
             folder,
             hint,
+            prefill,
             chosen: None,
             agent: None,
             adapter: None,
@@ -377,7 +396,8 @@ async fn pick_start(
             at: now,
         },
     );
-    json_reply(StatusCode::OK, json!({ "code": code }))
+    // `spawns`: choosing on the page makes this hub ask the machine to start the agent, so a `claudecord start` can wait for it.
+    json_reply(StatusCode::OK, json!({ "code": code, "spawns": true }))
 }
 
 /// `GET /api/device/pick/{code}`: the machine that asked collects the answer: null until the person has chosen.
@@ -440,7 +460,8 @@ async fn pick_result(
     };
     let mut picks = gw.picks.locked();
     match picks.get_mut(&code) {
-        Some(p) if p.tenant == tenant && p.node == node && p.collected => {
+        // Once the page has chosen (the hub has then asked this machine, or an older machine has collected the choice itself).
+        Some(p) if p.tenant == tenant && p.node == node && p.chosen.is_some() => {
             let text: String = b
                 .message
                 .unwrap_or_default()
@@ -475,6 +496,7 @@ async fn pick_view(
                 "folder": p.folder,
                 "node": p.node,
                 "project": p.hint,
+                "prefill": { "name": p.prefill.0, "adapter": p.prefill.1, "role": p.prefill.2 },
                 "collected": p.collected,
                 "result": p.result.as_ref().map(|(ok, message)| json!({ "ok": ok, "message": message })),
             }),

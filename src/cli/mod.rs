@@ -81,11 +81,6 @@ pub enum Cmd {
     },
     /// List the agents on this machine.
     Ls,
-    /// Saved startup commands: list them, `add NAME "line"`, or `rm NAME`.
-    Commands {
-        #[command(subcommand)]
-        action: Option<machine::CommandsCmd>,
-    },
     /// Open an agent's terminal. With no name, pick from the agents running here.
     Attach { agent: Option<String> },
     /// Stop one agent, or with no name stop everything here: every agent, and the connection to the hub.
@@ -170,7 +165,6 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         Cmd::Init { claude } => machine::init(claude).await,
         Cmd::Settings { name, value } => machine::settings(name, value).await,
         Cmd::Ls => machine::ls().await,
-        Cmd::Commands { action } => machine::commands(action),
         Cmd::Attach { agent } => machine::attach_or_pick(agent).await,
         Cmd::Stop { agent, yes } => machine::stop(agent, yes).await,
         Cmd::Restart { agent } => machine::restart(agent).await,

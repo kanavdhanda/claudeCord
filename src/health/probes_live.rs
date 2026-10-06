@@ -416,6 +416,7 @@ async fn rig(
         node_name: "mac".into(),
     };
     let opts = Options {
+        dev_spawn: true,
         link: link_opts(),
         tick: Duration::from_millis(40),
         accept_after: Duration::from_millis(400),

@@ -57,15 +57,9 @@ pub struct StartArgs {
     /// Start the agent again up to this many times (in ten minutes) if its program ends. Otherwise never.
     #[arg(long, default_value_t = 0)]
     pub restart: u32,
-    /// Choose the project on the dashboard again, even if this folder already belongs to one.
-    #[arg(long)]
-    pub pick: bool,
     /// Do not write the team-chat guide into this folder's AGENTS.md.
     #[arg(long)]
     pub no_guide: bool,
-    /// Start with a saved startup command by name (see `claudecord commands`), instead of the agent program.
-    #[arg(long)]
-    pub saved: Option<String>,
     /// Run this command instead of the agent program (anything that runs in a terminal). Put it after `--`.
     #[arg(last = true)]
     pub command: Vec<String>,
@@ -155,6 +149,7 @@ pub async fn run_daemon() -> Result<(), String> {
     crate::log::init(None);
     // Gone by itself 20 seconds after the last agent ends, unless the person turned on keep-running.
     let opts = Options {
+        dev_spawn: dev_spawn(),
         idle_exit: Some(Duration::from_secs(20)),
         ..Options::default()
     };
@@ -212,165 +207,12 @@ fn update_command(exe: &str) -> &'static str {
     }
 }
 
-/// The argv and agent program of a saved command, ready to start. A command kept in the folder must be agreed to once (a repository that was
-/// downloaded could carry one): it is shown, and asked about on the terminal; where nobody can be asked it is refused.
-fn resolve_saved(name: &str, folder: &std::path::Path) -> Result<(Vec<String>, String), String> {
-    use crate::device::config::{
-        CommandSource, approve, command_fingerprint, commands_for, is_approved, shell_argv,
-    };
-    let dir = home_dir();
-    let all = commands_for(&dir, folder);
-    let Some((cmd, source)) = all.get(name).cloned() else {
-        let known: Vec<&str> = all.keys().map(String::as_str).collect();
-        return Err(format!(
-            "no saved command called {name} here (saved: {}). `{} commands` lists them",
-            if known.is_empty() {
-                "none".into()
-            } else {
-                known.join(", ")
-            },
-            me()
-        ));
-    };
-    if source == CommandSource::Folder {
-        let fp = command_fingerprint(folder, name, &cmd);
-        if !is_approved(&dir, &fp) {
-            use std::io::{BufRead, IsTerminal, Write};
-            if !std::io::stdin().is_terminal() {
-                return Err(format!(
-                    "the command {name} comes from this folder (.claudecord/commands.json) and has not been agreed to yet. Run `{} start --saved {name}` in a terminal to look at it and agree",
-                    me()
-                ));
-            }
-            println!(
-                "The command {name} is kept in this folder and will run on your machine:\n\n  {}\n",
-                cmd.command
-            );
-            print!("Run it? It is remembered until the command changes. [y/N] ");
-            let _ = std::io::stdout().flush();
-            let mut line = String::new();
-            let yes = std::io::stdin().lock().read_line(&mut line).is_ok()
-                && line.trim().eq_ignore_ascii_case("y");
-            if !yes {
-                return Err("not run".into());
-            }
-            approve(&dir, &fp);
-        }
-    }
-    Ok((shell_argv(&cmd.command)?, cmd.program))
-}
-
-/// `claudecord commands`: lists, adds or removes saved startup commands.
-pub fn commands(action: Option<CommandsCmd>) -> Result<(), String> {
-    use crate::device::config::{
-        CommandSource, SavedCommand, commands_file, commands_for, remove_command, save_command,
-    };
-    let dir = home_dir();
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    match action {
-        None => {
-            let all = commands_for(&dir, &cwd);
-            if all.is_empty() {
-                println!(
-                    "No saved commands. Add one:  {} commands add NAME \"source venv/bin/activate && claude\"",
-                    me()
-                );
-            }
-            for (name, (c, src)) in all {
-                let at = if src == CommandSource::Folder {
-                    "this folder"
-                } else {
-                    "this machine"
-                };
-                println!("{name:20} {:7} {at:13} {}", c.program, c.command);
-            }
-            Ok(())
-        }
-        Some(CommandsCmd::Add {
-            name,
-            command,
-            program,
-            here,
-        }) => {
-            let file = commands_file(&dir, here.then_some(cwd.as_path()));
-            save_command(&file, &name, SavedCommand { command, program })?;
-            println!("saved {name} in {}", file.display());
-            println!(
-                "Use it:  {} start --saved {name}   (or choose it on the dashboard)",
-                me()
-            );
-            Ok(())
-        }
-        Some(CommandsCmd::Rm { name, here }) => {
-            let file = commands_file(&dir, here.then_some(cwd.as_path()));
-            if remove_command(&file, &name)? {
-                println!("removed {name}");
-                Ok(())
-            } else {
-                Err(format!(
-                    "no saved command called {name} in {}",
-                    file.display()
-                ))
-            }
-        }
-    }
-}
-
-/// What `claudecord commands` can do besides list.
-#[derive(clap::Subcommand)]
-pub enum CommandsCmd {
-    /// Save a startup command: any shell line, such as setup steps followed by the agent's launch.
-    Add {
-        name: String,
-        /// The line to run, in quotes.
-        command: String,
-        /// Which agent program it starts (so it is read correctly): claude, codex or agy.
-        #[arg(long, default_value = "claude")]
-        program: String,
-        /// Keep it in this folder (.claudecord/commands.json) instead of for the whole machine.
-        #[arg(long)]
-        here: bool,
-    },
-    /// Remove a saved command.
-    Rm {
-        name: String,
-        /// It is the one kept in this folder.
-        #[arg(long)]
-        here: bool,
-    },
-}
-
-/// Whether `program` is found in a folder of the PATH.
-fn program_on_path(program: &str) -> bool {
-    let exts: &[&str] = if cfg!(windows) {
-        &["", ".exe", ".cmd", ".bat"]
-    } else {
-        &[""]
-    };
-    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).any(|dir| {
-        exts.iter()
-            .any(|e| dir.join(format!("{program}{e}")).is_file())
-    })
-}
-
 /// What the machine must have whichever agent is started (tmux), checked before the person is sent to the dashboard.
 fn require_machine() -> Result<(), String> {
     match doctor::tmux_missing() {
         Some(m) => Err(format!("cannot start an agent here yet: {m}")),
         None => Ok(()),
     }
-}
-
-/// The program of the chosen agent type, checked once the page has chosen it (unless a command of the person's own is given).
-fn require_program(adapter: &str, own_command: bool) -> Result<(), String> {
-    let program = doctor::program_of(adapter);
-    if own_command || program_on_path(program) {
-        return Ok(());
-    }
-    Err(format!(
-        "cannot start an agent here yet: {}",
-        doctor::program_missing(program)
-    ))
 }
 
 /// Makes sure a daemon is listening, starting one in the background if not.
@@ -420,11 +262,12 @@ fn expect_ok(r: Resp) -> Result<Resp, String> {
     if r.ok { Ok(r) } else { Err(r.msg) }
 }
 
-/// `claudecord start`: starts the daemon if it is not running, asks which project this folder belongs to (the first time), starts an agent in the
-/// current folder, writes the team guide into AGENTS.md, opens the dashboard if the project has no Discord channel yet, and opens the agent's terminal
-/// unless asked not to. Nothing else: no handoff, no restarts, no shared folders.
+/// `claudecord start`: asks for an agent in this folder, and waits. Agents are started by the hub alone, never from here: this opens a page on the
+/// dashboard (where the project, the agent's name, its program or saved command, and its role are chosen), tells the daemon here where the agent
+/// will go, and waits until the hub has had it started. Then it writes the team guide into AGENTS.md and opens the agent's terminal unless asked
+/// not to. The project, name, program and role given on the command line are only what the page starts with.
 pub async fn start(a: StartArgs) -> Result<(), String> {
-    // Before anything is asked of the person (signing in, choosing a project on the dashboard), not after.
+    // Before anything is asked of the person (signing in, choosing on the dashboard), not after.
     if !["claude", "agy", "codex"].contains(&a.adapter.as_str()) {
         return Err(format!(
             "unknown agent type {}: claude, agy or codex",
@@ -437,6 +280,9 @@ pub async fn start(a: StartArgs) -> Result<(), String> {
             a.policy
         ));
     }
+    if !a.command.is_empty() {
+        return start_local(a).await;
+    }
     // Everything the machine must have comes first, so nobody fills in the dashboard only to learn that tmux is missing.
     require_machine()?;
     ensure_login().await?;
@@ -445,64 +291,37 @@ pub async fn start(a: StartArgs) -> Result<(), String> {
     }
     let dir = home_dir();
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    // The project is chosen on the dashboard, never here, and before the daemon starts (a person may take longer than the daemon's idle wait).
-    let mut picked = false;
-    let mut chosen = Picked::default();
-    let project = match a.project.clone() {
-        Some(p) => p,
-        None => {
-            let known = crate::device::config::project_of_folder(&dir, &cwd);
-            match known.clone().filter(|_| !a.pick) {
-                Some(p) => p,
-                None => {
-                    picked = true;
-                    // The folder's own project (if it has one) is what the page offers first; the person can change it there.
-                    chosen = pick_on_dashboard(&cwd, known.as_deref()).await?;
-                    chosen.project.clone()
-                }
-            }
-        }
-    };
-    // Everything from here can fail on this machine (the program is not installed, the daemon does not come up, the name is taken). The page
-    // that asked for the agent is told which, so the person sees it there and not only in this terminal.
-    let started = async {
-        // No name given: the daemon makes a friendly one (shown below and in the agent's window).
-        wait_until_connected(&project, picked).await?;
-        // What was typed on the command line wins over what the page sent.
-        let name = a.name.clone().or(chosen.agent.clone());
-        let adapter = chosen
-            .adapter
+    // The daemon is what the hub talks to: it is up (and connected) before the page is shown, and it stays up while this waits.
+    ensure_daemon().await?;
+    let prefill = Prefill {
+        project: a
+            .project
             .clone()
-            .filter(|_| a.adapter == "claude")
-            .unwrap_or(a.adapter.clone());
-        // A saved startup command (asked for here or chosen on the page) replaces the agent program; its own program says how to read it.
-        let (adapter, command) = match a.saved.clone().or(chosen.command.clone()) {
-            Some(n) => {
-                let (argv, program) = resolve_saved(&n, &cwd)?;
-                (program, Some(argv))
-            }
-            None => (
-                adapter,
-                (!a.command.is_empty()).then_some(a.command.clone()),
-            ),
-        };
-        require_program(&adapter, command.is_some())?;
-        ensure_daemon().await?;
-        let (cols, rows) = terminal_size();
-        let r = ipc::call(
+            .or_else(|| crate::device::config::project_of_folder(&dir, &cwd)),
+        name: a.name.clone(),
+        adapter: (a.adapter != "claude").then(|| a.adapter.clone()),
+        role: a.role.clone(),
+    };
+    let (code, url) = match request_pick(&cwd, &prefill).await {
+        Ok(p) => p,
+        Err(PickError::NoPage) if dev_spawn() => return start_local(a).await,
+        Err(PickError::NoPage) => {
+            return Err("this hub has no dashboard to start agents from. Agents are started by the hub: from Discord with /spawn, or on a hub that serves the dashboard".into());
+        }
+        Err(PickError::Other(e)) => return Err(e),
+    };
+    let (cols, rows) = terminal_size();
+    expect_ok(
+        ipc::call(
             &dir,
-            &Req::Up {
-                project: project.clone(),
-                name,
-                adapter,
-                model: a.model.clone(),
-                role: a.role.clone().or(chosen.role.clone()),
+            &Req::Expect {
+                code: code.clone(),
                 cwd: cwd.to_string_lossy().into(),
-                policy: a.policy.clone(),
                 rows,
                 cols,
-                opts: UpOpts {
-                    command,
+                opts: crate::device::ipc::ExpectOpts {
+                    policy: a.policy.clone(),
+                    model: a.model.clone(),
                     worktree: a.worktree,
                     pickup: a.pickup,
                     restart: a.restart,
@@ -510,20 +329,21 @@ pub async fn start(a: StartArgs) -> Result<(), String> {
             },
         )
         .await
-        .map_err(|e| e.to_string())?;
-        expect_ok(r)
+        .map_err(|e| e.to_string())?,
+    )?;
+    println!("Choose the project, the agent's name and its program on the dashboard:\n  {url}");
+    println!(
+        "Waiting for you to press Start there... (Ctrl-C to cancel; nothing has been started)"
+    );
+    enroll::open_browser(&url);
+    let outcome = wait_for_spawn(&dir, &code).await;
+    match &outcome {
+        Ok((agent, _)) => report_pick(&code, true, agent).await,
+        Err(e) => report_pick(&code, false, e).await,
     }
-    .await;
-    if !chosen.code.is_empty() {
-        match &started {
-            Ok(r) => report_pick(&chosen.code, true, &r.msg).await,
-            Err(e) => report_pick(&chosen.code, false, e).await,
-        }
-    }
-    let reply = started?;
-    let agent = reply.msg.clone();
+    let (agent, worktree) = outcome?;
     println!("started {agent}");
-    if let Some(tree) = reply.data.as_ref().and_then(|d| d["worktree"].as_str()) {
+    if let Some(tree) = worktree {
         println!(
             "another agent already works in this folder, so {agent} has its own git worktree: {tree}"
         );
@@ -547,100 +367,161 @@ pub async fn start(a: StartArgs) -> Result<(), String> {
     attach(&agent).await
 }
 
-/// What the dashboard's start page sent back: the project, and the first agent's name and program if the person set them.
-#[derive(Default)]
-struct Picked {
-    project: String,
-    agent: Option<String>,
-    adapter: Option<String>,
-    role: Option<String>,
-    /// A saved startup command the page chose (its name; the command itself never left this machine).
-    command: Option<String>,
-    /// The page's code, so what happens next can be reported back to it.
-    code: String,
+/// Whether this machine lets its daemon start agents without the hub: development and tests only (`CLAUDECORD_DEV_SPAWN=1`).
+fn dev_spawn() -> bool {
+    std::env::var("CLAUDECORD_DEV_SPAWN")
+        .is_ok_and(|v| matches!(v.as_str(), "1" | "true" | "on" | "yes"))
 }
 
-/// Has the person choose, on the dashboard, which project this folder belongs to: the hub gives a short code, the dashboard's pick page shows
-/// it, and this waits for the answer. If the hub is an older one with no such page, the folder's name is used.
-async fn pick_on_dashboard(cwd: &std::path::Path, current: Option<&str>) -> Result<Picked, String> {
-    let folder = cwd
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "project".into());
-    let cfg = Config::load(&home_dir()).ok_or("not logged in")?;
-    let base = enroll::http_base(&cfg.hub_url);
-    let http = reqwest::Client::new();
-    // The saved startup commands usable in this folder: only their names and programs go to the page, never the commands.
-    let offered: Vec<serde_json::Value> = crate::device::config::commands_for(&home_dir(), cwd)
-        .into_iter()
-        .map(|(name, (c, src))| {
-            serde_json::json!({
-                "name": name,
-                "program": c.program,
-                "source": if src == crate::device::config::CommandSource::Folder { "folder" } else { "machine" },
-            })
-        })
-        .collect();
-    let asked = http
-        .post(format!("{base}/api/device/pick"))
-        .bearer_auth(&cfg.token)
-        .json(&serde_json::json!({ "folder": folder, "project": current, "commands": offered }))
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await;
-    let code = match asked {
-        Ok(r) if r.status().is_success() => r
-            .json::<serde_json::Value>()
-            .await
-            .ok()
-            .and_then(|v| v["code"].as_str().map(String::from)),
-        _ => None,
-    };
-    let Some(code) = code else {
-        println!(
-            "This hub cannot ask you on the dashboard, so the project is named after the folder: {folder}"
-        );
-        return Ok(Picked {
-            project: folder,
-            ..Default::default()
-        });
-    };
-    let url = format!("{base}/pick?code={code}");
-    println!("Choose which project \"{folder}\" belongs to, on the dashboard:\n  {url}");
-    println!("Waiting for your choice... (Ctrl-C to cancel; nothing has been started)");
-    enroll::open_browser(&url);
-    for _ in 0..3600 {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        let Ok(r) = http
-            .get(format!("{base}/api/device/pick/{code}"))
-            .bearer_auth(&cfg.token)
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-        else {
-            continue;
-        };
-        if r.status() == reqwest::StatusCode::NOT_FOUND {
-            return Err(format!("that choice expired: run {} start again", me()));
+/// Waits for the daemon to say the hub had the agent started (its id and worktree), or why it could not. An hour at most, like the page's code.
+async fn wait_for_spawn(
+    dir: &std::path::Path,
+    code: &str,
+) -> Result<(String, Option<String>), String> {
+    for _ in 0..7200 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let r = ipc::call(
+            dir,
+            &Req::Pending {
+                code: code.to_string(),
+            },
+        )
+        .await
+        .map_err(|_| "the daemon on this machine stopped while waiting".to_string())?;
+        if !r.ok {
+            return Err(r.msg);
         }
-        if let Ok(v) = r.json::<serde_json::Value>().await
-            && let Some(p) = v["chosen"].as_str()
-        {
-            println!("project: {p}");
-            return Ok(Picked {
-                project: p.to_string(),
-                agent: v["agent"].as_str().map(String::from),
-                adapter: v["adapter"].as_str().map(String::from),
-                role: v["role"].as_str().map(String::from),
-                command: v["command"].as_str().map(String::from),
-                code: code.clone(),
-            });
+        let d = r.data.unwrap_or_default();
+        match d["state"].as_str() {
+            Some("started") => {
+                return Ok((
+                    d["agent"].as_str().unwrap_or_default().to_string(),
+                    d["worktree"].as_str().map(String::from),
+                ));
+            }
+            Some("failed") => {
+                return Err(d["error"]
+                    .as_str()
+                    .unwrap_or("it did not start")
+                    .to_string());
+            }
+            _ => {}
         }
     }
     Err(format!(
         "no choice was made in an hour: run {} start again",
         me()
     ))
+}
+
+/// Development and tests (`CLAUDECORD_DEV_SPAWN=1` on both this and the daemon): starts a program of your own in this folder through the local
+/// socket, with no dashboard and no hub involved in the starting, as the first versions did. Refused otherwise.
+async fn start_local(a: StartArgs) -> Result<(), String> {
+    if !dev_spawn() {
+        return Err("a command of your own after `--` is for development only: agents are started by the hub, so use `claudecord start` and the dashboard (or set CLAUDECORD_DEV_SPAWN=1, here and for the daemon)".into());
+    }
+    ensure_login().await?;
+    let dir = home_dir();
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let project = a
+        .project
+        .clone()
+        .or_else(|| crate::device::config::project_of_folder(&dir, &cwd))
+        .or_else(|| cwd.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "project".into());
+    ensure_daemon().await?;
+    let (cols, rows) = terminal_size();
+    let r = ipc::call(
+        &dir,
+        &Req::Up {
+            project,
+            name: a.name.clone(),
+            adapter: a.adapter.clone(),
+            model: a.model.clone(),
+            role: a.role.clone(),
+            cwd: cwd.to_string_lossy().into(),
+            policy: a.policy.clone(),
+            rows,
+            cols,
+            opts: UpOpts {
+                command: Some(a.command.clone()),
+                worktree: a.worktree,
+                pickup: a.pickup,
+                restart: a.restart,
+            },
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let agent = expect_ok(r)?.msg;
+    println!("started {agent}");
+    if a.detach {
+        println!("attach later with: {} attach {agent}", me());
+        return Ok(());
+    }
+    attach(&agent).await
+}
+
+/// What the dashboard page starts with, from the command line: only a starting point, the person chooses there.
+struct Prefill {
+    project: Option<String>,
+    name: Option<String>,
+    adapter: Option<String>,
+    role: Option<String>,
+}
+
+/// Why a page could not be asked for.
+enum PickError {
+    /// This hub has no such page (a single-team hub), or is too old to start agents when asked.
+    NoPage,
+    Other(String),
+}
+
+/// Asks the hub for a page to start an agent from: it gives a short code, the dashboard's page shows this folder and machine, and what the person
+/// chooses there makes the hub ask this machine to start the agent. Returns the code and the page's address.
+async fn request_pick(
+    cwd: &std::path::Path,
+    prefill: &Prefill,
+) -> Result<(String, String), PickError> {
+    let folder = cwd
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "project".into());
+    let cfg = Config::load(&home_dir()).ok_or(PickError::Other("not logged in".into()))?;
+    let base = enroll::http_base(&cfg.hub_url);
+    let asked = reqwest::Client::new()
+        .post(format!("{base}/api/device/pick"))
+        .bearer_auth(&cfg.token)
+        .json(&serde_json::json!({
+            "folder": folder,
+            "project": prefill.project,
+            "name": prefill.name,
+            "adapter": prefill.adapter,
+            "role": prefill.role,
+        }))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .map_err(|e| PickError::Other(format!("cannot reach {base}: {}", enroll::why(&e))))?;
+    if matches!(asked.status().as_u16(), 404 | 405) {
+        return Err(PickError::NoPage);
+    }
+    if !asked.status().is_success() {
+        return Err(PickError::Other(format!(
+            "{base} refused the request ({})",
+            asked.status()
+        )));
+    }
+    let v: serde_json::Value = asked
+        .json()
+        .await
+        .map_err(|e| PickError::Other(e.to_string()))?;
+    // A hub that has the page but does not start agents when asked would leave this waiting for good.
+    if v["spawns"] != true {
+        return Err(PickError::NoPage);
+    }
+    let code = v["code"].as_str().ok_or(PickError::NoPage)?.to_string();
+    Ok((code.clone(), format!("{base}/pick?code={code}")))
 }
 
 /// Tells the dashboard page what became of the agent it asked for: started, or why not. A hub too old to take it is not a problem.
@@ -658,73 +539,6 @@ async fn report_pick(code: &str, ok: bool, what: &str) {
         .timeout(Duration::from_secs(5))
         .send()
         .await;
-}
-
-/// Waits until the project is connected to a Discord channel where its bot can really work, before anything is started: no agent is made for a
-/// project whose messages would go nowhere. If the bot was later removed from the server or lost a permission, it says what, and carries on by
-/// itself once that is fixed. A hub too old to be asked, or one that cannot be reached, never blocks a start. Without a person at the keyboard
-/// it only says what is missing.
-async fn wait_until_connected(project: &str, just_chose: bool) -> Result<(), String> {
-    use std::io::IsTerminal;
-    let Some(cfg) = Config::load(&home_dir()) else {
-        return Ok(());
-    };
-    let base = enroll::http_base(&cfg.hub_url);
-    let http = reqwest::Client::new();
-    let mut said: Option<String> = None;
-    for _ in 0..450 {
-        let asked = http
-            .get(format!("{base}/api/device/project/{project}"))
-            .bearer_auth(&cfg.token)
-            .timeout(Duration::from_secs(5))
-            .send()
-            .await;
-        let answer = match asked {
-            Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.ok(),
-            _ => None,
-        };
-        let Some(v) = answer.filter(|v| v.get("placed").is_some()) else {
-            return Ok(());
-        };
-        let problem = v["problem"].as_str().map(String::from);
-        if v["placed"].as_bool() == Some(true) && problem.is_none() {
-            if said.is_some() {
-                println!("connected.");
-            }
-            return Ok(());
-        }
-        let now = problem.clone().unwrap_or_else(|| "unplaced".into());
-        if said.as_deref() != Some(now.as_str()) {
-            let (url, line) = match &problem {
-                Some(why) => (
-                    format!("{base}/bots"),
-                    format!(
-                        "The project \"{project}\" is set up in Discord, but it cannot work right now: {why}"
-                    ),
-                ),
-                None => (
-                    format!("{base}/setup?project={project}"),
-                    format!("The project \"{project}\" is not connected to a Discord channel yet."),
-                ),
-            };
-            println!("{line}\n  Set it up here: {url}");
-            if !std::io::stdin().is_terminal() {
-                return Ok(());
-            }
-            println!(
-                "Waiting for that to be fixed... (Ctrl-C to cancel; nothing has been started)"
-            );
-            if problem.is_none() && !just_chose {
-                enroll::open_browser(&url);
-            }
-            said = Some(now);
-        }
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
-    Err(format!(
-        "the project \"{project}\" was still not connected to Discord after 15 minutes: run {} start again once it is",
-        me()
-    ))
 }
 
 /// Lists the agents on this machine.
@@ -1158,9 +972,7 @@ async fn pick_and_attach(rows: &[serde_json::Value], with_new: bool) -> Result<(
         Some(i) if i < names.len() => attach(&names[i]).await,
         Some(_) => {
             // Everything about the new agent (project, name, program, role) is chosen on the dashboard, so nothing is typed here twice.
-            let mut a = default_start_args();
-            a.pick = true;
-            start(a).await
+            start(default_start_args()).await
         }
         None => Ok(()),
     }
@@ -1511,20 +1323,25 @@ async fn still_running(agent: &str) -> bool {
 
 /// `claudecord settings`: shows the settings, or changes one.
 pub async fn settings(name: Option<String>, value: Option<String>) -> Result<(), String> {
+    use crate::device::config::{set_custom_commands, set_keep_running};
     let dir = home_dir();
+    let on_off = |setting: &str, v: &str| match v {
+        "on" | "yes" | "true" => Ok(true),
+        "off" | "no" | "false" => Ok(false),
+        _ => Err(format!("{setting} is on or off")),
+    };
     match (name.as_deref(), value.as_deref()) {
-        (None, _) => {}
+        (None, _) | (Some("keep-running" | "custom-commands"), None) => {}
         (Some("keep-running"), Some(v)) => {
-            let on = match v {
-                "on" | "yes" | "true" => true,
-                "off" | "no" | "false" => false,
-                _ => return Err("keep-running is on or off".into()),
-            };
-            crate::device::config::set_keep_running(&dir, on).map_err(|e| e.to_string())?;
+            set_keep_running(&dir, on_off("keep-running", v)?).map_err(|e| e.to_string())?;
         }
-        (Some("keep-running"), None) => {}
+        (Some("custom-commands"), Some(v)) => {
+            set_custom_commands(&dir, on_off("custom-commands", v)?).map_err(|e| e.to_string())?;
+        }
         (Some(other), _) => {
-            return Err(format!("no setting called {other}. There is: keep-running"));
+            return Err(format!(
+                "no setting called {other}. There is: keep-running, custom-commands"
+            ));
         }
     }
     let on = crate::device::config::keep_running(&dir);
@@ -1537,6 +1354,16 @@ pub async fn settings(name: Option<String>, value: Option<String>) -> Result<(),
         }
     );
     println!("change it with: {} settings keep-running on|off", me());
+    let cc = crate::device::config::custom_commands_allowed(&dir);
+    println!(
+        "custom-commands: {}",
+        if cc {
+            "on (this machine runs the startup commands saved on the dashboard, in your login shell)"
+        } else {
+            "off (an agent started with a saved command is refused here: a command is a line of shell sent by the hub)"
+        }
+    );
+    println!("change it with: {} settings custom-commands on|off", me());
     Ok(())
 }
 
