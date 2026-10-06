@@ -141,22 +141,29 @@ function SpawnForm({ project, machines, done }: { project: string; machines: str
   const [name, setName] = useState('')
   const [adapter, setAdapter] = useState('claude')
   const [node, setNode] = useState('')
+  const [saved, setSaved] = useState('')
+  const commands = useLoad(api.commands)
   const act = useAction()
   const [result, setResult] = useState<string | null>(null)
   return (
     <div className="inline-form">
       <input placeholder="agent name" value={name} onChange={(e) => setName(e.target.value)} />
-      <select value={adapter} onChange={(e) => setAdapter(e.target.value)}>
+      <select value={saved ? `cmd:${saved}` : adapter} onChange={(e) => (e.target.value.startsWith('cmd:') ? setSaved(e.target.value.slice(4)) : (setSaved(''), setAdapter(e.target.value)))}>
         <option value="claude">Claude Code</option>
         <option value="codex">Codex</option>
         <option value="agy">agy</option>
+        {(commands.data ?? []).length > 0 && (
+          <optgroup label="Startup commands">
+            {commands.data!.map((c) => <option key={c.name} value={`cmd:${c.name}`}>{c.name} ({c.program})</option>)}
+          </optgroup>
+        )}
       </select>
       <select value={node} onChange={(e) => setNode(e.target.value)}>
         <option value="">Any machine</option>
         {machines.map((m) => <option key={m}>{m}</option>)}
       </select>
       <button className="btn primary" disabled={act.busy || !name} onClick={() => act.run(async () => {
-        setResult((await api.spawn(project, name, adapter, node || undefined)).node)
+        setResult((await api.spawn(project, name, adapter, node || undefined, saved || undefined)).node)
         // Say it was asked, then close by itself.
         setTimeout(done, 2000)
       })}>Start</button>

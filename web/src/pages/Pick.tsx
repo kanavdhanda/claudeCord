@@ -14,6 +14,7 @@ export function Pick() {
   const [q] = useSearchParams()
   const code = q.get('code') ?? ''
   const what = useLoad(() => api.pick(code))
+  const saved = useLoad(api.commands)
   const projects = useLoad<Project[]>(() => api.projects())
   const bots = useLoad<Bot[]>(() => api.bots())
   const [project, setProject] = useState('')
@@ -48,6 +49,14 @@ export function Pick() {
     return () => clearInterval(t)
   }, [waiting, outcome])
 
+  // What `claudecord start` was given on the command line is where the form starts.
+  useEffect(() => {
+    const f = what.data?.prefill
+    if (!f) return
+    if (f.name) setAgent(f.name)
+    if (f.adapter) setProgram(f.adapter)
+    if (f.role) setRole(f.role)
+  }, [what.data])
   // The project this folder already belongs to comes first; a new folder's name is the first guess.
   useEffect(() => { if (what.data && !project) setProject(what.data.project || clean(what.data.folder)) }, [what.data])
   // One bot needs no question.
@@ -102,8 +111,8 @@ export function Pick() {
         if (!channel) return
         await api.place(project, bot.id, guild.id, channel.id)
       }
-      const saved = program.startsWith('cmd:') ? program.slice(4) : undefined
-      await api.choose(code, project, agent, saved ? what.data?.commands?.find((c) => c.name === saved)?.program ?? 'claude' : program, role, saved)
+      const picked = program.startsWith('cmd:') ? program.slice(4) : undefined
+      await api.choose(code, project, agent, picked ? saved.data?.find((c) => c.name === picked)?.program ?? 'claude' : program, role, picked)
       setDone(project)
       setWaiting(true)
     })
@@ -220,10 +229,10 @@ export function Pick() {
             <option value="claude">Claude Code</option>
             <option value="codex">Codex</option>
             <option value="agy">agy</option>
-            {(what.data?.commands ?? []).length > 0 && (
-              <optgroup label="Saved commands on this machine">
-                {what.data!.commands!.map((c) => (
-                  <option key={c.name} value={`cmd:${c.name}`}>{c.name} ({c.program}{c.source === 'folder' ? ', this folder' : ''})</option>
+            {(saved.data ?? []).length > 0 && (
+              <optgroup label="Startup commands">
+                {saved.data!.map((c) => (
+                  <option key={c.name} value={`cmd:${c.name}`}>{c.name} ({c.program})</option>
                 ))}
               </optgroup>
             )}

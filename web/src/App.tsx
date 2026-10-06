@@ -5,6 +5,7 @@ import { useLoad } from './hooks'
 import { Activate } from './pages/Activate'
 import { Pick } from './pages/Pick'
 import { Bots } from './pages/Bots'
+import { Commands } from './pages/Commands'
 import { Insights } from './pages/Insights'
 import { Login } from './pages/Login'
 import { Machines } from './pages/Machines'
@@ -38,6 +39,7 @@ export function App() {
             <NavLink to="/setup">Add a project</NavLink>
             <NavLink to="/bots">Discord bots</NavLink>
             <NavLink to="/machines">Machines</NavLink>
+            <NavLink to="/commands">Startup commands</NavLink>
           </nav>
           <div className="who">
             <span>{me.name}</span>
@@ -58,6 +60,7 @@ export function App() {
             <Route path="/insights" element={<Insights />} />
             <Route path="/setup" element={<Setup />} />
             <Route path="/bots" element={<Bots />} />
+            <Route path="/commands" element={<Commands />} />
             <Route path="/machines" element={<Machines />} />
             <Route path="/activate" element={<Activate />} />
             <Route path="/pick" element={<Pick />} />

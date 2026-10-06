@@ -26,6 +26,7 @@ export type Me = { id: string; name: string }
 export type Bot = { id: string; app_id: string; name: string; invite_url: string }
 export type Guild = { id: string; name: string; ok?: boolean; missing?: string[] }
 export type Channel = { id: string; name: string }
+export type SavedCommand = { name: string; command: string; program: string }
 export type Machine = { node: string; since: number }
 export type Project = {
   project: string
@@ -63,16 +64,20 @@ export const api = {
   channels: (bot: string, guild: string) => get<Channel[]>(`/api/v1/bots/${bot}/guilds/${guild}/channels`),
   makeChannel: (bot: string, guild: string, name: string) =>
     post<Channel>(`/api/v1/bots/${bot}/guilds/${guild}/channels`, { name }),
+  commands: () => get<SavedCommand[]>('/api/v1/commands'),
+  saveCommand: (name: string, command: string, program: string) =>
+    call<{ ok: boolean }>('PUT', `/api/v1/commands/${encodeURIComponent(name)}`, { command, program }),
+  deleteCommand: (name: string) => call<{ removed: boolean }>('DELETE', `/api/v1/commands/${encodeURIComponent(name)}`),
   projects: () => get<Project[]>('/api/v1/projects'),
   moveAgent: (project: string, name: string, to: string) =>
     post<{ ok: boolean }>(`/api/v1/projects/${encodeURIComponent(project)}/agents/${encodeURIComponent(name)}/move`, { to }),
   place: (project: string, bot: string, guild: string, channel: string) =>
     call<{ ok: boolean }>('PUT', `/api/v1/projects/${encodeURIComponent(project)}/target`, { bot, guild, channel }),
-  pick: (code: string) => get<{ folder: string; node: string; project?: string | null; commands?: { name: string; program: string; source: string }[]; collected?: boolean; result?: { ok: boolean; message: string } | null }>(`/api/v1/pick/${encodeURIComponent(code)}`),
+  pick: (code: string) => get<{ folder: string; node: string; project?: string | null; prefill?: { name?: string | null; adapter?: string | null; role?: string | null }; collected?: boolean; result?: { ok: boolean; message: string } | null }>(`/api/v1/pick/${encodeURIComponent(code)}`),
   choose: (code: string, project: string, agent?: string, adapter?: string, role?: string, command?: string) =>
     post<{ ok: boolean }>(`/api/v1/pick/${encodeURIComponent(code)}`, { project, agent: agent || undefined, adapter, role: role || undefined, command: command || undefined }),
-  spawn: (project: string, name: string, adapter: string, node?: string) =>
-    post<{ node: string }>('/api/v1/spawn', { project, name, adapter, node }),
+  spawn: (project: string, name: string, adapter: string, node?: string, command?: string) =>
+    post<{ node: string }>('/api/v1/spawn', { project, name, adapter, node, command: command || undefined }),
 }
 
 export type Summary = {
