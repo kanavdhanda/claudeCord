@@ -27,8 +27,26 @@ export function Pick() {
   const [role, setRole] = useState('')
   const [program, setProgram] = useState('claude')
   const [done, setDone] = useState<string | null>(null)
+  // After Start: the machine is starting the agent. What it says (started, or why not) is shown here.
+  const [waiting, setWaiting] = useState(false)
+  const [outcome, setOutcome] = useState<{ ok: boolean; message: string } | null>(null)
   const addBot = useAction()
   const go = useAction()
+
+  // Waiting for the machine to say whether the agent started.
+  useEffect(() => {
+    if (!waiting || outcome) return
+    let tries = 0
+    const t = setInterval(async () => {
+      tries++
+      try {
+        const r = (await api.pick(code)).result
+        if (r) { setOutcome(r); setWaiting(false) }
+      } catch { /* try again */ }
+      if (tries > 90) { setOutcome({ ok: false, message: 'Your machine has not answered. Is `claudecord start` still running there?' }); setWaiting(false) }
+    }, 1000)
+    return () => clearInterval(t)
+  }, [waiting, outcome])
 
   // The project this folder already belongs to comes first; a new folder's name is the first guess.
   useEffect(() => { if (what.data && !project) setProject(what.data.project || clean(what.data.folder)) }, [what.data])
@@ -61,8 +79,15 @@ export function Pick() {
   if (done)
     return (
       <div className="card narrow stack">
-        <h2>All set</h2>
-        <p><b>{done}</b> is ready. Go back to your terminal: your agent is starting there.</p>
+        <h2>{outcome ? (outcome.ok ? 'Started' : 'It did not start') : 'Starting…'}</h2>
+        {!outcome && <p className="muted">Your choice reached the machine. Waiting for it to start <b>{done}</b>…</p>}
+        {outcome?.ok && <p><b>{done}</b> is running. Go back to your terminal: the agent is there.</p>}
+        {outcome && !outcome.ok && (
+          <>
+            <p className="error" style={{ whiteSpace: 'pre-wrap' }}>{outcome.message}</p>
+            <p className="muted">Fix that on the machine, then run <span className="mono">claudecord start</span> again.</p>
+          </>
+        )}
         <Link className="btn primary" to="/">Go to the dashboard</Link>
       </div>
     )
@@ -79,6 +104,7 @@ export function Pick() {
       }
       await api.choose(code, project, agent, program, role)
       setDone(project)
+      setWaiting(true)
     })
 
   return (

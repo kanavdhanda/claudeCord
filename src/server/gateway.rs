@@ -81,6 +81,10 @@ pub(crate) struct Pick {
     agent: Option<String>,
     adapter: Option<String>,
     role: Option<String>,
+    /// The machine has collected the choice; the page then waits for `result`.
+    collected: bool,
+    /// What became of the agent on the machine: whether it started, and what it said (its name, or why not).
+    result: Option<(bool, String)>,
     at: i64,
 }
 
@@ -181,6 +185,7 @@ pub(crate) fn router(gw: Gateway) -> Router {
         .route("/api/device/project/{name}", get(device_project))
         .route("/api/device/pick", post(pick_start))
         .route("/api/device/pick/{code}", get(pick_poll))
+        .route("/api/device/pick/{code}/result", post(pick_result))
         .route("/api/v1/pick/{code}", get(pick_view).post(pick_choose))
         .route("/api/device/code", post(device_code))
         .route("/api/device/token", post(device_token))
@@ -366,6 +371,8 @@ async fn pick_start(
             agent: None,
             adapter: None,
             role: None,
+            collected: false,
+            result: None,
             at: now,
         },
     );
@@ -385,8 +392,11 @@ async fn pick_poll(
         Err(r) => return *r,
     };
     let mut picks = gw.picks.locked();
-    match picks.get(&code) {
-        Some(p) if p.tenant == tenant && p.node == node && now - p.at < PICK_TTL_MS => {
+    match picks.get_mut(&code) {
+        // Collected once: after that the machine is told it expired, as before. The entry stays for the page to read the result from.
+        Some(p)
+            if p.tenant == tenant && p.node == node && now - p.at < PICK_TTL_MS && !p.collected =>
+        {
             let (chosen, agent, adapter, role) = (
                 p.chosen.clone(),
                 p.agent.clone(),
@@ -394,12 +404,51 @@ async fn pick_poll(
                 p.role.clone(),
             );
             if chosen.is_some() {
-                picks.remove(&code);
+                p.collected = true;
             }
             json_reply(
                 StatusCode::OK,
                 json!({ "chosen": chosen, "agent": agent, "adapter": adapter, "role": role }),
             )
+        }
+        _ => err(
+            StatusCode::NOT_FOUND,
+            "that choice expired; run the command again",
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+struct PickResult {
+    ok: bool,
+    message: Option<String>,
+}
+
+/// `POST /api/device/pick/{code}/result`: the machine says what became of the agent the page asked for: started, or why not. The page shows it.
+async fn pick_result(
+    State(gw): State<Gateway>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(code): Path<String>,
+    Json(b): Json<PickResult>,
+) -> Response {
+    let (ip, now) = (ip_of(peer), crate::now_ms());
+    let (tenant, node) = match machine_auth(&gw, &headers, &ip, now as f64) {
+        Ok(m) => m,
+        Err(r) => return *r,
+    };
+    let mut picks = gw.picks.locked();
+    match picks.get_mut(&code) {
+        Some(p) if p.tenant == tenant && p.node == node && p.collected => {
+            let text: String = b
+                .message
+                .unwrap_or_default()
+                .chars()
+                .filter(|c| !c.is_control() || *c == '\n')
+                .take(600)
+                .collect();
+            p.result = Some((b.ok, text));
+            json_reply(StatusCode::OK, json!({ "ok": true }))
         }
         _ => err(
             StatusCode::NOT_FOUND,
@@ -421,7 +470,13 @@ async fn pick_view(
     match gw.picks.locked().get(&code) {
         Some(p) if p.tenant == a.id && now - p.at < PICK_TTL_MS => json_reply(
             StatusCode::OK,
-            json!({ "folder": p.folder, "node": p.node, "project": p.hint }),
+            json!({
+                "folder": p.folder,
+                "node": p.node,
+                "project": p.hint,
+                "collected": p.collected,
+                "result": p.result.as_ref().map(|(ok, message)| json!({ "ok": ok, "message": message })),
+            }),
         ),
         _ => err(
             StatusCode::NOT_FOUND,
@@ -464,6 +519,17 @@ async fn pick_choose(
         return err(
             StatusCode::NOT_FOUND,
             "that choice expired; run the command again",
+        );
+    }
+    if gw
+        .picks
+        .locked()
+        .get(&code)
+        .is_some_and(|p| p.chosen.is_some())
+    {
+        return err(
+            StatusCode::CONFLICT,
+            "this one is already chosen: run claudecord start again for another agent",
         );
     }
     // Nothing continues without a Discord bot that is really in a server with the permissions it needs. (A saved bot is one Discord confirmed the

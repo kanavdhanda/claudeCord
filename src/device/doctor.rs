@@ -24,6 +24,48 @@ fn check(name: &'static str, ok: bool, detail: impl Into<String>) -> Check {
     }
 }
 
+/// How to install the program of an agent type, for the message that says it is missing.
+pub fn install_hint(program: &str) -> &'static str {
+    match program {
+        "codex" => "npm i -g @openai/codex",
+        "agy" => "install Antigravity and put `agy` on your PATH",
+        _ => "npm i -g @anthropic-ai/claude-code   (see https://claude.com/claude-code)",
+    }
+}
+
+/// What to say when `program` is not on the PATH: what is missing and how to get it.
+pub fn program_missing(program: &str) -> String {
+    format!(
+        "{program} was not found on this machine's PATH. Install it with:  {}",
+        install_hint(program)
+    )
+}
+
+/// What to say when tmux is needed and missing, or None when it is there (or not needed: Windows, or the built-in terminal asked for).
+pub fn tmux_missing() -> Option<String> {
+    let wants_pty = std::env::var("CLAUDECORD_TERMINAL").is_ok_and(|v| v == "pty");
+    if cfg!(windows) || wants_pty || super::tmux::TmuxTerminal::available() {
+        return None;
+    }
+    let how = if cfg!(target_os = "macos") {
+        "brew install tmux"
+    } else {
+        "sudo apt install tmux   (or: dnf install tmux, pacman -S tmux)"
+    };
+    Some(format!(
+        "tmux was not found. It keeps each agent running when you close the window. Install it with:  {how}"
+    ))
+}
+
+/// The program an agent type runs.
+pub fn program_of(adapter: &str) -> &'static str {
+    match adapter {
+        "codex" => "codex",
+        "agy" => "agy",
+        _ => "claude",
+    }
+}
+
 /// Runs the checks in order and stops at the first failure, since later ones depend on earlier ones.
 pub async fn run(cfg: &Config, opts: &LinkOpts) -> Vec<Check> {
     let mut out = Vec::new();
@@ -102,4 +144,18 @@ pub async fn run(cfg: &Config, opts: &LinkOpts) -> Vec<Check> {
         )),
     }
     out
+}
+
+#[cfg(test)]
+mod requirement_tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_program_says_what_and_how_to_get_it() {
+        assert!(program_missing("codex").contains("npm i -g @openai/codex"));
+        assert!(program_missing("claude").contains("claude-code"));
+        assert!(program_missing("agy").contains("Antigravity"));
+        assert_eq!(program_of("codex"), "codex");
+        assert_eq!(program_of("whatever"), "claude");
+    }
 }

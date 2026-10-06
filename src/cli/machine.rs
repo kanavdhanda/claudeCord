@@ -209,39 +209,6 @@ fn update_command(exe: &str) -> &'static str {
     }
 }
 
-/// What this machine is missing for running agents, as lines to show: tmux (where the built-in terminal is not what is asked for) and the
-/// program of the agent type, unless a command of the person's own is given. Empty means everything needed is there.
-fn missing_requirements(adapter: &str, own_command: bool) -> Vec<String> {
-    let mut missing = Vec::new();
-    let wants_pty = std::env::var("CLAUDECORD_TERMINAL").is_ok_and(|v| v == "pty");
-    if !cfg!(windows) && !wants_pty && !crate::device::tmux::TmuxTerminal::available() {
-        let how = if cfg!(target_os = "macos") {
-            "brew install tmux"
-        } else {
-            "sudo apt install tmux   (or: dnf install tmux, pacman -S tmux)"
-        };
-        missing.push(format!(
-            "tmux: not found. It keeps each agent running when you close the window. Install it with:  {how}"
-        ));
-    }
-    if !own_command {
-        let (program, how) = match adapter {
-            "codex" => ("codex", "npm i -g @openai/codex"),
-            "agy" => ("agy", "install Antigravity and put `agy` on your PATH"),
-            _ => (
-                "claude",
-                "npm i -g @anthropic-ai/claude-code   (see https://claude.com/claude-code)",
-            ),
-        };
-        if !program_on_path(program) {
-            missing.push(format!(
-                "{program}: not found on your PATH. Install it with:  {how}"
-            ));
-        }
-    }
-    missing
-}
-
 /// Whether `program` is found in a folder of the PATH.
 fn program_on_path(program: &str) -> bool {
     let exts: &[&str] = if cfg!(windows) {
@@ -255,19 +222,23 @@ fn program_on_path(program: &str) -> bool {
     })
 }
 
-/// Stops with a list of what is missing, or lets the start go on.
-fn require(adapter: &str, own_command: bool) -> Result<(), String> {
-    let missing = missing_requirements(adapter, own_command);
-    if missing.is_empty() {
+/// What the machine must have whichever agent is started (tmux), checked before the person is sent to the dashboard.
+fn require_machine() -> Result<(), String> {
+    match doctor::tmux_missing() {
+        Some(m) => Err(format!("cannot start an agent here yet: {m}")),
+        None => Ok(()),
+    }
+}
+
+/// The program of the chosen agent type, checked once the page has chosen it (unless a command of the person's own is given).
+fn require_program(adapter: &str, own_command: bool) -> Result<(), String> {
+    let program = doctor::program_of(adapter);
+    if own_command || program_on_path(program) {
         return Ok(());
     }
     Err(format!(
-        "cannot start an agent here yet: this machine is missing\n{}\nInstall that, then run the same command again.",
-        missing
-            .iter()
-            .map(|m| format!("  - {m}"))
-            .collect::<Vec<_>>()
-            .join("\n")
+        "cannot start an agent here yet: {}",
+        doctor::program_missing(program)
     ))
 }
 
@@ -336,7 +307,7 @@ pub async fn start(a: StartArgs) -> Result<(), String> {
         ));
     }
     // Everything the machine must have comes first, so nobody fills in the dashboard only to learn that tmux is missing.
-    require(&a.adapter, !a.command.is_empty())?;
+    require_machine()?;
     ensure_login().await?;
     if let Some(n) = update_notice() {
         println!("{n}\n");
@@ -361,41 +332,53 @@ pub async fn start(a: StartArgs) -> Result<(), String> {
             }
         }
     };
-    // No name given: the daemon makes a friendly one (shown below and in the agent's window).
-    wait_until_connected(&project, picked).await?;
-    // What was typed on the command line wins over what the page sent.
-    let name = a.name.clone().or(chosen.agent);
-    let adapter = chosen
-        .adapter
-        .filter(|_| a.adapter == "claude")
-        .unwrap_or(a.adapter.clone());
-    // The page may have chosen another program than the one asked for on the command line.
-    require(&adapter, !a.command.is_empty())?;
-    ensure_daemon().await?;
-    let (cols, rows) = terminal_size();
-    let r = ipc::call(
-        &dir,
-        &Req::Up {
-            project,
-            name,
-            adapter,
-            model: a.model,
-            role: a.role.or(chosen.role),
-            cwd: cwd.to_string_lossy().into(),
-            policy: a.policy,
-            rows,
-            cols,
-            opts: UpOpts {
-                command: (!a.command.is_empty()).then_some(a.command),
-                worktree: a.worktree,
-                pickup: a.pickup,
-                restart: a.restart,
+    // Everything from here can fail on this machine (the program is not installed, the daemon does not come up, the name is taken). The page
+    // that asked for the agent is told which, so the person sees it there and not only in this terminal.
+    let started = async {
+        // No name given: the daemon makes a friendly one (shown below and in the agent's window).
+        wait_until_connected(&project, picked).await?;
+        // What was typed on the command line wins over what the page sent.
+        let name = a.name.clone().or(chosen.agent.clone());
+        let adapter = chosen
+            .adapter
+            .clone()
+            .filter(|_| a.adapter == "claude")
+            .unwrap_or(a.adapter.clone());
+        require_program(&adapter, !a.command.is_empty())?;
+        ensure_daemon().await?;
+        let (cols, rows) = terminal_size();
+        let r = ipc::call(
+            &dir,
+            &Req::Up {
+                project: project.clone(),
+                name,
+                adapter,
+                model: a.model.clone(),
+                role: a.role.clone().or(chosen.role.clone()),
+                cwd: cwd.to_string_lossy().into(),
+                policy: a.policy.clone(),
+                rows,
+                cols,
+                opts: UpOpts {
+                    command: (!a.command.is_empty()).then_some(a.command.clone()),
+                    worktree: a.worktree,
+                    pickup: a.pickup,
+                    restart: a.restart,
+                },
             },
-        },
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    let reply = expect_ok(r)?;
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        expect_ok(r)
+    }
+    .await;
+    if !chosen.code.is_empty() {
+        match &started {
+            Ok(r) => report_pick(&chosen.code, true, &r.msg).await,
+            Err(e) => report_pick(&chosen.code, false, e).await,
+        }
+    }
+    let reply = started?;
     let agent = reply.msg.clone();
     println!("started {agent}");
     if let Some(tree) = reply.data.as_ref().and_then(|d| d["worktree"].as_str()) {
@@ -429,6 +412,8 @@ struct Picked {
     agent: Option<String>,
     adapter: Option<String>,
     role: Option<String>,
+    /// The page's code, so what happens next can be reported back to it.
+    code: String,
 }
 
 /// Has the person choose, on the dashboard, which project this folder belongs to: the hub gives a short code, the dashboard's pick page shows
@@ -492,6 +477,7 @@ async fn pick_on_dashboard(cwd: &std::path::Path, current: Option<&str>) -> Resu
                 agent: v["agent"].as_str().map(String::from),
                 adapter: v["adapter"].as_str().map(String::from),
                 role: v["role"].as_str().map(String::from),
+                code: code.clone(),
             });
         }
     }
@@ -499,6 +485,23 @@ async fn pick_on_dashboard(cwd: &std::path::Path, current: Option<&str>) -> Resu
         "no choice was made in an hour: run {} start again",
         me()
     ))
+}
+
+/// Tells the dashboard page what became of the agent it asked for: started, or why not. A hub too old to take it is not a problem.
+async fn report_pick(code: &str, ok: bool, what: &str) {
+    let Some(cfg) = Config::load(&home_dir()) else {
+        return;
+    };
+    let _ = reqwest::Client::new()
+        .post(format!(
+            "{}/api/device/pick/{code}/result",
+            enroll::http_base(&cfg.hub_url)
+        ))
+        .bearer_auth(&cfg.token)
+        .json(&serde_json::json!({ "ok": ok, "message": what }))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await;
 }
 
 /// Waits until the project is connected to a Discord channel where its bot can really work, before anything is started: no agent is made for a

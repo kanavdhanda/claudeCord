@@ -985,6 +985,50 @@ async fn a_project_is_chosen_on_the_dashboard_by_the_owner_of_the_machine_and_no
     assert_eq!(got["agent"], "otter");
     assert_eq!(got["adapter"], "codex");
     assert_eq!(got["role"], "lead");
+    // A choice is made once.
+    assert_eq!(
+        post_json(&base, &path, Some(&alice), json!({"project": "other"}))
+            .await
+            .0,
+        409
+    );
+    // The page learns what became of the agent from the machine that collected it, and from nobody else.
+    let result = format!("{base}/api/device/pick/{code}/result");
+    let said = |tok: String, body: Value| {
+        let (c, url) = (client(), result.clone());
+        async move {
+            c.post(url)
+                .bearer_auth(tok)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        }
+    };
+    assert_eq!(said("not-a-token".into(), json!({"ok": true})).await, 401);
+    assert_eq!(
+        get_json(&base, &path, &alice).await.1["result"],
+        Value::Null
+    );
+    assert_eq!(
+        said(
+            token.clone(),
+            json!({"ok": false, "message": "codex was not found on this machine's PATH"})
+        )
+        .await,
+        200
+    );
+    let seen = get_json(&base, &path, &alice).await.1;
+    assert_eq!(seen["collected"], true);
+    assert_eq!(seen["result"]["ok"], false);
+    assert!(
+        seen["result"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("codex")
+    );
     assert_eq!(poll(token, code).await.0, 404);
 }
 

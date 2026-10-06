@@ -1739,10 +1739,7 @@ impl State {
         ];
         // Better to say so now than to start a terminal that shows "command not found" and ends.
         if !find_program(&argv[0], &path) {
-            return Resp::err(format!(
-                "{} was not found on this machine. Install it, or put its folder on the PATH of the machine running claudecord",
-                argv[0]
-            ));
+            return Resp::err(super::doctor::program_missing(&argv[0]));
         }
         let spawn = Spawn {
             name: &agent_id,

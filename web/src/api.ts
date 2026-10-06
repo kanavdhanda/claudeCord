@@ -66,7 +66,7 @@ export const api = {
   projects: () => get<Project[]>('/api/v1/projects'),
   place: (project: string, bot: string, guild: string, channel: string) =>
     call<{ ok: boolean }>('PUT', `/api/v1/projects/${encodeURIComponent(project)}/target`, { bot, guild, channel }),
-  pick: (code: string) => get<{ folder: string; node: string; project?: string | null }>(`/api/v1/pick/${encodeURIComponent(code)}`),
+  pick: (code: string) => get<{ folder: string; node: string; project?: string | null; collected?: boolean; result?: { ok: boolean; message: string } | null }>(`/api/v1/pick/${encodeURIComponent(code)}`),
   choose: (code: string, project: string, agent?: string, adapter?: string, role?: string) =>
     post<{ ok: boolean }>(`/api/v1/pick/${encodeURIComponent(code)}`, { project, agent: agent || undefined, adapter, role: role || undefined }),
   spawn: (project: string, name: string, adapter: string, node?: string) =>
