@@ -911,7 +911,13 @@ fn discord_probe() -> Probe {
         let db = dir.join("hub.db");
         let mut store = Store::open(&db, None).map_err(|e| e.to_string())?;
         let token = store.create_token("mac", 0).map_err(|e| e.to_string())?;
-        let hub = server::start(server_cfg("127.0.0.1:0"), HubCore::default(), store)
+        // This probe is not about heartbeats, so they are relaxed: a busy machine pausing for a fraction of a second must not get the device dropped (and
+        // its agent forgotten) in the middle of the check.
+        let slow = ServerConfig {
+            ping_every: Duration::from_secs(2),
+            ..server_cfg("127.0.0.1:0")
+        };
+        let hub = server::start(slow, HubCore::default(), store)
             .await
             .map_err(|e| e.to_string())?;
         let (tx, mut rx) = mpsc::channel(64);
@@ -920,7 +926,10 @@ fn discord_probe() -> Probe {
             token,
             "mac".into(),
             tx,
-            link_opts(),
+            LinkOpts {
+                ping_every: Duration::from_secs(2),
+                ..link_opts()
+            },
         );
         let cfg = bridge::BridgeConfig {
             scope: None,
