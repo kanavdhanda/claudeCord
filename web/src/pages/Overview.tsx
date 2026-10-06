@@ -65,14 +65,14 @@ export function Overview() {
         </div>
         {names.length === 0 && <p className="muted">No projects yet.</p>}
         {names.map((n) => (
-          <ProjectCard key={n} name={n} place={placed.get(n)} s={state.data!.projects[n]} machines={state.data!.devices.map((d) => d.node)} />
+          <ProjectCard key={n} name={n} place={placed.get(n)} s={state.data!.projects[n]} machines={state.data!.devices.map((d) => d.node)} targets={projects.data!.filter((p) => p.placed && p.project !== n).map((p) => p.project)} />
         ))}
       </section>
     </div>
   )
 }
 
-function ProjectCard({ name, place, s, machines }: { name: string; place?: Project; s?: ProjectState; machines: string[] }) {
+function ProjectCard({ name, place, s, machines, targets }: { name: string; place?: Project; s?: ProjectState; machines: string[]; targets: string[] }) {
   const [spawning, setSpawning] = useState(false)
   const waiting = (s?.asks.length ?? 0) + (s?.perms.length ?? 0)
   return (
@@ -109,6 +109,7 @@ function ProjectCard({ name, place, s, machines }: { name: string; place?: Proje
               <b>{a.name}</b>
               {a.lead && <span className="tag">lead</span>}
               <span className="muted small">{a.status} on {a.node}</span>
+              <MoveAgent project={name} agent={a.name} targets={targets} />
             </div>
           ))
         ) : (
@@ -163,5 +164,26 @@ function SpawnForm({ project, machines, done }: { project: string; machines: str
       {act.error && <span className="error">{act.error}</span>}
       {result && <span className="ok">Asked {result} to start {name}.</span>}
     </div>
+  )
+}
+
+/** Moves a running agent to another project in place: the same agent and conversation, filed under the other project from now on. */
+function MoveAgent({ project, agent, targets }: { project: string; agent: string; targets: string[] }) {
+  const [to, setTo] = useState('')
+  const move = useAction()
+  if (targets.length === 0) return null
+  return (
+    <span className="row small">
+      <select value={to} onChange={(e) => setTo(e.target.value)} aria-label={`Move ${agent} to another project`}>
+        <option value="">Move to…</option>
+        {targets.map((t) => <option key={t} value={t}>{t}</option>)}
+      </select>
+      {to && (
+        <button className="btn" disabled={move.busy} onClick={() => move.run(async () => { await api.moveAgent(project, agent, to); setTo('') })}>
+          Move
+        </button>
+      )}
+      {move.error && <span className="error small">{move.error}</span>}
+    </span>
   )
 }

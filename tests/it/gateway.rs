@@ -745,6 +745,83 @@ async fn an_agents_words_reach_the_channel_chosen_in_the_chosen_server() {
     assert_eq!(post["username"], "otter");
     // It was posted in the chosen channel, not in some other one.
     assert_eq!(post["channel"], chan.as_str(), "{post}");
+    // Moving it (the dashboard's Move button) to a project nobody has placed in Discord is refused, to one that is placed it goes, and from then
+    // on its words appear in that project's channel and not in the first.
+    let move_to = |project: &str, to: &str| {
+        let (b, s, project, to) = (base.clone(), s.clone(), project.to_string(), to.to_string());
+        async move {
+            let r = client()
+                .post(format!("{b}/api/v1/projects/{project}/agents/otter/move"))
+                .header("cookie", format!("cc_session={s}"))
+                .json(&json!({"to": to}))
+                .send()
+                .await
+                .unwrap();
+            (
+                r.status().as_u16(),
+                r.json::<Value>().await.unwrap_or(Value::Null),
+            )
+        }
+    };
+    assert_eq!(
+        move_to("alpha", "gamma").await.0,
+        409,
+        "gamma has no channel yet"
+    );
+    assert_eq!(move_to("alpha", "bad name!").await.0, 400);
+    let (st, ch2) = post_json(
+        &base,
+        &format!("/api/v1/bots/{bot_id}/guilds/g2/channels"),
+        Some(&s),
+        json!({"name": "Team-Beta"}),
+    )
+    .await;
+    assert_eq!(st, 200, "{ch2}");
+    let chan2 = ch2["id"].as_str().unwrap().to_string();
+    let placed = client()
+        .put(format!("{base}/api/v1/projects/beta/target"))
+        .header("cookie", format!("cc_session={s}"))
+        .json(&json!({"bot": bot_id, "guild": "g2", "channel": chan2}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(placed.status().as_u16(), 200);
+    let (st, body) = move_to("alpha", "beta").await;
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(
+        move_to("alpha", "beta").await.0,
+        403,
+        "it is no longer in alpha"
+    );
+    ws.send(Message::Text(
+        serde_json::to_string(&NodeFrame::AgentSay {
+            agent_id: "alpha/otter".into(),
+            text: "now in beta".into(),
+            thread: None,
+        })
+        .unwrap()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let mut channel = None;
+    for _ in 0..200 {
+        let posts = fake.log.lock().unwrap().posts.clone();
+        if let Some(p) = posts.iter().find(|p| {
+            p["content"]
+                .as_str()
+                .is_some_and(|c| c.contains("now in beta"))
+        }) {
+            channel = p["channel"].as_str().map(String::from);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(
+        channel.as_deref(),
+        Some(chan2.as_str()),
+        "its words follow it to the new project's channel"
+    );
     gw.shutdown().await;
 }
 

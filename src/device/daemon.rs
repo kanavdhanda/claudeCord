@@ -658,6 +658,7 @@ impl State {
                         .await;
                 }
             }
+            HubFrame::Moved { agent_id, project } => self.on_moved(&agent_id, &project),
             HubFrame::Update { latest } => {
                 // Kept for the command line to mention the next time it runs (the daemon has no terminal to say it in).
                 if crate::protocol::version_older(env!("CARGO_PKG_VERSION"), &latest) {
@@ -674,6 +675,44 @@ impl State {
             }
             HubFrame::Welcome { .. } | HubFrame::Error { .. } | HubFrame::Ack { .. } => {}
         }
+    }
+
+    /// A person moved one of this machine's agents to another project. The agent keeps its id, folder, terminal and conversation; from now on
+    /// what it receives and saves is kept under the new project, and the folder lists the new project too (the one used last is offered first).
+    fn on_moved(&mut self, agent_id: &str, project: &str) {
+        let Some(a) = self.agents.get_mut(agent_id) else {
+            return;
+        };
+        let old = std::mem::replace(&mut a.spec.project, project.to_string());
+        let (origin, name, adapter) = (
+            a.origin.clone(),
+            a.spec.name.clone(),
+            a.spec.adapter.as_str().to_string(),
+        );
+        let (model, role) = (a.spec.model.clone(), a.spec.role.clone());
+        let cwd = origin.to_string_lossy().into_owned();
+        crate::info!(
+            "daemon",
+            "{agent_id}: moved from project {old} to {project}"
+        );
+        a.log.event(
+            crate::now_ms(),
+            "moved",
+            &format!("from {old} to {project}"),
+        );
+        let list = self.folders.entry(project.to_string()).or_default();
+        list.retain(|f| f != &origin);
+        list.insert(0, origin.clone());
+        let recent = self.last.entry(cwd.clone()).or_default();
+        recent.retain(|p| p != project);
+        recent.insert(0, project.to_string());
+        let sorted: BTreeMap<String, Vec<PathBuf>> = self
+            .folders
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let _ = super::config::write_projects(&self.dir, &sorted, &self.last);
+        self.remember_agent(&name, (project.to_string(), adapter, model, role, cwd));
     }
 
     /// A chunk of a file from the hub. It is saved into the agent's inbox folder, and when complete the agent is told

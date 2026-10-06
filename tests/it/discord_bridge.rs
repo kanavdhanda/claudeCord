@@ -1333,3 +1333,66 @@ async fn screen_asks_the_terminal_and_leaves_no_message_of_its_own() {
     })
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn move_files_an_agent_under_another_project_and_says_so() {
+    let mut r = rig("moveslash").await;
+    register(&r, "otter").await;
+    let ch = channel(&r).await;
+    let say =
+        |name: &str, opts: Value| interaction(2, &ch, "1", json!({"name": name, "options": opts}));
+    r.event(
+        "INTERACTION_CREATE",
+        say("move", json!([{"name": "agent", "type": 3, "value": "otter"}, {"name": "project", "type": 3, "value": "other"}])),
+    );
+    let reply = r
+        .until("the answer", |l| {
+            l.responses
+                .iter()
+                .find(|x| {
+                    x["content"]
+                        .as_str()
+                        .is_some_and(|c| c.contains("moved to other"))
+                })
+                .cloned()
+        })
+        .await;
+    assert_eq!(reply["type"], 4);
+    let there = r
+        .hub
+        .call(|c, _| {
+            (
+                c.find_by_name("other", "otter").is_some()
+                    && c.find_by_name("demo", "otter").is_none(),
+                vec![],
+            )
+        })
+        .await
+        .unwrap();
+    assert!(
+        there,
+        "the agent is in the other project and no longer in this one"
+    );
+    // The machine is told, so what it keeps is filed under the new project too.
+    r.frame(
+        "the machine told",
+        |f| matches!(f, HubFrame::Moved { project, .. } if project == "other"),
+    )
+    .await;
+    // A bad project name, and a project this person does not own, are refused with a reason.
+    r.event(
+        "INTERACTION_CREATE",
+        say("move", json!([{"name": "agent", "type": 3, "value": "nobody"}, {"name": "project", "type": 3, "value": "bad name!"}])),
+    );
+    r.until("the refusal", |l| {
+        l.responses
+            .iter()
+            .find(|x| {
+                x["content"]
+                    .as_str()
+                    .is_some_and(|c| c.contains("letters, digits"))
+            })
+            .cloned()
+    })
+    .await;
+}

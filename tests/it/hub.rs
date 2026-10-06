@@ -1,6 +1,7 @@
 //! Behaviour tests for the hub core. Each test drives the core with inputs and a made-up clock, then checks the
 //! effects it returned. No network, no database, no chat: the core is pure, so these are fast and exact.
 
+use claudecord::hub::controls::MoveError;
 use claudecord::hub::*;
 use claudecord::protocol::{AdapterId, AgentSpec, AgentStatus, HubFrame, NodeFrame};
 
@@ -2602,4 +2603,221 @@ fn versions_compare_number_by_number() {
         "a release candidate is not behind its own release"
     );
     assert!(!older("garbage", "0.0.0") && older("garbage", "0.0.1"));
+}
+
+/// Two projects: "p" with the lead otter and fox, "q" with heron, each agent on a device of its own.
+fn two_projects() -> World {
+    let mut w = World::new();
+    w.join("m1", 1, "otter");
+    w.join("m2", 2, "fox");
+    w.core.node_connected("m3", 3);
+    w.core.on_node_frame(
+        "m3",
+        NodeFrame::AgentRegister {
+            agent: spec("q", "heron"),
+            cwd: "/y".into(),
+        },
+        T0,
+    );
+    w
+}
+
+fn names(w: &World, project: &str) -> Vec<String> {
+    let mut v: Vec<String> = w
+        .core
+        .agents_of_project(project)
+        .iter()
+        .map(|a| a.name.clone())
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn a_moved_agent_belongs_to_the_new_project_alone() {
+    let mut w = two_projects();
+    let kd = w.kd.clone();
+    assert!(w.core.find_by_name("p", "otter").unwrap().is_lead);
+    let (row, fx) = w.core.move_agent(&kd, "p", "otter", "q", T0 + 1).unwrap();
+    assert_eq!(row.project, "q");
+    assert_eq!(
+        (names(&w, "p"), names(&w, "q")),
+        (vec!["fox".into()], vec!["heron".into(), "otter".into()])
+    );
+    // The old project has a lead again, the new one kept its own.
+    assert!(w.core.find_by_name("p", "fox").unwrap().is_lead);
+    assert!(!w.core.find_by_name("q", "otter").unwrap().is_lead);
+    // Its machine is told, and the agent is told what changed, with its new team.
+    assert!(frames(&fx).iter().any(|f| matches!(f, HubFrame::Moved { agent_id, project } if agent_id == "p/otter" && project == "q")));
+    let told: Vec<_> = deliveries(&fx).into_iter().filter(|d| d.0 == 1).collect();
+    assert!(
+        told.iter()
+            .any(|d| d.2.contains("moved from project p to project q")),
+        "{told:?}"
+    );
+    // Both rooms are told.
+    let notices: Vec<String> = fx
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Chat(Chat::Notice { project, text, .. }) => Some(format!("{project}: {text}")),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        notices.iter().any(|n| n.starts_with("p: otter moved to q")),
+        "{notices:?}"
+    );
+    assert!(
+        notices
+            .iter()
+            .any(|n| n.starts_with("q: otter joined from p")),
+        "{notices:?}"
+    );
+}
+
+#[test]
+fn after_a_move_the_old_project_cannot_reach_the_agent_nor_it_the_old_project() {
+    let mut w = two_projects();
+    let kd = w.kd.clone();
+    w.core.move_agent(&kd, "p", "otter", "q", T0 + 1).unwrap();
+    // A person in the old project naming it: nothing reaches its device (conn 1).
+    let (_, fx) = w
+        .core
+        .human_message(
+            &kd,
+            "p",
+            "@otter are you there",
+            &MessageOpts::default(),
+            T0 + 2,
+        )
+        .unwrap();
+    assert!(
+        deliveries(&fx).iter().all(|d| d.0 != 1),
+        "{:?}",
+        deliveries(&fx)
+    );
+    // In the new one it does.
+    let (_, fx) = w
+        .core
+        .human_message(&kd, "q", "@otter welcome", &MessageOpts::default(), T0 + 3)
+        .unwrap();
+    assert!(
+        deliveries(&fx)
+            .iter()
+            .any(|d| d.0 == 1 && d.2.contains("welcome"))
+    );
+    // What it says goes to the new project's chat and nowhere near the old one, and an old teammate named in it is not an agent there.
+    let fx = w.core.on_node_frame(
+        "m1",
+        NodeFrame::AgentSay {
+            agent_id: "p/otter".into(),
+            text: "@fox hello from the other side".into(),
+            thread: None,
+        },
+        T0 + 4,
+    );
+    let posts: Vec<&str> = fx
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Chat(Chat::Post { project, .. }) => Some(project.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !posts.is_empty() && posts.iter().all(|p| *p == "q"),
+        "{posts:?}"
+    );
+    assert!(
+        deliveries(&fx).iter().all(|d| d.0 != 2),
+        "fox, still in p, must not receive it: {:?}",
+        deliveries(&fx)
+    );
+}
+
+#[test]
+fn a_move_that_cannot_be_done_is_refused_and_changes_nothing() {
+    let mut w = two_projects();
+    let (kd, sam) = (w.kd.clone(), w.sam.clone());
+    // The same project, a name that is taken in the target, an unknown agent.
+    assert!(matches!(
+        w.core.move_agent(&kd, "p", "otter", "p", T0),
+        Err(MoveError::Refused(_))
+    ));
+    w.core.node_connected("m4", 4);
+    w.core.on_node_frame(
+        "m4",
+        NodeFrame::AgentRegister {
+            agent: spec("q", "otter"),
+            cwd: "/z".into(),
+        },
+        T0,
+    );
+    assert!(
+        matches!(w.core.move_agent(&kd, "p", "otter", "q", T0), Err(MoveError::Refused(m)) if m.contains("already has an agent called otter"))
+    );
+    assert!(matches!(
+        w.core.move_agent(&kd, "p", "nobody", "q", T0),
+        Err(MoveError::Denied(Denied::NotFound))
+    ));
+    // Only an owner of both projects may: sam is an operator in p and unknown in q.
+    assert!(matches!(
+        w.core.move_agent(&sam, "p", "fox", "q", T0),
+        Err(MoveError::Denied(_))
+    ));
+    // A machine that is not connected cannot be told.
+    w.core.node_disconnected("m2", 2);
+    assert!(
+        matches!(w.core.move_agent(&kd, "p", "fox", "q", T0), Err(MoveError::Refused(m)) if m.contains("not connected"))
+    );
+    assert_eq!(names(&w, "p"), vec!["fox", "otter"]);
+    assert_eq!(w.core.find_by_name("p", "fox").unwrap().project, "p");
+}
+
+#[test]
+fn a_moving_agents_open_tasks_go_back_to_the_lead_or_are_closed() {
+    let mut w = two_projects();
+    let kd = w.kd.clone();
+    // otter (lead) gives fox a task; then fox moves away.
+    w.core.on_node_frame(
+        "m1",
+        NodeFrame::AgentAssign {
+            agent_id: "p/otter".into(),
+            to: "fox".into(),
+            task: "write the tests".into(),
+            thread: None,
+        },
+        T0 + 1,
+    );
+    assert_eq!(w.core.tasks_of("p").len(), 1);
+    w.core.move_agent(&kd, "p", "fox", "q", T0 + 2).unwrap();
+    let t = &w.core.tasks_of("p")[0];
+    assert_eq!(
+        t.to_agent, "p/otter",
+        "back to the lead of the project it is leaving"
+    );
+    // With no lead left to take it, an open task is closed with a note.
+    let mut w = World::new();
+    w.join("m1", 1, "otter");
+    w.join("m2", 2, "fox");
+    w.core.node_connected("m3", 3);
+    w.core.on_node_frame(
+        "m3",
+        NodeFrame::AgentRegister {
+            agent: spec("q", "heron"),
+            cwd: "/y".into(),
+        },
+        T0,
+    );
+    w.core.on_node_frame(
+        "m2",
+        NodeFrame::AgentAssign {
+            agent_id: "p/fox".into(),
+            to: "otter".into(),
+            task: "review".into(),
+            thread: None,
+        },
+        T0 + 1,
+    );
+    w.core.move_agent(&kd, "p", "otter", "q", T0 + 2).unwrap();
+    assert!(w.core.find_by_name("p", "fox").unwrap().is_lead);
 }

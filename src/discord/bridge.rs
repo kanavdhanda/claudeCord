@@ -1136,6 +1136,25 @@ impl Bridge {
                     }
                     opts.insert(k.to_string(), val);
                 }
+                // A project with no channel yet has nowhere to show its agents: moving one there is refused until the dashboard has placed it.
+                if cmd == "move"
+                    && let Some(sc) = &self.scope
+                    && let Some(to) = opts.get("project")
+                    && sc.targets.target(to).is_none()
+                {
+                    let _ = self
+                        .rest
+                        .respond(
+                            iid,
+                            token,
+                            &format!(
+                                "{to} has no Discord channel yet: place it on the dashboard first."
+                            ),
+                            true,
+                        )
+                        .await;
+                    return;
+                }
                 let h = human.clone();
                 let p = project.clone();
                 self.handle

@@ -1765,3 +1765,74 @@ async fn files_sent_to_an_agent_land_in_the_inbox_of_its_project_only() {
     assert!(!r.project.join(".claudecord/files/t9-a.txt").exists());
     r.hub.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_moved_agent_is_filed_under_its_new_project_and_still_speaks_with_its_old_environment() {
+    use claudecord::hub::effects::Chat;
+    let r = rig("moveagent").await;
+    let mut chat = r.hub.chat();
+    let key = up(&r, "otter").await;
+    eventually("registered", async || {
+        r.hub
+            .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    // Moved by the owner from "demo" to "other".
+    let moved = r
+        .hub
+        .call(
+            |c, now| match c.move_agent(&kd(), "demo", "otter", "other", now) {
+                Ok((_, fx)) => (true, fx),
+                Err(e) => panic!("{e:?}"),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(moved);
+    // The machine keeps the folder under the new project, offers it first, and saves files for the agent in that project's inbox.
+    eventually("the machine knows", async || {
+        claudecord::device::config::project_of_folder(&r.dir, &r.project).as_deref()
+            == Some("other")
+    })
+    .await;
+    r.hub
+        .call(|c, _| {
+            let (_, fx) = c
+                .send_file(&kd(), "other", "x", "n.txt", b"new home", None, "t7")
+                .unwrap();
+            ((), fx)
+        })
+        .await;
+    eventually("file in the new project's inbox", async || {
+        std::fs::read(r.project.join(".claudecord/files/other/t7-n.txt"))
+            .is_ok_and(|b| b == b"new home")
+    })
+    .await;
+    // The agent's program still carries its old id in its environment. What it says is filed under the new project, and only there.
+    let said = ipc::call_as(
+        &r.dir,
+        Some(&key),
+        &Req::Say {
+            agent: "demo/otter".into(),
+            text: "settled in".into(),
+            thread: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(said.ok, "{}", said.msg);
+    let mut seen = None;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while seen.is_none() && std::time::Instant::now() < deadline {
+        if let Ok(Ok(Chat::Post { project, text, .. })) =
+            tokio::time::timeout(Duration::from_millis(200), chat.recv()).await
+            && text == "settled in"
+        {
+            seen = Some(project);
+        }
+    }
+    assert_eq!(seen.as_deref(), Some("other"));
+    r.hub.shutdown().await;
+}

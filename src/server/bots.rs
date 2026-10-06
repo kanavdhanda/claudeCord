@@ -5,6 +5,7 @@
 use super::gateway::{Gateway, account_of, err, json_reply};
 use crate::control::seal;
 use crate::discord::api::Rest;
+use crate::hub::controls::MoveError;
 use crate::hub::{Chat, Effect, Human};
 use crate::protocol::{AdapterId, AgentSpec, is_slug};
 use crate::sync::Lock;
@@ -34,6 +35,10 @@ pub(crate) fn routes() -> Router<Gateway> {
         .route("/api/v1/projects", get(projects))
         .route("/api/v1/projects/{project}/target", put(set_target))
         .route("/api/v1/spawn", post(spawn))
+        .route(
+            "/api/v1/projects/{project}/agents/{name}/move",
+            post(move_agent),
+        )
 }
 
 /// What Discord says the bot's permissions are in one server (a number, as text), or None if it does not say.
@@ -559,6 +564,62 @@ async fn set_target(
             .await;
     }
     json_reply(StatusCode::OK, json!({"ok": true}))
+}
+
+#[derive(Deserialize)]
+struct MoveAsk {
+    to: String,
+}
+
+/// `POST /api/v1/projects/{project}/agents/{name}/move`: the signed-in owner moves a running agent to another of their projects, in place.
+async fn move_agent(
+    State(gw): State<Gateway>,
+    headers: HeaderMap,
+    Path((project, name)): Path<(String, String)>,
+    Json(b): Json<MoveAsk>,
+) -> Response {
+    let Some(a) = account_of(&gw, &headers) else {
+        return err(StatusCode::UNAUTHORIZED, "sign in first");
+    };
+    if !is_slug(&project) || !is_slug(&b.to) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "names use letters, digits, dots, dashes and underscores",
+        );
+    }
+    // Where the agent goes must show in Discord: a project nobody has placed has no channel to post in.
+    if gw.control.target(&a.id, &b.to).ok().flatten().is_none() {
+        return err(
+            StatusCode::CONFLICT,
+            &format!("{} has no Discord channel yet: place it first", b.to),
+        );
+    }
+    let Ok(Some(t)) = gw.registry.hub_of(&a.id) else {
+        return err(StatusCode::SERVICE_UNAVAILABLE, "your hub is not running");
+    };
+    let by = Human {
+        id: a.discord_id.clone(),
+        name: a.name.clone(),
+    };
+    let to = b.to.clone();
+    let out = t
+        .state
+        .handle
+        .call(
+            move |c, now| match c.move_agent(&by, &project, &name, &to, now) {
+                Ok((row, fx)) => (Ok(row.name), fx),
+                Err(MoveError::Denied(d)) => {
+                    (Err((StatusCode::FORBIDDEN, format!("{d:?}"))), vec![])
+                }
+                Err(MoveError::Refused(why)) => (Err((StatusCode::CONFLICT, why)), vec![]),
+            },
+        )
+        .await;
+    match out {
+        Some(Ok(name)) => json_reply(StatusCode::OK, json!({"ok": true, "agent": name})),
+        Some(Err((code, why))) => err(code, &why),
+        None => err(StatusCode::SERVICE_UNAVAILABLE, "your hub is not answering"),
+    }
 }
 
 #[derive(Deserialize)]

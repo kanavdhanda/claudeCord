@@ -56,6 +56,14 @@ pub fn definitions() -> Value {
         ),
         cmd("killall", "Stop every agent here (owner)", vec![]),
         cmd(
+            "move",
+            "Move an agent to another project (owner of both)",
+            vec![
+                opt("agent", STRING, "Which agent", true),
+                opt("project", STRING, "The project to move it to", true),
+            ],
+        ),
+        cmd(
             "clear",
             "Start over: one agent, or the whole chat",
             vec![
@@ -292,6 +300,20 @@ pub fn handle(
                     Err(d) => fail(d),
                 },
                 None => ("There is no agent in this project.".into(), vec![]),
+            }
+        }
+        "move" => {
+            let (name, to) = (get("agent").unwrap_or(""), get("project").unwrap_or(""));
+            if !crate::protocol::is_slug(to) {
+                return (
+                    "A project name is letters, digits, dots, dashes and underscores.".into(),
+                    vec![],
+                );
+            }
+            match core.move_agent(by, project, name, to, now) {
+                Ok((row, fx)) => (format!("{} moved to {to}.", row.name), fx),
+                Err(crate::hub::controls::MoveError::Denied(d)) => fail(d),
+                Err(crate::hub::controls::MoveError::Refused(why)) => (why, vec![]),
             }
         }
         "lead" => {

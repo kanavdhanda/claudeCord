@@ -484,6 +484,10 @@ pub enum HubFrame {
     /// word the update (it knows how it was installed). A machine that does not know this frame ignores it.
     #[serde(rename = "update")]
     Update { latest: String },
+    /// An agent of this machine now belongs to another project (a person moved it). Its id stays; the machine keeps the new project with it,
+    /// so what it receives and saves from here on is kept under that one.
+    #[serde(rename = "moved", rename_all = "camelCase")]
+    Moved { agent_id: String, project: String },
     /// Every frame a machine numbered (see `stamp_of`) up to and including `n` is on disk and will not be asked for again. Sent only
     /// after the change the frame caused is saved, so a machine that has the ack can forget the frame for good.
     #[serde(rename = "ack")]

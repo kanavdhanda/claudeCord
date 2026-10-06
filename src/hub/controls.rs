@@ -3,12 +3,180 @@
 //! operator. Stopping everything, spawning and changing the lead need an owner.
 
 use super::briefs;
-use super::core::HubCore;
+use super::core::{HubCore, Queued};
 use super::effects::{Chat, Effect, Persist};
 use super::model::*;
 use crate::protocol::{AgentSpec, AgentStatus, HubFrame};
 
+/// Why an agent could not be moved to another project.
+#[derive(Debug)]
+pub enum MoveError {
+    /// The caller may not, or the agent does not exist.
+    Denied(Denied),
+    /// The move itself is not possible, with the reason to show.
+    Refused(String),
+}
+
+impl From<Denied> for MoveError {
+    fn from(d: Denied) -> Self {
+        MoveError::Denied(d)
+    }
+}
+
 impl HubCore {
+    /// Moves a running agent, in place, from one project to another: the same agent and conversation, filed under the other project from now on.
+    /// An owner of both projects may. Afterwards it belongs to the new project alone: what is said in the old one no longer reaches it and what it
+    /// says goes to the new one's chat only. Its open tasks go back to the old project's lead (or are closed if there is none), its questions
+    /// there are cancelled, the lead role passes on if it had it, and it is briefed again on its new team.
+    pub fn move_agent(
+        &mut self,
+        by: &Human,
+        from: &str,
+        name: &str,
+        to: &str,
+        now: i64,
+    ) -> Result<(AgentRow, Vec<Effect>), MoveError> {
+        if from == to {
+            return Err(MoveError::Refused(format!("{name} is already in {to}.")));
+        }
+        self.require(from, &by.id, Role::Owner)?;
+        self.require(to, &by.id, Role::Owner)?;
+        let a = self
+            .find_by_name(from, name)
+            .cloned()
+            .ok_or(Denied::NotFound)?;
+        if self.find_by_name(to, &a.name).is_some() {
+            return Err(MoveError::Refused(format!(
+                "{to} already has an agent called {}: rename or stop one of them first.",
+                a.name
+            )));
+        }
+        if self.agents_of_project(to).len() >= super::core::MAX_AGENTS_PER_PROJECT {
+            return Err(MoveError::Refused(format!(
+                "{to} has no room for another agent."
+            )));
+        }
+        if !self.conns.contains_key(&a.node_name) {
+            return Err(MoveError::Refused(format!(
+                "{}'s machine ({}) is not connected, so it cannot be told about the move.",
+                a.name, a.node_name
+            )));
+        }
+        let mut fx = Vec::new();
+        let id = a.agent_id.clone();
+        // Out of the old project: its place in the roster, then the lead role if it held it, then what it was working on.
+        self.forget_agent(&id);
+        if a.is_lead {
+            self.hand_over_lead(from, &mut fx);
+        }
+        let new_owner = self
+            .agents_of_project(from)
+            .iter()
+            .find(|m| m.is_lead)
+            .map(|m| m.agent_id.clone());
+        let mut handed = 0;
+        for t in self.tasks.get_mut(from).into_iter().flatten() {
+            if t.to_agent == id && t.state != TaskState::Done {
+                handed += 1;
+                t.updated = now;
+                match &new_owner {
+                    Some(lead) => t.to_agent = lead.clone(),
+                    None => {
+                        t.state = TaskState::Done;
+                        t.summary = Some(format!("{} moved to {to}", a.name));
+                    }
+                }
+            }
+        }
+        self.cancel_asks_of(from, &id);
+        // Into the new one, as its lead if it has none.
+        let no_lead = !self.agents_of_project(to).iter().any(|m| m.is_lead);
+        let row = AgentRow {
+            project: to.to_string(),
+            is_lead: no_lead,
+            ..a.clone()
+        };
+        self.agents.insert(id.clone(), row.clone());
+        let members = self.by_project.entry(to.to_string()).or_default();
+        for m in members.iter() {
+            self.roster_dirty.insert(m.clone());
+        }
+        members.push(id.clone());
+        self.roster_dirty.insert(id.clone());
+        for m in self.by_project.get(from).cloned().unwrap_or_default() {
+            self.roster_dirty.insert(m);
+        }
+        // Nothing queued for it is from this project: what waited from the old one is dropped, and it is briefed again.
+        self.queues.remove(&id);
+        self.briefed.remove(&id);
+        fx.push(Effect::Persist(Persist::UpsertAgent(row.clone())));
+        if row.is_lead {
+            fx.push(Effect::Persist(Persist::SetLead {
+                project: to.into(),
+                agent_id: id.clone(),
+            }));
+        }
+        fx.push(Effect::Chat(Chat::EnsureProject(to.to_string())));
+        let who = self.label(from, by);
+        Self::audit(from, &who, format!("move {} to {to}", a.name), now, &mut fx);
+        Self::audit(
+            to,
+            &who,
+            format!("move {} from {from}", a.name),
+            now,
+            &mut fx,
+        );
+        let tasks_note = match handed {
+            0 => String::new(),
+            n => format!(
+                " Its {n} open task(s) went back to {}.",
+                match &new_owner {
+                    Some(_) => "the lead",
+                    None => "nobody (closed: no lead is left)",
+                }
+            ),
+        };
+        Self::notice(
+            from,
+            format!("{} moved to {to}.{tasks_note}", a.name),
+            false,
+            &mut fx,
+        );
+        Self::notice(
+            to,
+            format!("{} joined from {from}.", a.name),
+            false,
+            &mut fx,
+        );
+        self.send_to(
+            &row,
+            HubFrame::Moved {
+                agent_id: id.clone(),
+                project: to.to_string(),
+            },
+            &mut fx,
+        );
+        self.enqueue(
+            &id,
+            Queued {
+                from: "system".into(),
+                text: format!(
+                    "You moved from project {from} to project {to}. Everything before this was about {from}: its tasks and questions are closed for you, and you can no longer read or post there. From now on you work with {to}."
+                ),
+                thread: None,
+                reference: None,
+                task_id: None,
+                handoff: None,
+                wake: true,
+                at: now,
+            },
+        );
+        self.flush(&id, now, &mut fx);
+        Self::refresh(from, &mut fx);
+        Self::refresh(to, &mut fx);
+        Ok((row, fx))
+    }
+
     /// `/stop`: asks one agent's device to quit that agent. Returns whether the device was reachable.
     pub fn stop(
         &mut self,

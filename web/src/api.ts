@@ -64,6 +64,8 @@ export const api = {
   makeChannel: (bot: string, guild: string, name: string) =>
     post<Channel>(`/api/v1/bots/${bot}/guilds/${guild}/channels`, { name }),
   projects: () => get<Project[]>('/api/v1/projects'),
+  moveAgent: (project: string, name: string, to: string) =>
+    post<{ ok: boolean }>(`/api/v1/projects/${encodeURIComponent(project)}/agents/${encodeURIComponent(name)}/move`, { to }),
   place: (project: string, bot: string, guild: string, channel: string) =>
     call<{ ok: boolean }>('PUT', `/api/v1/projects/${encodeURIComponent(project)}/target`, { bot, guild, channel }),
   pick: (code: string) => get<{ folder: string; node: string; project?: string | null; collected?: boolean; result?: { ok: boolean; message: string } | null }>(`/api/v1/pick/${encodeURIComponent(code)}`),
