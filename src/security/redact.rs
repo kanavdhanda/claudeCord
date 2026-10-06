@@ -87,7 +87,7 @@ static RULES: LazyLock<Vec<Rule>> = LazyLock::new(|| {
         ),
         rule(
             "secret assignment",
-            r#"(?i)(?-u:\b)([A-Za-z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|PRIVATE_?KEY|CREDENTIALS?)[A-Za-z0-9_]*\s*[=:]\s*['"]?)([^\s'",;]{8,})"#,
+            r#"(?i)(?-u:\b)([A-Za-z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|PRIVATE_?KEY|CREDENTIALS?)[A-Za-z0-9_]*['"]?\s*[=:]\s*['"]?)([^\s'",;]{8,})"#,
             false,
             true,
         ),

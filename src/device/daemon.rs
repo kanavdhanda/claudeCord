@@ -1671,7 +1671,9 @@ impl State {
         let pol = match policy.as_str() {
             "plan" => Policy::Plan,
             "ask" => Policy::Ask,
-            _ => Policy::Autonomous,
+            "autonomous" => Policy::Autonomous,
+            // A typo must not quietly give the agent the most freedom.
+            other => return Resp::err(format!("unknown policy {other}: autonomous, plan or ask")),
         };
         let argv = match opts.command.clone().filter(|c| !c.is_empty()) {
             Some(c) => c,

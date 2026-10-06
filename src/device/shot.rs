@@ -80,7 +80,7 @@ fn cells(ansi: &str, rows: u16, cols: u16) -> Vec<Vec<Cell>> {
     let screen = parser.screen();
     let mut out = Vec::new();
     for r in 0..rows {
-        let mut row: Vec<Cell> = (0..cols)
+        let row: Vec<Cell> = (0..cols)
             .map(|c| match screen.cell(r, c) {
                 Some(x) => {
                     let (mut fg, mut bg) = (colour(x.fgcolor(), FG), colour(x.bgcolor(), BG));
@@ -106,22 +106,44 @@ fn cells(ansi: &str, rows: u16, cols: u16) -> Vec<Vec<Cell>> {
                 },
             })
             .collect();
-        let text: String = row.iter().map(|c| c.ch).collect();
-        let clean = crate::security::redact::redact(&text);
-        if !clean.found.is_empty() {
-            // Credentials were found in this row: its characters are replaced by the cleaned text (the colours stay where they were).
-            let plain: Vec<char> = clean.text.chars().collect();
-            let styles = row.clone();
-            row = (0..cols as usize)
-                .map(|i| Cell {
-                    ch: plain.get(i).copied().unwrap_or(' '),
-                    wide: false,
-                    skip: false,
-                    ..styles[i].clone()
-                })
-                .collect();
-        }
         out.push(row);
+    }
+    // The screen is cleaned as a whole: a credential can run over the end of a row (a full row goes on in the next one) or over several rows
+    // (a private key), and a row on its own would show the rest of it.
+    let mut text = String::new();
+    for (r, row) in out.iter().enumerate() {
+        let line: String = row.iter().map(|c| c.ch).collect();
+        if r + 1 < out.len() && row.last().is_some_and(|c| c.ch != ' ') {
+            text.push_str(&line);
+        } else {
+            text.push_str(line.trim_end());
+            text.push('\n');
+        }
+    }
+    let clean = crate::security::redact::redact(&text);
+    if clean.found.is_empty() {
+        return out;
+    }
+    // Something was found: every character is replaced by the cleaned text, laid out again in rows (the colours stay where they were).
+    let mut lines: Vec<Vec<char>> = Vec::new();
+    for l in clean.text.split('\n') {
+        let chars: Vec<char> = l.chars().collect();
+        if chars.is_empty() {
+            lines.push(chars);
+        } else {
+            lines.extend(chars.chunks(cols.max(1) as usize).map(<[char]>::to_vec));
+        }
+    }
+    let styles = out.clone();
+    for (r, row) in out.iter_mut().enumerate() {
+        for (i, cell) in row.iter_mut().enumerate() {
+            *cell = Cell {
+                ch: lines.get(r).and_then(|l| l.get(i)).copied().unwrap_or(' '),
+                wide: false,
+                skip: false,
+                ..styles[r][i].clone()
+            };
+        }
     }
     out
 }
@@ -327,5 +349,35 @@ mod tests {
         assert!(render("", 1000, 1000).is_none());
         assert!(render("", 3, 10).is_some());
         assert!(render("\x1b[38;2;1;2;3m\x1b[?1049h\x1b[999;999H日本語 😀", 4, 20).is_some());
+    }
+
+    fn shown(ansi: &str, rows: u16, cols: u16) -> String {
+        cells(ansi, rows, cols)
+            .iter()
+            .map(|r| {
+                r.iter()
+                    .map(|c| c.ch)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn a_credential_that_wraps_or_spans_rows_or_hides_in_escapes_is_gone() {
+        let hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        for (s, left_over) in [
+            (format!("{{\n  \"token\": \"{hex}\"\n}}"), "89abcdef01"),
+            ("sk-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnop12345678".into(), "bcdefghijk"),
+            ("-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\nSECRETBODYLINE2xxxxxxxxxxxxxxxx\n-----END PRIVATE KEY-----".into(), "SECRETBODY"),
+            ("sk-ABCDEFGHIJ\x1b[31mKLMNOPQRSTUVWXYZabcdef".into(), "KLMNOPQRST"),
+            ("Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123".into(), "ijklmnop"),
+            ("日本語 ghp_abcdefghijklmnopqrstuvwxyz0123456789ABCD".into(), "tuvwxyz01"),
+        ] {
+            let out = shown(&s, 8, 30);
+            assert!(!out.contains(left_over), "{out}");
+        }
     }
 }

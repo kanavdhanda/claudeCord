@@ -1252,6 +1252,33 @@ async fn an_agent_whose_program_is_missing_or_whose_folder_is_gone_is_refused_at
     r.hub.shutdown().await;
 }
 
+#[tokio::test]
+async fn a_misspelt_policy_is_refused_not_turned_into_autonomous() {
+    let r = rig("badpolicy").await;
+    let bad = ipc::call(
+        &r.dir,
+        &Req::Up {
+            project: "demo".into(),
+            name: Some("heron".into()),
+            adapter: "claude".into(),
+            model: None,
+            role: None,
+            cwd: r.project.to_string_lossy().into(),
+            policy: "plam".into(),
+            rows: 24,
+            cols: 80,
+            opts: UpOpts {
+                command: Some(vec!["cat".into()]),
+                ..Default::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+    assert!(!bad.ok && bad.msg.contains("unknown policy"), "{}", bad.msg);
+    r.hub.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_start_up_question_without_numbers_reaches_a_person_too_and_nothing_is_typed_for_them() {
     let r = rig_with("trustplain", TRUST_DIALOG_PLAIN).await;

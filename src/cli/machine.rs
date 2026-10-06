@@ -218,6 +218,19 @@ fn expect_ok(r: Resp) -> Result<Resp, String> {
 /// current folder, writes the team guide into AGENTS.md, opens the dashboard if the project has no Discord channel yet, and opens the agent's terminal
 /// unless asked not to. Nothing else: no handoff, no restarts, no shared folders.
 pub async fn start(a: StartArgs) -> Result<(), String> {
+    // Before anything is asked of the person (signing in, choosing a project on the dashboard), not after.
+    if !["claude", "agy", "codex"].contains(&a.adapter.as_str()) {
+        return Err(format!(
+            "unknown agent type {}: claude, agy or codex",
+            a.adapter
+        ));
+    }
+    if !["autonomous", "plan", "ask"].contains(&a.policy.as_str()) {
+        return Err(format!(
+            "unknown policy {}: autonomous, plan or ask",
+            a.policy
+        ));
+    }
     ensure_login().await?;
     let dir = home_dir();
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
@@ -493,7 +506,7 @@ pub async fn stop(agent: Option<String>, yes: bool) -> Result<(), String> {
             },
         )
         .await
-        .map_err(|e| e.to_string())?,
+        .map_err(|_| "no daemon is running here".to_string())?,
     )?;
     println!("stopped {agent}");
     Ok(())
