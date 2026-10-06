@@ -1779,3 +1779,84 @@ async fn discord_spawn_can_name_a_saved_startup_command_with_autocomplete_and_re
     );
     gw.shutdown().await;
 }
+
+
+/// One machine asks for a project to be picked, and says what it got back.
+async fn ask_pick(base: &str, token: &str) -> u16 {
+    client()
+        .post(format!("{base}/api/device/pick"))
+        .bearer_auth(token)
+        .json(&json!({"folder": "shop"}))
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .as_u16()
+}
+
+#[tokio::test]
+async fn one_account_cannot_use_up_the_waiting_places_for_everyone_elses_project_picks() {
+    let (_gw, base) = rig().await;
+    let (alice, bob) = (sign_in(&base, "1").await, sign_in(&base, "2").await);
+    let (a_tok, b_tok) = (
+        enroll(&base, &alice, "mac").await,
+        enroll(&base, &bob, "mac").await,
+    );
+    // A machine of alice's asks again and again (a loop, a bug, a hostile token) until the hub says no.
+    let mut refused = false;
+    for _ in 0..600 {
+        if ask_pick(&base, &a_tok).await == 429 {
+            refused = true;
+            break;
+        }
+    }
+    assert!(refused, "asking is not limited at all");
+    assert_eq!(
+        ask_pick(&base, &b_tok).await,
+        200,
+        "bob's machine must still get a place while alice's are full"
+    );
+}
+
+/// What each account's hub costs this process in files, threads and memory. Run by hand with
+///   CC_TENANTS=300 cargo test --release --test it tenants_cost -- --ignored --nocapture
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "a measurement, not a check: prints files, threads and memory per account (CC_TENANTS accounts, default 100)"]
+async fn tenants_cost() {
+    let n: usize = std::env::var("CC_TENANTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100);
+    let (_gw, base) = rig().await;
+    let before = (
+        super::procs::fds(),
+        super::procs::threads(),
+        super::procs::rss_kb(),
+    );
+    let t = std::time::Instant::now();
+    for i in 0..n {
+        let s = sign_in(&base, &(1000 + i).to_string()).await;
+        assert_eq!(get_json(&base, "/api/v1/state", &s).await.0, 200);
+        if (i + 1) % (n / 5).max(1) == 0 {
+            println!(
+                "{:>5} accounts: {} files, {} threads, {} MB, {:?}",
+                i + 1,
+                super::procs::fds(),
+                super::procs::threads(),
+                super::procs::rss_kb() / 1024,
+                t.elapsed()
+            );
+        }
+    }
+    let after = (
+        super::procs::fds(),
+        super::procs::threads(),
+        super::procs::rss_kb(),
+    );
+    println!(
+        "per account: {:.1} files, {:.2} threads, {:.0} KB",
+        (after.0 - before.0) as f64 / n as f64,
+        (after.1 - before.1) as f64 / n as f64,
+        (after.2 - before.2) as f64 / n as f64
+    );
+}

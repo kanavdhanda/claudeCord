@@ -93,6 +93,8 @@ pub(crate) struct Pick {
 
 /// How long a pick waits for the person before it is forgotten.
 const PICK_TTL_MS: i64 = 60 * 60_000;
+/// Most picks waiting at once for one account, so one account's machines cannot fill the places everyone shares.
+const PICKS_PER_ACCOUNT: usize = 20;
 
 /// A running gateway.
 pub struct GatewayHandle {
@@ -372,7 +374,9 @@ async fn pick_start(
     );
     let mut picks = gw.picks.locked();
     picks.retain(|_, p| now - p.at < PICK_TTL_MS);
-    if picks.len() >= 500 {
+    if picks.len() >= 500
+        || picks.values().filter(|p| p.tenant == tenant).count() >= PICKS_PER_ACCOUNT
+    {
         return err(
             StatusCode::TOO_MANY_REQUESTS,
             "too many waiting, try again in a few minutes",
