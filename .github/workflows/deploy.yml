@@ -1,45 +1,96 @@
 name: deploy
 
-# Updates the hub on your server and checks it is ready. The server builds the image itself from a clone of this repository (nothing is
-# published to a registry). If the new version does not become ready, the one that was running is put back. Run it by hand
-# (Actions > deploy > Run workflow) with a git ref: a release tag such as v0.2.1, a branch, or a commit.
-# Set up once: secrets DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY, DEPLOY_KNOWN_HOSTS; variables HUB_URL (https://claudecord.kdhanda.com) and
-# DEPLOY_DIR (the clone of the repository on the server, such as /opt/claudeCord), with deploy/compose.yml already set up there.
+# Continuous deployment of the HUB (the server). It runs by itself after the tests (rust.yml) pass on main, and also by hand with any git ref.
+# The server builds the image itself from its clone of this repository (nothing goes to a registry), checks /readyz, and puts the previous
+# version back if the new one does not become ready.
+#
+# It deploys only when something the hub is made of changed. Changes that only touch the machine side (the `claudecord` command and daemon
+# shipped to npm and PyPI by release.yml: src/device, src/agents, the machine commands, packaging, docs) do not need a deploy and are skipped.
+# Code both sides share (the protocol, security) does deploy. If a newer commit has arrived by the time this runs, that commit deploys itself
+# and this one stops, so an older version never replaces a newer one.
+#
+# SET UP ONCE (Settings > Secrets and variables > Actions; the `production` environment can also hold them and require your approval):
+#   secrets    DEPLOY_HOST          the server's address
+#              DEPLOY_USER          the login on the server (it must be allowed to run `docker`)
+#              DEPLOY_SSH_KEY       the PRIVATE key whose public half is in that user's ~/.ssh/authorized_keys on the server
+#              DEPLOY_KNOWN_HOSTS   the server's host key line(s):  ssh-keyscan -t ed25519 <host>   (pins the server, so no one can pose as it)
+#   variables  DEPLOY_DIR           the clone of this repository on the server, such as /opt/claudeCord (deploy/compose.yml set up inside it)
+#              HUB_URL              https://claudecord.kdhanda.com
+# Nothing deploys until DEPLOY_DIR is set.
 on:
+  workflow_run:
+    workflows: [rust]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       ref:
-        description: Git ref to run (v0.2.1, main, or a commit)
+        description: Git ref to run (a release tag, a branch, or a commit)
         required: true
         default: main
 
-concurrency: deploy
+concurrency:
+  group: deploy
+  cancel-in-progress: false
 
 jobs:
   deploy:
-    if: vars.DEPLOY_DIR != ''
+    if: vars.DEPLOY_DIR != '' && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     environment: production
+    env:
+      REF: ${{ inputs.ref || github.event.workflow_run.head_sha }}
+      AUTO: ${{ github.event_name == 'workflow_run' }}
+      DIR: ${{ vars.DEPLOY_DIR }}
+      HUB_URL: ${{ vars.HUB_URL }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.ref || github.event.workflow_run.head_sha }}
+
+      # ---- HOW TO REACH THE SERVER: edit this step (and the host, user and key secrets) to match your setup. Everything below uses `ssh_`. ----
       - name: Trust only the server we pinned
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id; chmod 600 ~/.ssh/id
           echo "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
-      - name: Build on the server, restart, check, roll back on failure
-        env:
-          REF: ${{ inputs.ref }}
-          DIR: ${{ vars.DEPLOY_DIR }}
+          cat > ~/ssh_ <<'EOF'
+          #!/usr/bin/env bash
+          exec ssh -i ~/.ssh/id -o StrictHostKeyChecking=yes -o ConnectTimeout=15 "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" "$@"
+          EOF
+          chmod +x ~/ssh_
+      # ---------------------------------------------------------------------------------------------------------------------------------------
+
+      - name: Is there anything for the hub to deploy?
+        id: decide
         run: |
-          ssh_ () { ssh -i ~/.ssh/id -o StrictHostKeyChecking=yes "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" "$@"; }
+          if [ "$AUTO" = true ]; then
+            git fetch -q origin main
+            if [ "$(git rev-parse origin/main)" != "$REF" ]; then
+              echo "a newer commit exists on main; it will deploy itself"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            deployed=$(~/ssh_ "cd '$DIR' && git rev-parse HEAD" || true)
+            if [ -n "$deployed" ] && changed=$(git diff --name-only "$deployed" "$REF" 2>/dev/null); then
+              hub=$(echo "$changed" | grep -vE '^(.*\.md|site/|deploy/baremetal/|src/device/|src/agents/|src/cli/machine\.rs|src/cli/verbs\.rs|npm/|pyproject\.toml|scripts/|\.github/workflows/release\.yml)' || true)
+              if [ -z "$hub" ]; then
+                echo "only the machine side changed since $deployed; nothing for the hub"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0
+              fi
+            fi
+          fi
+          echo "go=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build on the server, restart, check, roll back on failure
+        if: steps.decide.outputs.go == 'true'
+        run: |
           # The running image is kept as claudecord:previous, and the commit it came from in .previous, so a failed deploy can put it back.
-          ssh_ "set -e; cd '$DIR' && git rev-parse HEAD > .previous && { docker tag claudecord:local claudecord:previous 2>/dev/null || true; } \
+          ~/ssh_ "set -e; cd '$DIR' && git rev-parse HEAD > .previous && { docker tag claudecord:local claudecord:previous 2>/dev/null || true; } \
             && git fetch --tags origin && git checkout --detach '$REF' && cd deploy && docker compose up -d --build"
-          for i in $(seq 1 20); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "${{ vars.HUB_URL }}/readyz" || true)
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$HUB_URL/readyz" || true)
             [ "$code" = "200" ] && { echo "ready after $i checks"; exit 0; }
-            sleep 3
+            sleep 4
           done
           echo "the new version never became ready, putting the previous one back"
-          ssh_ "set -e; cd '$DIR' && git checkout --detach \$(cat .previous) && docker tag claudecord:previous claudecord:local && cd deploy && docker compose up -d --no-build"
+          ~/ssh_ "set -e; cd '$DIR' && git checkout --detach \$(cat .previous) && docker tag claudecord:previous claudecord:local && cd deploy && docker compose up -d --no-build"
           exit 1

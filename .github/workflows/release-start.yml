@@ -1,0 +1,35 @@
+name: release-start
+
+# Start a release from GitHub instead of from your own machine: Actions > release-start > Run workflow > type the version (such as 0.2.4).
+# It runs scripts/release.sh, the same command you would run locally, so the same safety checks apply (newer version, newest tests on main
+# passed, nothing but documentation changed since). That bumps the version in Cargo.toml, commits, tags and pushes; then it starts release.yml
+# on the new tag, which builds every platform and publishes to npm and PyPI. (A tag pushed by a workflow does not start other workflows
+# by itself, which is why this asks for release.yml explicitly.)
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The new version, such as 0.2.4
+        required: true
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency: release-start
+
+jobs:
+  start:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - run: scripts/release.sh "${{ inputs.version }}"
+      - run: gh workflow run release.yml --ref "v${{ inputs.version }}"
