@@ -92,7 +92,13 @@ pub async fn run(cfg: &Config, opts: &LinkOpts) -> Vec<Check> {
     let mut ws: Ws = match connect_detailed(&cfg.connect_url(), &cfg.token, opts).await {
         Ok(ws) => ws,
         Err(e) => {
-            out.push(check("connect", false, e));
+            // A refused token is the hub not knowing this machine any more: say how to fix it, not only what the handshake said.
+            let hint = if e.contains("401") {
+                " (the hub does not recognise this machine's login; approve it again with: claudecord login)"
+            } else {
+                ""
+            };
+            out.push(check("connect", false, format!("{e}{hint}")));
             return out;
         }
     };

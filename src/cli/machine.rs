@@ -507,9 +507,9 @@ async fn request_pick(
         return Err(PickError::NoPage);
     }
     if !asked.status().is_success() {
-        return Err(PickError::Other(format!(
-            "{base} refused the request ({})",
-            asked.status()
+        return Err(PickError::Other(enroll::refusal(
+            &base,
+            asked.status().as_u16(),
         )));
     }
     let v: serde_json::Value = asked
