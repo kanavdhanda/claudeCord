@@ -121,7 +121,7 @@ jobs:
           path: dist
 
   # Every program that gets published must have the hub address built in. 0.2.4's wheels were built without it and sent people to the placeholder
-  # claudecord.example.com. This runs on every build (not only tags), so a trial run on main shows it too.
+  # claudecord.example.com (which still appears in --help examples, so the check looks for the real address, not the absence of the placeholder). This runs on every build (not only tags), so a trial run on main shows it too.
   address:
     needs: [build, wheels]
     runs-on: ubuntu-latest
@@ -139,7 +139,6 @@ jobs:
               *.whl) look() { unzip -p "$f" '*claudecord*'; } ;;
               *) look() { cat "$f"; } ;;
             esac
-            if look | grep -aq "claudecord.example.com"; then echo "$f has the placeholder hub address"; exit 1; fi
             look | grep -aq "$want" || { echo "$f does not contain $want"; exit 1; }
             echo "ok  $f"
           done

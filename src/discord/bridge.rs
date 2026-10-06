@@ -194,7 +194,7 @@ async fn run(handle: HubHandle, mut chat: broadcast::Receiver<Chat>, cfg: Bridge
     };
     let _ = kv.uptime_set(&component, crate::uptime::State::Down, crate::now_ms());
     let (ev_tx, mut events) = mpsc::channel(256);
-    let _gateway = gateway::spawn(
+    let gateway_task = gateway::spawn(
         rest.clone(),
         GatewayOpts {
             token: cfg.token.clone(),
@@ -203,6 +203,8 @@ async fn run(handle: HubHandle, mut chat: broadcast::Receiver<Chat>, cfg: Bridge
         },
         ev_tx,
     );
+    // The gateway connection ends with the bridge: an aborted bridge must not leave a second connection to Discord running.
+    let _gateway = crate::task::AbortOnDrop::new(&gateway_task);
     let mut b = Bridge {
         scope: cfg.scope.clone(),
         owned: Default::default(),

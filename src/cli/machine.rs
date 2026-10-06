@@ -868,43 +868,10 @@ async fn pick_and_attach(rows: &[serde_json::Value], with_new: bool) -> Result<(
         .map_err(|e| e.to_string())??;
     match picked {
         Some(i) if i < names.len() => attach(&names[i]).await,
-        Some(i) => {
-            let mut a = default_start_args();
-            a.pick = i > names.len();
-            let programs = [
-                ("claude", "Claude Code"),
-                ("codex", "OpenAI Codex"),
-                ("agy", "Antigravity"),
-            ];
-            let labels: Vec<String> = programs
-                .iter()
-                .map(|(id, name)| format!("{id:8} {name}"))
-                .collect();
-            let Some(p) = tokio::task::spawn_blocking(move || {
-                pick_with_keys("Which agent program?", &labels, 0)
-            })
-            .await
-            .map_err(|e| e.to_string())??
-            else {
-                return Ok(());
-            };
-            a.adapter = programs[p].0.into();
-            // Both can be left empty: the name is then made up (or chosen on the dashboard), and the agent has no role.
-            // A name an agent here already has is refused now, not after the role has been typed too (ids are project/name).
-            a.name = loop {
-                let name = ask_line("Agent name (Enter for a random one): ");
-                match name.as_deref() {
-                    Some(n) if names.iter().any(|id| id.rsplit('/').next() == Some(n)) => {
-                        println!(
-                            "{n} is already running here; pick another name, or Enter for a random one."
-                        );
-                    }
-                    _ => break name,
-                }
-            };
-            a.role = ask_line("Role, e.g. lead, reviewer, tests (Enter for none): ");
-            start(a).await
-        }
+        Some(i) => match new_agent_args(i > names.len(), &names).await? {
+            Some(a) => start(a).await,
+            None => Ok(()),
+        },
         None => Ok(()),
     }
 }
@@ -1270,12 +1237,97 @@ fn confirm(rows: &[serde_json::Value]) -> bool {
     std::io::stdin().lock().read_line(&mut line).is_ok() && line.trim().eq_ignore_ascii_case("y")
 }
 
-/// Asks one question on the terminal. An empty answer is None.
+/// What a new agent is asked on the terminal. When the dashboard will open (the folder has no project yet, or `--pick`) it asks for the agent's
+/// name and program itself, so only the role is asked here: nothing is typed twice. Otherwise the program, name and role are asked here.
+/// None means the person backed out (Esc, or end of input).
+async fn new_agent_args(pick: bool, running: &[String]) -> Result<Option<StartArgs>, String> {
+    let mut a = default_start_args();
+    a.pick = pick;
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let dashboard = pick || crate::device::config::project_of_folder(&home_dir(), &cwd).is_none();
+    if dashboard {
+        println!("The name and program of the agent are chosen on the dashboard that opens next.");
+    } else {
+        let programs = [
+            ("claude", "Claude Code"),
+            ("codex", "OpenAI Codex"),
+            ("agy", "Antigravity"),
+        ];
+        let labels: Vec<String> = programs
+            .iter()
+            .map(|(id, name)| format!("{id:8} {name}"))
+            .collect();
+        let Some(p) =
+            tokio::task::spawn_blocking(move || pick_with_keys("Which agent program?", &labels, 0))
+                .await
+                .map_err(|e| e.to_string())??
+        else {
+            return Ok(None);
+        };
+        a.adapter = programs[p].0.into();
+        // A name an agent here already has (ids are project/name), or one the hub would refuse, is turned down now, not after the role too.
+        a.name = loop {
+            let Some(name) = ask_line("Agent name (Enter for a random one): ") else {
+                return Ok(None);
+            };
+            if name.is_empty() {
+                break None;
+            }
+            if !valid_name(&name) {
+                println!(
+                    "A name is letters, digits, dots, dashes and underscores, up to 50, starting with a letter or digit."
+                );
+            } else if running
+                .iter()
+                .any(|id| id.rsplit('/').next() == Some(name.as_str()))
+            {
+                println!(
+                    "{name} is already running here; pick another name, or Enter for a random one."
+                );
+            } else {
+                break Some(name);
+            }
+        };
+    }
+    let Some(role) = ask_line("Role, e.g. lead, reviewer, tests (Enter for none): ") else {
+        return Ok(None);
+    };
+    a.role = Some(role).filter(|r| !r.is_empty());
+    Ok(Some(a))
+}
+
+/// The same rule as the dashboard's name boxes.
+fn valid_name(n: &str) -> bool {
+    n.len() <= 50
+        && n.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && n.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// Asks one question on the terminal. An empty answer is Some(""); None means there is no more input (Ctrl-D), so the person backed out.
 fn ask_line(question: &str) -> Option<String> {
     use std::io::{BufRead, Write};
     print!("{question}");
     let _ = std::io::stdout().flush();
     let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line).ok()?;
-    Some(line.trim().to_string()).filter(|l| !l.is_empty())
+    match std::io::stdin().lock().read_line(&mut line) {
+        Ok(0) | Err(_) => None,
+        Ok(_) => Some(line.trim().to_string()),
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::valid_name;
+
+    #[test]
+    fn a_name_follows_the_dashboards_rule() {
+        assert!(valid_name("thinker") && valid_name("a.b_c-1"));
+        assert!(
+            !valid_name("")
+                && !valid_name("-x")
+                && !valid_name("two words")
+                && !valid_name(&"a".repeat(51))
+        );
+    }
 }

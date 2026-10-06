@@ -7,8 +7,14 @@
 use std::future::Future;
 use std::time::Duration;
 
-/// Aborts the task it was made for when dropped.
-struct AbortOnDrop(tokio::task::AbortHandle);
+/// Aborts the task it was made for when dropped (a plain `JoinHandle` only lets go of its task when dropped, and the task runs on).
+pub struct AbortOnDrop(tokio::task::AbortHandle);
+
+impl AbortOnDrop {
+    pub fn new<T>(task: &tokio::task::JoinHandle<T>) -> Self {
+        Self(task.abort_handle())
+    }
+}
 
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {

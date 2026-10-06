@@ -387,3 +387,30 @@ async fn aborting_a_supervised_task_ends_the_task_it_runs() {
         "the task kept running after its supervisor was aborted"
     );
 }
+
+#[tokio::test]
+async fn a_task_held_by_abort_on_drop_ends_when_its_holder_goes() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    };
+    let beats = Arc::new(AtomicU32::new(0));
+    let b = beats.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            b.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    });
+    let held = claudecord::task::AbortOnDrop::new(&task);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    drop(held);
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    let after = beats.load(Ordering::SeqCst);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(
+        beats.load(Ordering::SeqCst),
+        after,
+        "the task ran on after its holder was dropped"
+    );
+}
