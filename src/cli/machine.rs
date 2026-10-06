@@ -1257,7 +1257,8 @@ async fn new_agent_args(pick: bool, running: &[String]) -> Result<Option<StartAr
     let mut a = default_start_args();
     a.pick = pick;
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let dashboard = pick || crate::device::config::project_of_folder(&home_dir(), &cwd).is_none();
+    let project = crate::device::config::project_of_folder(&home_dir(), &cwd);
+    let dashboard = pick || project.is_none();
     if dashboard {
         println!("The name and program of the agent are chosen on the dashboard that opens next.");
     } else {
@@ -1290,9 +1291,9 @@ async fn new_agent_args(pick: bool, running: &[String]) -> Result<Option<StartAr
                 println!(
                     "A name is letters, digits, dots, dashes and underscores, up to 50, starting with a letter or digit."
                 );
-            } else if running
-                .iter()
-                .any(|id| id.rsplit('/').next() == Some(name.as_str()))
+            } else if project
+                .as_ref()
+                .is_some_and(|p| running.contains(&format!("{p}/{name}")))
             {
                 println!(
                     "{name} is already running here; pick another name, or Enter for a random one."
