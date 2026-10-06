@@ -30,7 +30,65 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 
 /// The short standing instruction added to every agent: the verbs it has and the one rule about replies.
-pub const RULES: &str = "Team chat is the shell command claudecord: say <text> (FYI), ask <question>, assign <agent> <task>, done <id> <summary>, dump (save state), team (who else is here and what they do), send <file>. Your say while you work on a task goes to that task's thread by itself; ask, done and report go to the main chat. Plain say is FYI: @name someone to need a reply.";
+/// The last lines of a terminal screen, for the chat: blank lines at the end dropped, secrets removed, at most about 1500 characters.
+pub fn shot(screen: &str) -> String {
+    let lines: Vec<&str> = screen.lines().map(str::trim_end).collect();
+    let end = lines
+        .iter()
+        .rposition(|l| !l.is_empty())
+        .map_or(0, |i| i + 1);
+    let from = end.saturating_sub(25);
+    let text = lines[from..end].join("\n");
+    let text = crate::security::redact::redact(&text).text;
+    let skip = text.chars().count().saturating_sub(1500);
+    text.chars().skip(skip).collect()
+}
+
+/// Received files are kept this long, and this much of them at most (the oldest go first).
+const FILES_KEEP_MS: i64 = 3 * 24 * 3_600_000;
+const FILES_KEEP_BYTES: u64 = 200 * 1024 * 1024;
+
+/// Removes the files in `dir` older than `max_age_ms`, then the oldest ones until what is left fits in `max_bytes`.
+fn tidy_files(dir: &std::path::Path, max_age_ms: i64, max_bytes: u64) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = rd
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let m = e.metadata().ok()?;
+            m.is_file()
+                .then(|| (m.modified().unwrap_or(now), m.len(), e.path()))
+        })
+        .collect();
+    files.sort_by_key(|f| f.0);
+    let mut total: u64 = files.iter().map(|f| f.1).sum();
+    for (at, len, path) in files {
+        let old = now
+            .duration_since(at)
+            .is_ok_and(|d| d.as_millis() as i64 > max_age_ms);
+        if (old || total > max_bytes) && std::fs::remove_file(&path).is_ok() {
+            total -= len;
+        }
+    }
+}
+
+/// The first input of every agent, whatever its program: the team rules, once, as a message from the system, so nothing depends on a program's
+/// own way of taking instructions. It asks for no reply, so it costs one short turn.
+fn intro(spec: &AgentSpec) -> Option<Delivery> {
+    Some(Delivery {
+        from: "claudecord".into(),
+        text: format!(
+            "You are {} in project {}. {RULES} Do not answer this message; wait for the next one.",
+            spec.name, spec.project
+        ),
+        thread: None,
+        msg_id: None,
+    })
+}
+
+pub const RULES: &str = "Team chat is the shell command claudecord: say <text>, ask <question>, assign <agent> <task>, done <id> <summary>, dump (save state), team (who else is here), send <file>. Answer people with say: just the words, even \"on it\". For several lines pipe them in: say - <<'EOF'. Put @theirname before a person's name only when you need their attention; never @ yourself. @agentname addresses ANOTHER agent, in a thread of its own, so keep it short and only when you need them. Ask a person only what you cannot decide yourself, and ask once. Your say on a task goes to its thread; ask, done and report go to the main chat.";
 
 /// Choices that tests change.
 #[derive(Clone)]
@@ -52,6 +110,8 @@ pub struct Options {
     pub backend: Backend,
     /// Answer start-up dialogs (such as "trust this folder") on its own. Off by default: a person decides.
     pub auto_startup: bool,
+    /// Exit this long after the last agent ends, so the machine is only connected while something is running. None keeps it running.
+    pub idle_exit: Option<Duration>,
 }
 
 impl Default for Options {
@@ -68,6 +128,7 @@ impl Default for Options {
             extra_path: Vec::new(),
             backend: Backend::from_env(),
             auto_startup: false,
+            idle_exit: None,
             max_agents: std::env::var("CLAUDECORD_MAX_AGENTS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -160,11 +221,18 @@ struct Agent {
     held: bool,
     asks: u32,
     shown_prompt: Option<String>,
+    /// When a message that wants an answer was handed over, until the agent answers with any command of its own.
+    awaiting: Option<i64>,
+    /// When a picture of this terminal was last sent by itself (not asked for): at most one every five minutes.
+    shot_at: i64,
+    /// The screen as of the last change and since when: an agent that looks the same for minutes while "working" is stuck.
+    still: (u64, i64, bool),
     deciding: Option<AwaitingDecision>,
     limit_reported: bool,
     /// Internal errors in a row while looking at this agent (see `agent_faulted`).
     faults: u32,
-    files: HashMap<String, PathBuf>,
+    /// Files being received: where they are being written, and the chunk number expected next.
+    files: HashMap<String, (PathBuf, u64)>,
 }
 
 /// A request from the command line, with where to send the answer.
@@ -174,8 +242,12 @@ struct State {
     dir: PathBuf,
     /// Folders this machine has started agents in, by project, so the hub can start more there later. The hub never
     /// chooses a folder: only one the person already used on this machine.
-    folders: HashMap<String, PathBuf>,
+    folders: HashMap<String, Vec<PathBuf>>,
     link: Link,
+    /// Since when no agent has been running, so the daemon can go away by itself (see `Options::idle_exit`).
+    idle_since: Option<i64>,
+    /// When the received files were last tidied.
+    tidied: i64,
     agents: HashMap<String, Agent>,
     /// Recently seen delivery ids, so a message the hub sent twice is pasted once.
     seen: VecDeque<String>,
@@ -212,12 +284,11 @@ pub async fn run(cfg: Config, dir: PathBuf, opts: Options) -> std::io::Result<()
             tokio::spawn(serve(stream, call_tx.clone(), attach_calls.clone()));
         }
     });
-    let folders = std::fs::read_to_string(dir.join("projects.json"))
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default();
+    let folders = super::config::read_projects(&dir).into_iter().collect();
     let mut st = State {
         folders,
+        idle_since: None,
+        tidied: 0,
         dir,
         link,
         agents: HashMap::new(),
@@ -403,6 +474,12 @@ impl State {
                 })
                 .await;
         }
+        // The full list last: whatever else the hub remembers of this machine is not running.
+        self.link
+            .send(NodeFrame::AgentsHere {
+                agent_ids: self.agents.keys().cloned().collect(),
+            })
+            .await;
     }
 
     /// Something from the hub.
@@ -425,6 +502,9 @@ impl State {
                     }
                 }
                 if let Some(a) = self.agents.get_mut(&agent_id) {
+                    if from != "system" {
+                        a.awaiting = Some(crate::now_ms());
+                    }
                     a.queue.push(Delivery {
                         from,
                         text,
@@ -454,6 +534,12 @@ impl State {
                 allow,
             } => self.decide(&agent_id, &perm_id, allow),
             HubFrame::Stop { agent_id } => self.stop(&agent_id).await,
+            HubFrame::Screen { agent_id } => self.send_screen(&agent_id, "asked for").await,
+            HubFrame::Restart { agent_id } => {
+                let _ = self
+                    .respawn(&agent_id, crate::now_ms(), "the chat was cleared")
+                    .await;
+            }
             HubFrame::Killall { project } => {
                 let ids: Vec<String> = self
                     .agents
@@ -486,33 +572,72 @@ impl State {
                 seq,
                 last,
                 data,
+                sha256,
                 ..
-            } => self.on_file(&agent_id, &transfer_id, &from, &name, seq, last, &data),
+            } => self.on_file(
+                &agent_id,
+                &transfer_id,
+                &from,
+                &name,
+                seq,
+                last,
+                &data,
+                sha256,
+            ),
             HubFrame::Spawn { agent } => {
-                // Only in a folder this machine already knows for the project. Otherwise there is nothing safe to start.
-                if let Some(cwd) = self.folders.get(&agent.project).cloned() {
-                    let r = self
-                        .up_agent(
-                            agent.project.clone(),
-                            Some(agent.name.clone()),
-                            agent.adapter.as_str().into(),
-                            agent.model.clone(),
-                            agent.role.clone(),
-                            cwd.to_string_lossy().into(),
-                            "ask".into(),
-                            30,
-                            100,
-                            UpOpts::default(),
-                        )
-                        .await;
-                    if !r.ok {
-                        crate::warn!(
-                            "daemon",
-                            "{}: spawn from the hub failed: {}",
-                            agent.agent_id,
-                            r.msg
-                        );
+                // Only in a folder this machine already knows for the project (the hub never chooses a folder). A folder with no agent in it
+                // is used first; if every known folder is busy, the first one is used with its own git worktree.
+                let folders = self
+                    .folders
+                    .get(&agent.project)
+                    .cloned()
+                    .unwrap_or_default();
+                let free = folders
+                    .iter()
+                    .find(|f| !self.agents.values().any(|a| &a.origin == *f))
+                    .cloned();
+                let pick = free
+                    .map(|f| (f, false))
+                    .or_else(|| folders.first().cloned().map(|f| (f, true)));
+                let result = match pick {
+                    None => Err(format!(
+                        "this machine has no folder for project {} yet. Run `claudecord start` in one once",
+                        agent.project
+                    )),
+                    Some((cwd, worktree)) => {
+                        let r = self
+                            .up_agent(
+                                agent.project.clone(),
+                                Some(agent.name.clone()),
+                                agent.adapter.as_str().into(),
+                                agent.model.clone(),
+                                agent.role.clone(),
+                                cwd.to_string_lossy().into(),
+                                "ask".into(),
+                                30,
+                                100,
+                                UpOpts {
+                                    worktree,
+                                    ..UpOpts::default()
+                                },
+                            )
+                            .await;
+                        if r.ok { Ok(()) } else { Err(r.msg) }
                     }
+                };
+                if let Err(reason) = result {
+                    crate::warn!(
+                        "daemon",
+                        "{}: spawn from the hub failed: {reason}",
+                        agent.agent_id
+                    );
+                    self.link
+                        .send(NodeFrame::SpawnFailed {
+                            project: agent.project.clone(),
+                            name: agent.name.clone(),
+                            reason: reason.chars().take(300).collect(),
+                        })
+                        .await;
                 }
             }
             HubFrame::Welcome { .. } | HubFrame::Error { .. } | HubFrame::Ack { .. } => {}
@@ -531,6 +656,7 @@ impl State {
         seq: u64,
         last: bool,
         data: &str,
+        sha256: Option<String>,
     ) {
         let Some(a) = self.agents.get_mut(agent_id) else {
             return;
@@ -539,25 +665,82 @@ impl State {
         if std::fs::create_dir_all(&dir).is_err() {
             return;
         }
-        let path = a
+        // What is kept here is not for the project's history: git is told to ignore the whole `.claudecord` folder.
+        let _ = std::fs::write(a.cwd.join(".claudecord/.gitignore"), "*\n");
+        let done = dir.join(format!("{}-{}", safe_name(transfer_id), safe_name(name)));
+        let part = PathBuf::from(format!("{}.part", done.display()));
+        let entry = a
             .files
             .entry(transfer_id.to_string())
-            .or_insert_with(|| dir.join(format!("{}-{}", safe_name(transfer_id), safe_name(name))))
-            .clone();
-        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
-            return;
-        };
-        use std::io::Write;
-        let opened = if seq == 0 {
-            std::fs::File::create(&path)
-        } else {
-            std::fs::OpenOptions::new().append(true).open(&path)
-        };
-        if opened.and_then(|mut f| f.write_all(&bytes)).is_err() {
+            .or_insert_with(|| (part.clone(), 0));
+        // Already failed: the rest of its pieces are ignored (the agent was told once).
+        if entry.1 == u64::MAX {
+            if last {
+                a.files.remove(transfer_id);
+            }
             return;
         }
+        // A piece out of order (one was lost when the connection dropped, or the start never came) ruins the file: what was written is removed,
+        // and the agent is told, so it can say so instead of waiting for a file that will never be whole.
+        let decoded = base64::engine::general_purpose::STANDARD.decode(data);
+        let in_order = seq == entry.1;
+        use std::io::Write;
+        let written = match (&decoded, in_order) {
+            (Ok(bytes), true) => {
+                let opened = if seq == 0 {
+                    std::fs::File::create(&part)
+                } else {
+                    std::fs::OpenOptions::new().append(true).open(&part)
+                };
+                opened.and_then(|mut f| f.write_all(bytes)).is_ok()
+            }
+            _ => false,
+        };
+        if !written {
+            let _ = std::fs::remove_file(&part);
+            if last {
+                a.files.remove(transfer_id);
+            } else {
+                a.files.insert(transfer_id.to_string(), (part, u64::MAX));
+            }
+            a.queue.push(Delivery {
+                from: from.to_string(),
+                text: format!(
+                    "[file {} did not arrive complete: ask for it again]",
+                    safe_name(name)
+                ),
+                thread: None,
+                msg_id: None,
+            });
+            return;
+        }
+        entry.1 += 1;
         if last {
             a.files.remove(transfer_id);
+            // The whole file is checked against the sender's SHA-256 before it is kept.
+            if let Some(want) = &sha256
+                && std::fs::read(&part)
+                    .map(|b| crate::agents::text::sha256_hex(&b))
+                    .ok()
+                    .as_ref()
+                    != Some(want)
+            {
+                let _ = std::fs::remove_file(&part);
+                a.queue.push(Delivery {
+                    from: from.to_string(),
+                    text: format!(
+                        "[file {} arrived damaged (its checksum did not match): ask for it again]",
+                        safe_name(name)
+                    ),
+                    thread: None,
+                    msg_id: None,
+                });
+                return;
+            }
+            if std::fs::rename(&part, &done).is_err() {
+                return;
+            }
+            let path = done;
             let rel = path
                 .strip_prefix(&a.cwd)
                 .unwrap_or(&path)
@@ -635,7 +818,35 @@ impl State {
             self.stop(id).await;
             return;
         }
+        crate::warn!(
+            "daemon",
+            "{id}: the agent's program ended; starting it again"
+        );
+        if self
+            .respawn(id, now, "the agent's program ended and was started again")
+            .await
+        {
+            if let Some(a) = self.agents.get_mut(id) {
+                a.restarts.push_back(now);
+            }
+            self.link
+                .send(NodeFrame::AgentPickup {
+                    agent_id: id.to_string(),
+                })
+                .await;
+        } else {
+            self.stop(id).await;
+        }
+    }
+
+    /// Starts an agent's program again in a new terminal, with the same settings, in place of the old one (which is closed first: a terminal of
+    /// the same name cannot be made while the old one is still there). The agent stays registered with the hub. False if it could not be started.
+    async fn respawn(&mut self, id: &str, now: i64, why: &str) -> bool {
+        let Some(a) = self.agents.get_mut(id) else {
+            return false;
+        };
         let l = a.launch.clone();
+        a.proc.kill();
         let guard = super::inject::Guard::with_times(now, self.opts.quiet.0, self.opts.quiet.1);
         let spawn = Spawn {
             name: id,
@@ -649,14 +860,9 @@ impl State {
         match Terminal::spawn(&self.opts.backend, &spawn, guard) {
             Ok(p) => {
                 watch_terminal(&p, &a.log);
-                a.log
-                    .event(now, "restarted", "the agent's program was started again");
-                crate::warn!(
-                    "daemon",
-                    "{id}: the agent's program ended; started it again"
-                );
+                a.log.event(now, "restarted", why);
                 a.proc = p;
-                a.restarts.push_back(now);
+                a.queue.splice(0..0, intro(&a.spec));
                 a.status = AgentStatus::Starting;
                 a.inflight = None;
                 a.shown_prompt = None;
@@ -669,22 +875,52 @@ impl State {
                         detail: Some("restarted".into()),
                     })
                     .await;
-                self.link
-                    .send(NodeFrame::AgentPickup {
-                        agent_id: id.to_string(),
-                    })
-                    .await;
+                true
             }
-            Err(_) => self.stop(id).await,
+            Err(e) => {
+                crate::error!("daemon", "{id}: could not start it again: {e}");
+                false
+            }
         }
     }
 
     /// Looks at every terminal: reports ended agents, status changes, limits and prompts, pastes waiting messages when it
     /// is safe, and says when a pasted message seems to have been taken up.
     async fn on_tick(&mut self, now: i64) {
+        // Files people sent to the agents pile up in each folder's `.claudecord/files`: old ones are removed, once an hour.
+        if now - self.tidied > 3_600_000 {
+            self.tidied = now;
+            let dirs: Vec<PathBuf> = self
+                .agents
+                .values()
+                .map(|a| a.cwd.join(crate::hub::routing::INBOX_DIR))
+                .collect();
+            let _ = tokio::task::spawn_blocking(move || {
+                for d in dirs {
+                    tidy_files(&d, FILES_KEEP_MS, FILES_KEEP_BYTES);
+                }
+            })
+            .await;
+        }
+        // With no agent running, the daemon (which holds the connection to the hub) goes away by itself after a short while, unless the person
+        // chose to keep it running (`claudecord settings keep-running on`).
+        if let Some(limit) = self.opts.idle_exit {
+            if self.agents.is_empty() && !super::config::keep_running(&self.dir) {
+                let since = *self.idle_since.get_or_insert(now);
+                if now - since > limit.as_millis() as i64 {
+                    crate::info!("daemon", "no agent is running, so this machine disconnects");
+                    self.quit = true;
+                }
+            } else {
+                self.idle_since = None;
+            }
+        }
         let ids: Vec<String> = self.agents.keys().cloned().collect();
         // Looking at a tmux session runs the tmux program, which waits for the operating system. All of them are looked at at once on
         // threads meant for blocking work, so many agents never hold up the daemon's own connections.
+        for a in self.agents.values().filter(|a| !a.queue.is_empty()) {
+            a.proc.hurry();
+        }
         let looks: Vec<_> = self
             .agents
             .values()
@@ -762,6 +998,7 @@ impl State {
         };
         let state = adapter.detect(&screen);
         let mut out: Vec<NodeFrame> = Vec::new();
+        let mut shots: Vec<&str> = Vec::new();
         {
             let a = self.agents.get_mut(id).expect("listed above");
             if let Some(p) = &state.prompt {
@@ -782,6 +1019,7 @@ impl State {
                         perm_id: perm_id.to_string(),
                         prompt: p.clone(),
                     });
+                    shots.push("is asking for permission");
                     out.push(NodeFrame::AgentPermission {
                         agent_id: id.to_string(),
                         perm_id,
@@ -801,6 +1039,28 @@ impl State {
                 let _ = shown;
             }
             let status = status_of(&state);
+            // A turn that ended with nobody told anything: the person is looking at silence, so show them what the terminal says.
+            if status == AgentStatus::Idle
+                && a.status != AgentStatus::Idle
+                && a.awaiting.is_some()
+                && a.queue.is_empty()
+                && a.inflight.is_none()
+            {
+                a.awaiting = None;
+                shots.push("finished without answering");
+            }
+            // Working, or waiting on something, but the screen has not changed for two minutes: stuck.
+            let hash = a.proc.screen_hash();
+            if hash != a.still.0 {
+                a.still = (hash, now, false);
+            } else if !a.still.2
+                && status != AgentStatus::Idle
+                && status != AgentStatus::Starting
+                && now - a.still.1 > 120_000
+            {
+                a.still.2 = true;
+                shots.push("looks stuck: the screen has not changed for two minutes");
+            }
             if status != a.status {
                 a.log.event(now, "status", &format!("{status:?}"));
                 a.status = status;
@@ -813,6 +1073,7 @@ impl State {
             match &state.limit {
                 Some(l) if !a.limit_reported => {
                     a.limit_reported = true;
+                    shots.push("hit a usage limit");
                     out.push(NodeFrame::AgentLimit {
                         agent_id: id.to_string(),
                         kind: l.kind,
@@ -871,6 +1132,17 @@ impl State {
         }
         for f in out {
             self.link.send(f).await;
+        }
+        for why in shots {
+            // One picture by itself per agent per five minutes, however many reasons there are.
+            let Some(a) = self.agents.get_mut(id) else {
+                break;
+            };
+            if now - a.shot_at < 300_000 {
+                continue;
+            }
+            a.shot_at = now;
+            self.send_screen(id, why).await;
         }
     }
 
@@ -935,10 +1207,47 @@ impl State {
                 cols,
                 opts,
             } => {
-                self.up_agent(
-                    project, name, adapter, model, role, cwd, policy, rows, cols, opts,
-                )
-                .await
+                let asked = (
+                    project.clone(),
+                    adapter.clone(),
+                    model.clone(),
+                    role.clone(),
+                    cwd.clone(),
+                );
+                let resp = self
+                    .up_agent(
+                        project, name, adapter, model, role, cwd, policy, rows, cols, opts,
+                    )
+                    .await;
+                // Only agents a person started here (not the ones the hub asked for) are kept, to be started again later.
+                if resp.ok {
+                    self.remember_agent(resp.msg.rsplit('/').next().unwrap_or(&resp.msg), asked);
+                }
+                resp
+            }
+            Req::Restart { agent } => {
+                let ids: Vec<String> = match agent {
+                    Some(a) => vec![a],
+                    None => self.agents.keys().cloned().collect(),
+                };
+                if let Some(missing) = ids.iter().find(|i| !self.agents.contains_key(*i)) {
+                    return Resp::err(format!("no agent called {missing} here"));
+                }
+                let now = crate::now_ms();
+                let mut done = 0;
+                for id in &ids {
+                    if self.respawn(id, now, "restarted on request").await {
+                        done += 1;
+                    }
+                }
+                if done == ids.len() {
+                    Resp::ok(format!("restarted {done} agent(s)"))
+                } else {
+                    Resp::err(format!(
+                        "restarted {done} of {} agents; see the daemon log",
+                        ids.len()
+                    ))
+                }
             }
             Req::Stop { agent } => {
                 if self.agents.contains_key(&agent) {
@@ -1119,6 +1428,9 @@ impl State {
         if !self.agents.contains_key(agent) {
             return Resp::err("no such agent here");
         }
+        if let Some(a) = self.agents.get_mut(agent) {
+            a.awaiting = None;
+        }
         self.link.send(make(agent.to_string())).await;
         Resp::ok("sent")
     }
@@ -1145,11 +1457,27 @@ impl State {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "file".into());
+        let n = data.len();
+        self.send_bytes(agent, name.clone(), data, to, caption)
+            .await;
+        Resp::ok(format!("sent {name} ({} KB)", n.div_ceil(1024)))
+    }
+
+    /// Sends a file's bytes to the chat (or to a peer) in chunks.
+    async fn send_bytes(
+        &mut self,
+        agent: &str,
+        name: String,
+        data: Vec<u8>,
+        to: Option<String>,
+        caption: Option<String>,
+    ) {
         let transfer_id = format!(
             "{agent}-{:x}",
-            fingerprint(&format!("{path}{}", crate::now_ms()))
+            fingerprint(&format!("{name}{}", crate::now_ms()))
         );
         let total = data.len().div_ceil(FILE_CHUNK_BYTES).max(1);
+        let sum = crate::agents::text::sha256_hex(&data);
         for seq in 0..total {
             let slice = &data[(seq * FILE_CHUNK_BYTES).min(data.len())
                 ..((seq + 1) * FILE_CHUNK_BYTES).min(data.len())];
@@ -1161,13 +1489,13 @@ impl State {
                     seq: seq as u64,
                     last: seq == total - 1,
                     data: base64::engine::general_purpose::STANDARD.encode(slice),
+                    sha256: (seq == total - 1).then(|| sum.clone()),
                     to: to.clone(),
                     caption: caption.clone(),
                     thread: None,
                 })
                 .await;
         }
-        Resp::ok(format!("sent {name} ({} KB)", data.len().div_ceil(1024)))
     }
 
     /// Where an agent should work. Normally the folder it was asked for. If another agent here already works in that folder, two
@@ -1184,9 +1512,9 @@ impl State {
         if !shared {
             return Ok(origin.to_string_lossy().into_owned());
         }
-        if !worktree {
-            return Err("another agent already works in this folder, and two agents must not share one. Start this one in a different folder, or add --worktree to give it its own git worktree".into());
-        }
+        // Another agent works here and two must not share a folder, so this one gets its own git worktree, as a spawn does. (`worktree` asks for
+        // one even when the folder is free; here it is made either way.)
+        let _ = worktree;
         let git = |args: &[&str]| {
             std::process::Command::new("git")
                 .arg("-C")
@@ -1195,7 +1523,7 @@ impl State {
                 .output()
         };
         if !git(&["rev-parse", "--is-inside-work-tree"]).is_ok_and(|o| o.status.success()) {
-            return Err("--worktree needs a git repository, and this folder is not one".into());
+            return Err("another agent already works in this folder, and two agents must not share one. This folder is not a git repository, so this one cannot get its own copy: start it in a different folder".into());
         }
         let root = origin.join(".claudecord");
         let _ = std::fs::create_dir_all(&root);
@@ -1213,6 +1541,61 @@ impl State {
             )),
             Err(e) => Err(format!("could not run git: {e}")),
         }
+    }
+
+    /// Posts what an agent's terminal shows (the last lines, secrets removed) to the chat, with the reason.
+    async fn send_screen(&mut self, id: &str, why: &str) {
+        let Some(a) = self.agents.get(id) else {
+            return;
+        };
+        // A picture of the terminal when tmux can give one (taken off the main loop: it waits on tmux), otherwise the text.
+        let term = a.proc.clone();
+        if let Ok(Some(png)) = tokio::task::spawn_blocking(move || term.picture()).await {
+            let name = a.spec.name.clone();
+            self.send_bytes(
+                id,
+                format!("screen-{name}.png"),
+                png,
+                None,
+                Some(why.to_string()),
+            )
+            .await;
+            return;
+        }
+        let Some(a) = self.agents.get(id) else {
+            return;
+        };
+        let text = shot(&a.proc.screen_text());
+        self.link
+            .send(NodeFrame::AgentScreen {
+                agent_id: id.to_string(),
+                why: why.to_string(),
+                text,
+            })
+            .await;
+    }
+
+    /// Keeps an agent a person started in agents.json (one per project and name), so it can be started again later.
+    fn remember_agent(
+        &self,
+        name: &str,
+        (project, adapter, model, role, cwd): (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+        ),
+    ) {
+        let file = self.dir.join("agents.json");
+        let mut saved: Vec<serde_json::Value> = std::fs::read_to_string(&file)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+        let project = project_slug(&project);
+        saved.retain(|a| !(a["project"] == project.as_str() && a["name"] == name));
+        saved.push(serde_json::json!({"project": project, "name": name, "adapter": adapter, "model": model, "role": role, "cwd": cwd}));
+        let _ = std::fs::write(&file, serde_json::to_string(&saved).expect("plain data"));
     }
 
     /// Starts an agent in a folder and registers it with the hub. Nothing else happens by itself: no handoff is asked for, no start-up
@@ -1245,8 +1628,10 @@ impl State {
             .map(|a| a.spec.name.clone())
             .collect();
         let name = match name {
-            Some(n) if crate::protocol::is_slug(&n) => n,
-            Some(_) => return Resp::err("names use letters, digits, dots, dashes and underscores"),
+            Some(n) => match crate::protocol::agent_name_problem(&n) {
+                None => n.to_ascii_lowercase(),
+                Some(why) => return Resp::err(why),
+            },
             None => auto_name(&taken, |n| {
                 let mut r = [0u8; 4];
                 let _ = getrandom::fill(&mut r);
@@ -1267,7 +1652,9 @@ impl State {
         }
         // Remember the folder, so the hub can start more agents for this project here later.
         let origin = PathBuf::from(&cwd);
-        self.folders.insert(project.clone(), origin.clone());
+        let list = self.folders.entry(project.clone()).or_default();
+        list.retain(|f| f != &origin);
+        list.insert(0, origin.clone());
         let _ = std::fs::write(
             self.dir.join("projects.json"),
             serde_json::to_string(&self.folders).expect("plain data"),
@@ -1278,6 +1665,8 @@ impl State {
             Ok(c) => c,
             Err(e) => return Resp::err(e),
         };
+        // Set when this agent was given a worktree of its own because another one works in the folder it was started in.
+        let own_tree = (std::path::Path::new(&cwd) != origin).then(|| cwd.clone());
         let agent_id = format!("{project}/{name}");
         let pol = match policy.as_str() {
             "plan" => Policy::Plan,
@@ -1290,7 +1679,6 @@ impl State {
                 name: &name,
                 model: model.as_deref(),
                 policy: pol,
-                rules: RULES,
                 mcp_config: None,
             }),
         };
@@ -1387,13 +1775,16 @@ impl State {
                 cwd: PathBuf::from(&cwd),
                 origin,
                 proc,
-                queue: Vec::new(),
+                queue: intro(&spec).into_iter().collect(),
                 raw: VecDeque::new(),
                 inflight: None,
                 status: AgentStatus::Starting,
                 held: false,
                 asks: 0,
                 shown_prompt: None,
+                awaiting: None,
+                shot_at: 0,
+                still: (0, 0, false),
                 deciding: None,
                 limit_reported: false,
                 faults: 0,
@@ -1414,7 +1805,7 @@ impl State {
         Resp {
             ok: true,
             msg: agent_id,
-            data: Some(serde_json::json!({ "key": key })),
+            data: Some(serde_json::json!({ "key": key, "worktree": own_tree })),
         }
     }
 }
@@ -1495,4 +1886,64 @@ fn fingerprint(s: &str) -> u32 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     s.hash(&mut h);
     h.finish() as u32
+}
+
+#[cfg(test)]
+mod intro_tests {
+    use super::*;
+
+    #[test]
+    fn every_agent_gets_the_rules_as_its_first_message_whatever_its_program() {
+        for adapter in [AdapterId::Claude, AdapterId::Agy, AdapterId::Codex] {
+            let spec = AgentSpec {
+                agent_id: "p/otter".into(),
+                name: "otter".into(),
+                project: "p".into(),
+                adapter,
+                model: None,
+                role: None,
+            };
+            let d = intro(&spec).expect("every agent gets one");
+            assert!(d.text.contains("You are otter in project p") && d.text.contains("claudecord"));
+        }
+    }
+
+    #[test]
+    fn a_screen_is_shortened_cleaned_and_has_its_secrets_removed() {
+        let long: String = (0..60).map(|i| format!("line {i}\n")).collect();
+        let t = shot(&format!("{long}\n\n\n"));
+        assert!(t.ends_with("line 59") && !t.contains("line 10\n"), "{t}");
+        assert!(shot("export API_KEY=abcdefghijklmnop1234").contains("[redacted"));
+        assert!(shot("").is_empty());
+    }
+
+    #[test]
+    fn received_files_are_removed_when_old_and_the_oldest_go_first_when_there_are_too_many() {
+        let d = std::env::temp_dir().join(format!("cc-tidy-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let put = |n: &str, kb: usize, age_s: u64| {
+            let p = d.join(n);
+            std::fs::write(&p, vec![0u8; kb * 1024]).unwrap();
+            let t = std::time::SystemTime::now() - std::time::Duration::from_secs(age_s);
+            std::fs::File::options()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_modified(t)
+                .unwrap();
+        };
+        put("ancient", 1, 10 * 24 * 3600);
+        put("old", 100, 3600);
+        put("middle", 100, 1800);
+        put("new", 100, 60);
+        // Older than three days goes; then, with room for 250 KB, the oldest of the rest.
+        tidy_files(&d, 3 * 24 * 3_600_000, 250 * 1024);
+        let mut left: Vec<String> = std::fs::read_dir(&d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, vec!["middle", "new"]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

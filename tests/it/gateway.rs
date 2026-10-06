@@ -89,6 +89,7 @@ async fn rig_with(discord_api: DiscordSettings) -> (GatewayHandle, String) {
             discord: discord_api,
             dev: false,
             bucket: None,
+            extra_owners: vec![],
         },
         dir,
         control,
@@ -878,4 +879,284 @@ fn the_control_database_scopes_every_lookup_to_its_account() {
     assert_eq!(c.revoke_machine(&b.id, "mac").unwrap(), 0);
     assert_eq!(c.machines(&a.id).unwrap().len(), 1);
     assert!(c.machines(&b.id).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_project_is_chosen_on_the_dashboard_by_the_owner_of_the_machine_and_nobody_else() {
+    let (_gw, base, _fake) = rig_discord().await;
+    let alice = sign_in(&base, "1").await;
+    let bob = sign_in(&base, "2").await;
+    let token = enroll(&base, &alice, "mac").await;
+    let c = client();
+    let ask: Value = c
+        .post(format!("{base}/api/device/pick"))
+        .bearer_auth(&token)
+        .json(&json!({"folder": "shop"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let code = ask["code"].as_str().expect("a code").to_string();
+    let poll = |tok: String, code: String| {
+        let c = client();
+        let base = base.clone();
+        async move {
+            let r = c
+                .get(format!("{base}/api/device/pick/{code}"))
+                .bearer_auth(tok)
+                .send()
+                .await
+                .unwrap();
+            (
+                r.status().as_u16(),
+                r.json::<Value>().await.unwrap_or(Value::Null),
+            )
+        }
+    };
+    // Nothing chosen yet, so the machine is told to keep waiting.
+    assert_eq!(
+        poll(token.clone(), code.clone()).await.1["chosen"],
+        Value::Null
+    );
+    // The page sees the folder and the machine, for the owner only.
+    let path = format!("/api/v1/pick/{code}");
+    assert_eq!(get_json(&base, &path, &alice).await.1["folder"], "shop");
+    assert_eq!(
+        get_json(&base, &path, &bob).await.0,
+        404,
+        "another account cannot even see it"
+    );
+    assert_eq!(
+        post_json(&base, &path, None, json!({"project": "x"}))
+            .await
+            .0,
+        401
+    );
+    assert_eq!(
+        post_json(&base, &path, Some(&bob), json!({"project": "x"}))
+            .await
+            .0,
+        404
+    );
+    assert_eq!(poll("not-a-token".into(), code.clone()).await.0, 401);
+    // Nothing continues without a Discord bot: the choice is refused until one is saved (the stand-in Discord confirms its token).
+    assert_eq!(
+        post_json(&base, &path, Some(&alice), json!({"project": "shopfront"}))
+            .await
+            .0,
+        409
+    );
+    assert_eq!(
+        post_json(
+            &base,
+            "/api/v1/bots",
+            Some(&alice),
+            json!({"token": bot_token("444444444444444444")})
+        )
+        .await
+        .0,
+        200
+    );
+    // A name that is not a project name is refused; the owner's choice goes through.
+    assert_eq!(
+        post_json(&base, &path, Some(&alice), json!({"project": "bad name!"}))
+            .await
+            .0,
+        400
+    );
+    assert_eq!(
+        post_json(&base, &path, Some(&alice), json!({"project": "shopfront"}))
+            .await
+            .0,
+        200
+    );
+    // The machine collects it exactly once.
+    assert_eq!(
+        poll(token.clone(), code.clone()).await.1["chosen"],
+        "shopfront"
+    );
+    assert_eq!(poll(token, code).await.0, 404);
+}
+
+/// Places project `p` in `channel` of `guild` with `bot`, returning the status and the answer.
+async fn place(
+    base: &str,
+    s: &str,
+    p: &str,
+    bot: &str,
+    guild: &str,
+    channel: &str,
+) -> (u16, Value) {
+    let r = client()
+        .put(format!("{base}/api/v1/projects/{p}/target"))
+        .header("cookie", format!("cc_session={s}"))
+        .json(&json!({"bot": bot, "guild": guild, "channel": channel}))
+        .send()
+        .await
+        .unwrap();
+    (r.status().as_u16(), r.json().await.unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn nothing_goes_ahead_with_a_bot_that_is_not_in_a_server_or_lacks_what_it_needs() {
+    let (_gw, base, fake) = rig_discord().await;
+    let s = sign_in(&base, "111").await;
+    let (_, bot) = post_json(
+        &base,
+        "/api/v1/bots",
+        Some(&s),
+        json!({"token": bot_token("333333333333333333")}),
+    )
+    .await;
+    let bot_id = bot["id"].as_str().unwrap().to_string();
+    let guilds_path = format!("/api/v1/bots/{bot_id}/guilds");
+    let all = claudecord::perms::permissions_integer().to_string();
+    // The bot is in a server but can only look at it: the dashboard says what is missing, and nothing can be set up there.
+    fake.log.lock().unwrap().guilds =
+        vec![json!({"id": "g1", "name": "Small", "permissions": "1024"})];
+    let g = get_list(&base, &guilds_path, &s).await;
+    assert_eq!(g[0]["ok"], false);
+    assert!(
+        g[0]["missing"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m.as_str().unwrap().contains("Manage Roles")),
+        "{g:?}"
+    );
+    let (st, why) = post_json(
+        &base,
+        &format!("/api/v1/bots/{bot_id}/guilds/g1/channels"),
+        Some(&s),
+        json!({"name": "alpha"}),
+    )
+    .await;
+    assert_eq!(st, 409, "{why}");
+    assert!(why["error"].as_str().unwrap().contains("missing"), "{why}");
+    // Picking a project for a folder is refused too, since no server of this account is usable.
+    let token = enroll(&base, &s, "mac").await;
+    let ask: Value = client()
+        .post(format!("{base}/api/device/pick"))
+        .bearer_auth(&token)
+        .json(&json!({"folder": "shop"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let pick = format!("/api/v1/pick/{}", ask["code"].as_str().unwrap());
+    let (st, why) = post_json(&base, &pick, Some(&s), json!({"project": "shop"})).await;
+    assert_eq!(st, 409, "{why}");
+    // Not in any server at all (removed, or never added): the same.
+    fake.log.lock().unwrap().guilds = vec![];
+    assert_eq!(
+        post_json(&base, &pick, Some(&s), json!({"project": "shop"}))
+            .await
+            .0,
+        409
+    );
+    // With every permission it all goes through.
+    fake.log.lock().unwrap().guilds = vec![json!({"id": "g1", "name": "Big", "permissions": all})];
+    assert_eq!(get_list(&base, &guilds_path, &s).await[0]["ok"], true);
+    let (st, ch) = post_json(
+        &base,
+        &format!("/api/v1/bots/{bot_id}/guilds/g1/channels"),
+        Some(&s),
+        json!({"name": "alpha"}),
+    )
+    .await;
+    assert_eq!(st, 200, "{ch}");
+    let chan = ch["id"].as_str().unwrap().to_string();
+    assert_eq!(place(&base, &s, "alpha", &bot_id, "g1", &chan).await.0, 200);
+    assert_eq!(
+        post_json(&base, &pick, Some(&s), json!({"project": "shop"}))
+            .await
+            .0,
+        200
+    );
+    // Later the bot is removed from the server. The project says why it cannot work, to the dashboard and to the machine that asks.
+    fake.log.lock().unwrap().guilds = vec![];
+    let projects = get_list(&base, "/api/v1/projects", &s).await;
+    let alpha = projects.iter().find(|p| p["project"] == "alpha").unwrap();
+    assert!(
+        alpha["problem"]
+            .as_str()
+            .unwrap()
+            .contains("not in that Discord server"),
+        "{alpha}"
+    );
+    let on_machine: Value = client()
+        .get(format!("{base}/api/device/project/alpha"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(on_machine["placed"], true);
+    assert!(on_machine["problem"].is_string(), "{on_machine}");
+}
+
+#[tokio::test]
+async fn a_channel_used_by_one_service_is_refused_to_another_service_with_the_same_bot() {
+    let (fake, addr) = claudecord::discord::fake::start_fake().await;
+    let settings = || DiscordSettings {
+        api_base: format!("http://{addr}/api"),
+        gateway_url: None,
+    };
+    let (_gw1, real) = rig_with(settings()).await;
+    let (_gw2, test) = rig_with(settings()).await;
+    let token = bot_token("333333333333333333");
+    let (s1, s2) = (sign_in(&real, "111").await, sign_in(&test, "222").await);
+    let b1 = post_json(&real, "/api/v1/bots", Some(&s1), json!({"token": token}))
+        .await
+        .1["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let b2 = post_json(&test, "/api/v1/bots", Some(&s2), json!({"token": token}))
+        .await
+        .1["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (_, ch) = post_json(
+        &real,
+        &format!("/api/v1/bots/{b1}/guilds/g1/channels"),
+        Some(&s1),
+        json!({"name": "shared"}),
+    )
+    .await;
+    let chan = ch["id"].as_str().unwrap().to_string();
+    assert_eq!(place(&real, &s1, "alpha", &b1, "g1", &chan).await.0, 200);
+    // The second service, with the same bot, cannot take that channel, whichever way it asks.
+    let (st, why) = place(&test, &s2, "alpha", &b2, "g1", &chan).await;
+    assert_eq!(st, 409, "{why}");
+    assert!(
+        why["error"]
+            .as_str()
+            .unwrap()
+            .contains("another claudeCord service"),
+        "{why}"
+    );
+    // The first one can still place more projects in its own channel, and the second one can use a channel of its own.
+    assert_eq!(place(&real, &s1, "beta", &b1, "g1", &chan).await.0, 200);
+    let (_, mine) = post_json(
+        &test,
+        &format!("/api/v1/bots/{b2}/guilds/g1/channels"),
+        Some(&s2),
+        json!({"name": "mine"}),
+    )
+    .await;
+    assert_eq!(
+        place(&test, &s2, "alpha", &b2, "g1", mine["id"].as_str().unwrap())
+            .await
+            .0,
+        200
+    );
+    drop(fake);
 }

@@ -287,7 +287,6 @@ fn launching_agents() {
             name: "a",
             model: Some(s(&r["model"])),
             policy,
-            rules: if claude { "R" } else { "" },
             mcp_config: claude.then_some("/m.json"),
         };
         assert_eq!(json!(a.argv(&ctx)), r["argv"], "{r}");

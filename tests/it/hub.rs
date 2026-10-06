@@ -425,23 +425,104 @@ fn a_status_change_does_not_cancel_an_ask() {
 }
 
 #[test]
-fn only_an_explicit_reply_counts_as_an_answer() {
+fn a_question_is_answered_by_a_reply_or_by_naming_the_agent_or_by_the_only_open_question_and_only_the_asker_hears_it()
+ {
     let mut w = World::new();
     w.join("mac", 1, "otter");
-    ask(&mut w, "otter", "mac");
-    w.say_hi(&w.kd.clone(), "unrelated instruction");
-    assert_eq!(w.core.asks_of("p")[0].state, AskState::Open);
-    let opts = MessageOpts {
-        answers_ask: Some("Q1"),
-        ..Default::default()
+    w.join("gpu", 2, "heron");
+    // Each question has its own id (the helper above always uses the same one).
+    let ask_as = |w: &mut World, id: &str| {
+        w.core.on_node_frame(
+            "mac",
+            NodeFrame::AgentAsk {
+                agent_id: "p/otter".into(),
+                ask_id: id.into(),
+                question: "which db?".into(),
+                options: None,
+                thread: None,
+            },
+            T0,
+        );
     };
+    ask_as(&mut w, "a1");
+    // Which machines were sent anything at all.
+    let heard = |fx: &[Effect]| -> Vec<u64> {
+        let mut c: Vec<u64> = fx
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Send { conn, .. } => Some(*conn),
+                _ => None,
+            })
+            .collect();
+        c.sort();
+        c.dedup();
+        c
+    };
+    // Naming ANOTHER agent is not an answer.
     w.core
-        .human_message(&w.kd.clone(), "p", "postgres", &opts, T0 + 1)
+        .human_message(
+            &w.kd.clone(),
+            "p",
+            "@heron unrelated instruction",
+            &MessageOpts::default(),
+            T0,
+        )
+        .unwrap();
+    assert_eq!(w.core.asks_of("p")[0].state, AskState::Open);
+    // With one question open, a message that names nobody answers it, and only the agent that asked (conn 1) hears it, not the lead or anyone else.
+    let (_, fx) = w
+        .core
+        .human_message(
+            &w.kd.clone(),
+            "p",
+            "postgres",
+            &MessageOpts::default(),
+            T0 + 1,
+        )
         .unwrap();
     assert!(matches!(
         w.core.asks_of("p")[0].state,
         AskState::Answered { .. }
     ));
+    assert_eq!(heard(&fx), vec![1]);
+    // Naming the agent that asked answers it too, with no reply needed.
+    ask_as(&mut w, "a2");
+    w.core
+        .human_message(
+            &w.kd.clone(),
+            "p",
+            "@otter the second one",
+            &MessageOpts::default(),
+            T0 + 2,
+        )
+        .unwrap();
+    assert!(matches!(
+        w.core.asks_of("p")[1].state,
+        AskState::Answered { .. }
+    ));
+    // A reply to the question's own message still works as before.
+    ask_as(&mut w, "a3");
+    let opts = MessageOpts {
+        answers_ask: Some("Q3"),
+        ..Default::default()
+    };
+    w.core
+        .human_message(&w.kd.clone(), "p", "yes", &opts, T0 + 3)
+        .unwrap();
+    assert!(matches!(
+        w.core.asks_of("p")[2].state,
+        AskState::Answered { .. }
+    ));
+}
+
+#[test]
+fn an_agent_that_starts_over_has_its_open_questions_closed() {
+    let mut w = World::new();
+    w.join("mac", 1, "otter");
+    ask(&mut w, "otter", "mac");
+    assert_eq!(w.core.asks_of("p")[0].state, AskState::Open);
+    w.core.clear_agent(&w.kd.clone(), "p", "otter", T0).unwrap();
+    assert_eq!(w.core.asks_of("p")[0].state, AskState::Cancelled);
 }
 
 #[test]
@@ -847,19 +928,13 @@ fn an_unaddressed_lead_message_is_not_broadcast_and_a_loop_pauses_one_agent() {
     );
     assert!(
         deliveries(&fx).is_empty(),
-        "a plain say only informs, so it does not wake the lead by itself"
+        "a plain say from a worker reaches no agent"
     );
     let fx = w.core.tick(T0 + 3 * 60_000);
-    let status: Vec<_> = deliveries(&fx)
-        .into_iter()
-        .filter(|d| d.2 == "status")
-        .collect();
-    assert_eq!(
-        status.len(),
-        1,
-        "it is delivered once it has waited long enough"
+    assert!(
+        deliveries(&fx).iter().all(|d| d.2 != "status"),
+        "and it is not delivered later either: a plain say is for the chat"
     );
-    assert_eq!(status[0].0, 1, "to the lead only, not to the other worker");
     let mut core = HubCore::new(3, 30_000, 60_000);
     core.add_owner("1");
     for (n, c) in [("mac", 1), ("gpu", 2)] {
@@ -953,6 +1028,7 @@ fn secrets_are_removed_from_what_agents_say_and_files_with_secrets_are_blocked()
             seq: 0,
             last: true,
             data: key,
+            sha256: None,
             to: None,
             caption: None,
             thread: None,
@@ -991,6 +1067,7 @@ fn files_over_the_limit_are_refused_and_a_sent_file_reaches_the_lead() {
                 seq,
                 last: false,
                 data: chunk.clone(),
+                sha256: None,
                 to: None,
                 caption: None,
                 thread: None,
@@ -1070,10 +1147,10 @@ fn attachments_reach_the_agent_as_one_short_line_each_and_links_pass_through_as_
     );
     assert_eq!(
         lines[1],
-        "[pdf plan.pdf 2149KB at .claudecord/inbox/a1b2-plan.pdf]"
+        "[pdf plan.pdf 2149KB at .claudecord/files/a1b2-plan.pdf]"
     );
     assert_eq!(
-        lines[2], "[image shot.png 83KB at .claudecord/inbox/c3d4-shot.png]",
+        lines[2], "[image shot.png 83KB at .claudecord/files/c3d4-shot.png]",
         "path tricks in names are stripped"
     );
     assert!(
@@ -1108,7 +1185,7 @@ fn a_message_that_is_only_an_attachment_is_still_delivered() {
     assert_eq!(res.targets, vec!["otter"]);
     assert_eq!(
         deliveries(&fx).pop().unwrap().2,
-        "[file log.txt 1KB at .claudecord/inbox/z9-log.txt]"
+        "[file log.txt 1KB at .claudecord/files/z9-log.txt]"
     );
 }
 
@@ -1571,31 +1648,6 @@ fn a_handoff_can_be_given_to_a_different_agent_without_consuming_the_original() 
 // Ride-along delivery
 
 #[test]
-fn informing_messages_ride_along_with_the_next_one_that_needs_a_turn() {
-    let mut w = World::new();
-    w.join("mac", 1, "otter");
-    w.join("gpu", 2, "heron");
-    w.say_hi(&w.kd.clone(), "start"); // the lead's first turn, with its brief
-    let fx = w.core.on_node_frame(
-        "gpu",
-        NodeFrame::AgentSay {
-            agent_id: "p/heron".into(),
-            text: "FYI half done".into(),
-            thread: None,
-        },
-        T0 + 10,
-    );
-    assert!(deliveries(&fx).is_empty(), "no turn is spent on an FYI");
-    let (_, fx) = w.say_hi(&w.kd.clone(), "how is it going");
-    let texts: Vec<String> = deliveries(&fx).into_iter().map(|d| d.2).collect();
-    assert_eq!(
-        texts,
-        vec!["FYI half done", "how is it going"],
-        "the FYI arrives inside the next real turn"
-    );
-}
-
-#[test]
 fn only_the_last_completion_wakes_the_lead() {
     let mut w = World::new();
     w.join("mac", 1, "otter");
@@ -1647,28 +1699,6 @@ fn only_the_last_completion_wakes_the_lead() {
         "both completions and the all-done line arrive together: {to_lead:?}"
     );
     assert!(to_lead[2].contains("final report"));
-}
-
-#[test]
-fn an_informing_message_is_not_held_back_forever() {
-    let mut w = World::new();
-    w.join("mac", 1, "otter");
-    w.join("gpu", 2, "heron");
-    w.core.on_node_frame(
-        "gpu",
-        NodeFrame::AgentSay {
-            agent_id: "p/heron".into(),
-            text: "FYI".into(),
-            thread: None,
-        },
-        T0,
-    );
-    assert!(deliveries(&w.core.tick(T0 + 60_000)).is_empty());
-    assert!(
-        deliveries(&w.core.tick(T0 + 121_000))
-            .iter()
-            .any(|d| d.2 == "FYI")
-    );
 }
 
 // Placement
@@ -2104,4 +2134,429 @@ fn when_an_agent_leaves_the_others_are_told_with_their_next_delivery() {
         "the news rides along with the next message"
     );
     assert_eq!(d[0].2, "peers: otter", "ibis is gone from heron's list");
+}
+
+fn notices(fx: &[Effect]) -> Vec<String> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Chat(Chat::Notice { text, .. }) => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_chat_is_told_when_an_agent_starts_and_why_a_requested_start_failed() {
+    let mut w = World::new();
+    w.core.node_connected("mac", 1);
+    let fx = w.core.on_node_frame(
+        "mac",
+        NodeFrame::AgentRegister {
+            agent: spec("p", "otter"),
+            cwd: "/x".into(),
+        },
+        T0,
+    );
+    assert!(
+        notices(&fx).iter().any(|n| n == "otter started on mac."),
+        "{:?}",
+        notices(&fx)
+    );
+    // Registering again (a reconnect) announces nothing.
+    let fx = w.core.on_node_frame(
+        "mac",
+        NodeFrame::AgentRegister {
+            agent: spec("p", "otter"),
+            cwd: "/x".into(),
+        },
+        T0 + 1,
+    );
+    assert!(notices(&fx).iter().all(|n| !n.contains("started")));
+    let fx = w.core.on_node_frame(
+        "mac",
+        NodeFrame::SpawnFailed {
+            project: "p".into(),
+            name: "heron".into(),
+            reason: "this machine has no folder for project p yet".into(),
+        },
+        T0 + 2,
+    );
+    assert_eq!(
+        notices(&fx),
+        vec!["Could not start heron on mac: this machine has no folder for project p yet"]
+    );
+}
+
+#[test]
+fn a_longer_name_that_starts_like_a_shorter_one_is_not_mistaken_for_it() {
+    let mut w = World::new();
+    w.join("mac", 1, "macbook");
+    w.join("gpu", 2, "macbook-eeg-main");
+    let fx = w
+        .core
+        .human_message(
+            &w.kd.clone(),
+            "p",
+            "@macbook-eeg-main please run it.",
+            &MessageOpts::default(),
+            T0,
+        )
+        .unwrap()
+        .1;
+    let to: Vec<u64> = deliveries(&fx).iter().map(|d| d.0).collect();
+    assert_eq!(
+        to,
+        vec![2, 2],
+        "only the agent that was named hears it (conn 2: its brief and the message)"
+    );
+    // A sentence ending right after the name still counts, and the short name still works on its own.
+    let fx = w
+        .core
+        .human_message(
+            &w.kd.clone(),
+            "p",
+            "thanks @macbook.",
+            &MessageOpts::default(),
+            T0 + 1,
+        )
+        .unwrap()
+        .1;
+    assert!(
+        deliveries(&fx).iter().all(|d| d.0 == 1),
+        "{:?}",
+        deliveries(&fx)
+    );
+}
+
+#[test]
+fn an_agent_that_tags_itself_is_not_shown_tagging_itself() {
+    let mut w = World::new();
+    w.join("mac", 1, "otter");
+    w.join("gpu", 2, "heron");
+    let fx = w.core.on_node_frame(
+        "mac",
+        NodeFrame::AgentSay {
+            agent_id: "p/otter".into(),
+            text: "@otter Hello! I am fine. @OTTER again, and @otters stay, @heron too".into(),
+            thread: None,
+        },
+        T0,
+    );
+    let said = posts(&fx);
+    assert_eq!(
+        said[0].0,
+        "Hello! I am fine. again, and @otters stay, @heron too"
+    );
+}
+
+#[test]
+fn agents_talking_to_each_other_do_it_in_a_thread_of_the_pair_and_people_are_still_addressed_in_the_main_channel()
+ {
+    let mut w = World::new();
+    w.join("mac", 1, "otter");
+    w.join("gpu", 2, "heron");
+    let say = |w: &mut World, text: &str| {
+        posts(&w.core.on_node_frame(
+            "mac",
+            NodeFrame::AgentSay {
+                agent_id: "p/otter".into(),
+                text: text.into(),
+                thread: None,
+            },
+            T0,
+        ))
+    };
+    // To a peer: in the pair's thread, whichever of them speaks, so a back-and-forth stays together.
+    assert_eq!(
+        say(&mut w, "@heron can you check the tests?")[0]
+            .1
+            .as_deref(),
+        Some("heron & otter")
+    );
+    // To a person, or to nobody in particular: the main channel.
+    assert_eq!(say(&mut w, "@sam the tests pass")[0].1, None);
+    assert_eq!(say(&mut w, "all done")[0].1, None);
+    // Addressing a peer AND a person is for the person to see: the main channel.
+    assert_eq!(say(&mut w, "@heron @sam look at this")[0].1, None);
+    // The reply from the peer lands in the same thread.
+    let reply = posts(&w.core.on_node_frame(
+        "gpu",
+        NodeFrame::AgentSay {
+            agent_id: "p/heron".into(),
+            text: "@otter yes, they do".into(),
+            thread: None,
+        },
+        T0 + 1,
+    ));
+    assert_eq!(reply[0].1.as_deref(), Some("heron & otter"));
+}
+
+#[test]
+fn the_lead_can_be_changed_by_an_owner_only_and_when_the_lead_leaves_the_next_agent_takes_over() {
+    let mut w = World::new();
+    w.join("mac", 1, "otter");
+    w.join("gpu", 2, "heron");
+    w.join("box", 3, "ibis");
+    assert!(
+        w.core.agent("p/otter").unwrap().is_lead,
+        "the first to join leads"
+    );
+    // An operator may not choose the lead; an owner may.
+    assert!(w.core.set_lead(&w.sam.clone(), "p", "p/ibis").is_err());
+    let (lead, fx) = w.core.set_lead(&w.kd.clone(), "p", "p/ibis").unwrap();
+    assert_eq!(lead.name, "ibis");
+    assert!(w.core.agent("p/ibis").unwrap().is_lead && !w.core.agent("p/otter").unwrap().is_lead);
+    assert!(
+        fx.iter().any(
+            |e| matches!(e, Effect::Chat(Chat::Notice { text, .. }) if text == "ibis now leads p.")
+        ),
+        "the chat is told"
+    );
+    // The lead leaves: the agent that has been here longest takes over (not just anyone), and the chat says so.
+    let fx = w.core.on_node_frame(
+        "box",
+        NodeFrame::AgentGone {
+            agent_id: "p/ibis".into(),
+        },
+        T0 + 1,
+    );
+    assert!(
+        w.core.agent("p/otter").unwrap().is_lead,
+        "otter, in the project longest, now leads"
+    );
+    assert!(!w.core.agent("p/heron").unwrap().is_lead);
+    assert!(
+        notices(&fx).iter().all(|t| !t.contains("now leads")),
+        "a lead leaving is not announced (a /killall would announce a string of them): {:?}",
+        notices(&fx)
+    );
+    // A worker leaving changes nothing about who leads.
+    w.core.on_node_frame(
+        "gpu",
+        NodeFrame::AgentGone {
+            agent_id: "p/heron".into(),
+        },
+        T0 + 2,
+    );
+    assert!(w.core.agent("p/otter").unwrap().is_lead);
+}
+
+#[test]
+fn a_machine_that_connects_lists_what_it_runs_and_the_rest_is_gone() {
+    let mut w = World::new();
+    w.join("mac", 1, "otter");
+    w.join("mac", 1, "heron");
+    assert!(w.core.agent("p/otter").unwrap().is_lead);
+    w.core.on_node_frame(
+        "mac",
+        NodeFrame::AgentsHere {
+            agent_ids: vec!["p/heron".into()],
+        },
+        T0 + 1,
+    );
+    assert!(w.core.agent("p/otter").is_none());
+    assert!(
+        w.core.agent("p/heron").unwrap().is_lead,
+        "the lead moved on"
+    );
+}
+
+#[test]
+fn a_screen_from_an_agent_is_posted_as_a_code_block_and_screen_asks_its_machine() {
+    let mut w = World::new();
+    w.join("mac", 1, "otter");
+    let fx = w.core.on_node_frame(
+        "mac",
+        NodeFrame::AgentScreen {
+            agent_id: "p/otter".into(),
+            why: "looks stuck".into(),
+            text: "Do you want to proceed?".into(),
+        },
+        T0,
+    );
+    assert!(
+        notices(&fx)
+            .iter()
+            .any(|t| t.starts_with("**otter**: looks stuck\n```\nDo you want to proceed?\n```")),
+        "{:?}",
+        notices(&fx)
+    );
+    let fx = w.core.screen(&w.kd.clone(), "p", "otter").unwrap();
+    assert!(fx.iter().any(|e| matches!(
+        e,
+        Effect::Send {
+            conn: 1,
+            frame: HubFrame::Screen { .. }
+        }
+    )));
+    assert!(
+        w.core.screen(&w.vi.clone(), "p", "otter").is_err(),
+        "a viewer may not"
+    );
+}
+
+#[test]
+fn controls_say_nothing_in_the_chat_but_what_they_were_asked_for_even_when_every_agent_leaves() {
+    let mut w = World::new();
+    let kd = w.kd.clone();
+    for n in ["otter", "heron", "ibis"] {
+        w.join("mac", 1, n);
+    }
+    let gone = |w: &mut World, id: &str, t: i64| {
+        notices(&w.core.on_node_frame(
+            "mac",
+            NodeFrame::AgentGone {
+                agent_id: id.into(),
+            },
+            t,
+        ))
+    };
+    let mut said: Vec<String> = Vec::new();
+    said.extend(notices(&w.core.hold(&kd, true, "p", None, T0).unwrap().1));
+    said.extend(notices(
+        &w.core.hold(&kd, false, "p", None, T0 + 1).unwrap().1,
+    ));
+    said.extend(notices(&w.core.stop(&kd, "p", "heron", T0 + 2).unwrap().1));
+    said.extend(gone(&mut w, "p/heron", T0 + 3));
+    said.extend(notices(&w.core.clear_chat(&kd, "p", T0 + 6).unwrap().1));
+    said.extend(notices(
+        &w.core
+            .raw_input(&kd, "p", "ibis", "/compact", T0 + 7)
+            .map(|x| x.1)
+            .unwrap_or_default(),
+    ));
+    said.extend(notices(
+        &w.core
+            .dump(&kd, "p", None, T0 + 8)
+            .map(|x| x.1)
+            .unwrap_or_default(),
+    ));
+    said.extend(notices(&w.core.kill_all(&kd, Some("p"), T0 + 9).unwrap().1));
+    // Every agent leaves one after another, the lead included: nothing is announced.
+    for (i, id) in ["p/otter", "p/ibis"].iter().enumerate() {
+        said.extend(gone(&mut w, id, T0 + 10 + i as i64));
+    }
+    said.extend(notices(&w.core.node_connected("mac", 5)));
+    assert!(said.is_empty(), "unasked announcements: {said:?}");
+    // The ones that were asked for are the only ones that speak.
+    w.join("mac", 1, "otter");
+    w.join("mac", 1, "wren");
+    let said = notices(&w.core.clear_agent(&kd, "p", "wren", T0 + 20).unwrap());
+    assert_eq!(said, vec!["wren started over, at kd (owner)'s request."]);
+}
+
+#[test]
+fn an_agent_can_ping_another_agent_whose_name_starts_like_a_persons_name() {
+    let mut w = World::new(); // people: kd, sam, vi
+    w.join("mac", 1, "otter");
+    w.join("gpu", 2, "vivid");
+    w.join("tpu", 3, "samuel");
+    for (to, conn) in [("vivid", 2), ("samuel", 3)] {
+        let fx = w.core.on_node_frame(
+            "mac",
+            NodeFrame::AgentSay {
+                agent_id: "p/otter".into(),
+                text: format!("@{to} please check the logs"),
+                thread: None,
+            },
+            T0,
+        );
+        let mut heard: Vec<u64> = deliveries(&fx).iter().map(|d| d.0).collect();
+        heard.dedup();
+        assert_eq!(heard, vec![conn], "@{to} did not reach {to}");
+    }
+}
+
+#[test]
+fn a_file_with_a_missing_piece_or_one_that_stops_part_way_is_never_posted_and_the_chat_says_so() {
+    let mut w = World::new();
+    w.join("mac", 1, "otter");
+    let chunk = |id: &str, seq: u64, last: bool| NodeFrame::FileChunk {
+        transfer_id: id.into(),
+        agent_id: "p/otter".into(),
+        name: "big.bin".into(),
+        seq,
+        last,
+        data: base64_of(b"piece"),
+        sha256: None,
+        to: None,
+        caption: None,
+        thread: None,
+    };
+    // Piece 0, then piece 2: one went missing.
+    w.core.on_node_frame("mac", chunk("a", 0, false), T0);
+    let fx = w.core.on_node_frame("mac", chunk("a", 2, true), T0 + 1);
+    assert!(
+        notices(&fx)
+            .iter()
+            .any(|t| t.contains("missing or repeated")),
+        "{:?}",
+        notices(&fx)
+    );
+    assert!(
+        !fx.iter()
+            .any(|e| matches!(e, Effect::Chat(Chat::File { .. })))
+    );
+    // A transfer that just stops: dropped after its time is up, and said so, even though nobody sends anything more for it.
+    w.core.on_node_frame("mac", chunk("b", 0, false), T0 + 10);
+    let fx = w
+        .core
+        .on_node_frame("mac", chunk("c", 0, false), T0 + 10 + 3 * 60_000);
+    assert!(
+        notices(&fx)
+            .iter()
+            .any(|t| t.contains("did not finish sending big.bin")),
+        "{:?}",
+        notices(&fx)
+    );
+    // A whole one still goes through.
+    w.core
+        .on_node_frame("mac", chunk("d", 0, false), T0 + 3 * 60_000 + 20);
+    let fx = w
+        .core
+        .on_node_frame("mac", chunk("d", 1, true), T0 + 3 * 60_000 + 21);
+    assert!(
+        fx.iter()
+            .any(|e| matches!(e, Effect::Chat(Chat::File { data, .. }) if data == b"piecepiece"))
+    );
+}
+
+#[test]
+fn a_file_whose_checksum_does_not_match_is_not_posted() {
+    let mut w = World::new();
+    w.join("mac", 1, "otter");
+    let send = |w: &mut World, id: &str, sha: Option<String>| {
+        w.core.on_node_frame(
+            "mac",
+            NodeFrame::FileChunk {
+                transfer_id: id.into(),
+                agent_id: "p/otter".into(),
+                name: "f.txt".into(),
+                seq: 0,
+                last: true,
+                data: base64_of(b"hello"),
+                sha256: sha,
+                to: None,
+                caption: None,
+                thread: None,
+            },
+            T0,
+        )
+    };
+    let fx = send(&mut w, "a", Some("0".repeat(64)));
+    assert!(
+        notices(&fx).iter().any(|t| t.contains("arrived damaged")),
+        "{:?}",
+        notices(&fx)
+    );
+    assert!(
+        !fx.iter()
+            .any(|e| matches!(e, Effect::Chat(Chat::File { .. })))
+    );
+    let good = claudecord::agents::text::sha256_hex(b"hello");
+    let fx = send(&mut w, "b", Some(good));
+    assert!(
+        fx.iter()
+            .any(|e| matches!(e, Effect::Chat(Chat::File { .. })))
+    );
 }

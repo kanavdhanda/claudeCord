@@ -74,6 +74,7 @@ impl TmuxTerminal {
     pub fn spawn(
         socket: &str,
         session: &str,
+        label: &str,
         argv: &[String],
         cwd: &std::path::Path,
         remove_env: &[String],
@@ -106,6 +107,30 @@ impl TmuxTerminal {
                 "remain-on-exit",
                 "on",
                 ";",
+                // A program that ends cleanly (Claude's /exit, say) takes its window with it at once. One that fails stays on screen for a moment, so
+                // the reason can be read, until the daemon notices and closes it.
+                "set-hook",
+                "-g",
+                "pane-died",
+                "if-shell -F \"#{==:#{pane_dead_status},0}\" \"kill-session\"",
+                ";",
+                // What a person sees at the bottom of an agent's window, and the one key to leave without stopping anything. (This server is
+                // claudeCord's own, so none of this touches the person's own tmux.)
+                "set-option",
+                "-g",
+                "status-right-length",
+                "70",
+                ";",
+                "set-option",
+                "-g",
+                "status-right",
+                "Ctrl-] leave (it keeps running) | /exit ends it",
+                ";",
+                "bind-key",
+                "-n",
+                "C-]",
+                "detach-client",
+                ";",
                 "new-session",
                 "-d",
                 "-s",
@@ -117,6 +142,19 @@ impl TmuxTerminal {
                 "-c",
                 &cwd.to_string_lossy(),
                 &cmd,
+                ";",
+                // The agent's own name on the left of its window's status bar (`demo/otter`), so it is clear which one this is.
+                "set-option",
+                "-t",
+                session,
+                "status-left",
+                &format!("{label} | "),
+                ";",
+                "set-option",
+                "-t",
+                session,
+                "status-left-length",
+                "60",
             ],
         )?;
         Ok(Self {
@@ -155,6 +193,11 @@ impl TmuxTerminal {
     }
 
     /// Looks at the session now (one tmux command), updating what the guard knows. Quiet sessions are looked at less often.
+    /// Look at the screen at the next tick, however quiet it has been: something is waiting to be typed into it.
+    pub fn hurry(&self) {
+        self.seen.locked().next_look = 0;
+    }
+
     pub fn observe(&self, now: i64) {
         let mut seen = self.seen.locked();
         if now < seen.next_look {
@@ -224,6 +267,50 @@ impl TmuxTerminal {
         seen.hash = hash;
         seen.dead = dead;
         seen.next_look = now + seen.interval;
+    }
+
+    /// The screen right now WITH its colours (tmux's own rendering of it), with some of what scrolled off above it, and the number of rows and columns. Taken twice, a moment apart, and used only when both
+    /// agree, so a screen caught half way through a repaint is not drawn; after three tries the last one is used.
+    pub fn capture_colour(&self) -> Option<(String, u16, u16)> {
+        let one = || -> Option<(String, u16, u16)> {
+            let t = &self.session;
+            let size = Self::tmux(
+                &self.socket,
+                &[
+                    "display-message",
+                    "-p",
+                    "-t",
+                    t,
+                    "#{pane_width} #{pane_height}",
+                ],
+            )
+            .ok()?;
+            let mut it = size
+                .split_whitespace()
+                .filter_map(|n| n.parse::<u16>().ok());
+            let (w, h) = (it.next()?, it.next()?);
+            // The visible screen and up to 300 lines of what scrolled off above it: more of what happened, like a window zoomed out.
+            let text = Self::tmux(
+                &self.socket,
+                &["capture-pane", "-p", "-e", "-S", "-300", "-t", t],
+            )
+            .ok()?;
+            // Empty lines at the bottom are left out, so a mostly empty screen is not a mostly empty picture.
+            let text = text.trim_end_matches(['\n', ' ']).to_string();
+            let rows = (text.lines().count() as u16).clamp(1, h + 300);
+            Some((text, rows, w))
+        };
+        let mut last = one()?;
+        for _ in 0..3 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let next = one()?;
+            let same = next.0 == last.0;
+            last = next;
+            if same {
+                break;
+            }
+        }
+        Some(last)
     }
 
     /// The screen as of the last look.

@@ -342,3 +342,88 @@ async fn a_step_that_panics_is_reported_as_none_and_the_next_step_still_runs() {
     let second = guarded("the next step", async { 2 }).await;
     assert_eq!(second, Some(2));
 }
+
+#[test]
+fn agent_names_follow_discords_rules_for_names_that_are_posted_and_mentioned() {
+    use claudecord::protocol::agent_name_problem as bad;
+    for ok in ["otter", "macbook-eeg-main", "keen-otter", "a_b.c", "Otter"] {
+        assert_eq!(bad(ok), None, "{ok}");
+    }
+    for no in [
+        "",
+        "has space",
+        "discord-bot",
+        "My-Clyde",
+        "everyone",
+        "HERE",
+        &"x".repeat(33),
+    ] {
+        assert!(bad(no).is_some(), "{no:?} should be refused");
+    }
+}
+
+/// The start-up question exactly as the real Claude Code showed it in a new folder (captured from a running agent): options WITHOUT numbers, the
+/// cursor on "No, exit", blank lines between the paragraphs and before the footer.
+const TRUST_SCREEN: &str = "\n────────────────────────────────────────────────────────────────────────────────────────────────────\n Accessing workspace:\n\n /home/me/code/eeg\n\n Quick safety check: Is this a project you created or one you trust? (Like your own code, a\n well-known open source project, or work from your team). If not, take a moment to review what's in\n this folder first.\n\n Claude Code'll be able to read, edit, and execute files here.\n\n Security guide\n\n ❯ No, exit\n   Yes, I trust this folder\n\n Enter to confirm · Esc to cancel\n";
+
+#[test]
+fn a_start_up_question_without_numbers_is_seen_so_it_reaches_the_chat_instead_of_hanging_the_agent()
+{
+    use claudecord::adapters::parse_menu;
+    use claudecord::protocol::AdapterId;
+    let p = parse_menu(TRUST_SCREEN).expect("the unnumbered menu is recognised");
+    assert_eq!(p.options, vec!["No, exit", "Yes, I trust this folder"]);
+    assert_eq!(p.cursor, 0, "the cursor starts on the safe choice");
+    assert!(p.question.contains("trust"), "{}", p.question);
+    // The agent is then not 'ready' (it used to look idle because of the cursor mark), and the right answer is the second option.
+    let st = AdapterId::Claude.detect(TRUST_SCREEN);
+    assert!(st.prompt.is_some() && !st.ready, "{st:?}");
+    assert_eq!(AdapterId::Claude.startup_choice(&p), Some(1));
+    // Down once, Enter: what is typed when someone allows it.
+    assert_eq!(
+        AdapterId::Claude.select_keys(&p, 1),
+        vec!["Down".to_string(), "Enter".to_string()]
+    );
+}
+
+#[test]
+fn an_idle_screen_and_ordinary_text_are_not_mistaken_for_a_menu() {
+    use claudecord::adapters::parse_menu;
+    use claudecord::protocol::AdapterId;
+    let idle = "\n╭────────────────────────────────╮\n│ > Try \"fix the failing test\"   │\n╰────────────────────────────────╯\n  ? for shortcuts\n";
+    assert!(parse_menu(idle).is_none());
+    assert!(AdapterId::Claude.detect(idle).ready);
+    // Two indented lines above a footer but no cursor mark: not a menu.
+    assert!(parse_menu("  one\n  two\n Enter to confirm\n").is_none());
+}
+
+#[test]
+fn text_for_discord_gets_real_line_breaks_and_tables_in_a_code_block() {
+    use claudecord::discord::api::tidy_for_discord as tidy;
+    // A shell leaves a literal backslash-n; with no real line break in the text it is read as one.
+    assert_eq!(tidy("one\\ntwo"), "one\ntwo");
+    // With real line breaks, a backslash-n is the agent's own (code, a path) and stays.
+    assert_eq!(tidy("a\nprint('x\\n')"), "a\nprint('x\\n')");
+    // Two or more table rows in a row go in a code block; one line with bars is just text.
+    let table = "Results:\n| a | b |\n|---|---|\n| 1 | 2 |\ndone";
+    assert_eq!(
+        tidy(table),
+        "Results:\n```\n| a | b |\n|---|---|\n| 1 | 2 |\n```\ndone"
+    );
+    assert_eq!(tidy("a | b |"), "a | b |");
+    assert_eq!(tidy("plain text"), "plain text");
+}
+
+#[test]
+fn the_file_checksum_is_the_standard_sha256() {
+    // Published test vectors (FIPS 180-2), the same as the `shasum -a 256` tool gives.
+    use claudecord::agents::text::sha256_hex;
+    assert_eq!(
+        sha256_hex(b"abc"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+    assert_eq!(
+        sha256_hex(b""),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+}

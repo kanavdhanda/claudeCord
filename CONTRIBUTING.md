@@ -18,6 +18,12 @@ Rules that keep it safe to change:
 
 Commit messages say what changed and why, in the imperative.
 
+## Troubleshooting
+
+- "local socket name length exceeds capacity": a very long `CLAUDECORD_HOME` path; sockets are limited to about 100 characters. Use a shorter one.
+- Two checkouts or two people on one machine: give each their own `CLAUDECORD_HOME` and `CLAUDECORD_TMUX_SOCKET`.
+- Before opening a pull request, `scripts/check.sh` is the real gate.
+
 ## Cost and scale impact (every pull request)
 
 Every pull request description says what the change does to **cost** and to **scale**, even when the answer is "none, because ...".

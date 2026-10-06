@@ -24,6 +24,26 @@ pub fn is_slug(s: &str) -> bool {
     SLUG.is_match(s)
 }
 
+/// Why `name` cannot be an agent's name, or None if it can. An agent posts to Discord under its own name and is @mentioned by it, so on top of the
+/// usual letters, digits, dots, dashes and underscores: Discord refuses webhook names that contain "discord" or "clyde", `@everyone` and `@here` already
+/// ping the whole server, and a long name is cut off in the member list. (Names are used in lower case, so `Otter` and `otter` are the same agent.)
+pub fn agent_name_problem(name: &str) -> Option<&'static str> {
+    let l = name.to_ascii_lowercase();
+    if !is_slug(name) {
+        Some("names use letters, digits, dots, dashes and underscores")
+    } else if name.len() > 32 {
+        Some("an agent's name is at most 32 characters")
+    } else if l.contains("discord") || l.contains("clyde") {
+        Some("Discord does not accept names that contain \"discord\" or \"clyde\"")
+    } else if l == "everyone" || l == "here" {
+        Some(
+            "@everyone and @here already mean something in Discord, so an agent cannot be called that",
+        )
+    } else {
+        None
+    }
+}
+
 /// Deserialises an optional field strictly: absent is fine, but an explicit `null` is not.
 mod opt {
     use serde::{Deserialize, Deserializer};
@@ -202,6 +222,17 @@ pub enum NodeFrame {
     },
     #[serde(rename = "agent.gone", rename_all = "camelCase")]
     AgentGone { agent_id: String },
+    /// What an agent's terminal shows right now, with why it is being sent (it was asked for, it finished without answering, it looks stuck).
+    #[serde(rename = "agent.screen", rename_all = "camelCase")]
+    AgentScreen {
+        agent_id: String,
+        why: String,
+        text: String,
+    },
+    /// Sent by a machine each time it connects, after its registrations: every agent it is running, and so, by leaving one out, which of its
+    /// agents the hub still lists are gone.
+    #[serde(rename = "agents.here", rename_all = "camelCase")]
+    AgentsHere { agent_ids: Vec<String> },
     #[serde(rename = "agent.accepted", rename_all = "camelCase")]
     AgentAccepted {
         agent_id: String,
@@ -278,6 +309,13 @@ pub enum NodeFrame {
     /// An agent asking who else is in its project and whether they can be reached now (the `team` verb).
     #[serde(rename = "agent.team", rename_all = "camelCase")]
     AgentTeam { agent_id: String },
+    /// A machine could not start an agent the hub asked it to, so the people who asked can be told why.
+    #[serde(rename = "spawn.failed", rename_all = "camelCase")]
+    SpawnFailed {
+        project: String,
+        name: String,
+        reason: String,
+    },
     /// The same prompt was answered at the terminal instead, so the chat message can be closed.
     #[serde(rename = "agent.permission.done", rename_all = "camelCase")]
     AgentPermissionDone { agent_id: String, perm_id: String },
@@ -290,6 +328,13 @@ pub enum NodeFrame {
         seq: u64,
         last: bool,
         data: String,
+        /// SHA-256 of the whole file (hex), on the last piece: the receiver checks what it put together against it.
+        #[serde(
+            default,
+            deserialize_with = "opt::de",
+            skip_serializing_if = "Option::is_none"
+        )]
+        sha256: Option<String>,
         /// Peer agent to deliver to. Absent means post to the channel.
         #[serde(
             default,
@@ -329,7 +374,8 @@ impl NodeFrame {
         match self {
             Hello { .. } | AgentStatus { .. } | AgentGone { .. } => true,
             AgentRegister { agent, .. } => agent.is_valid(),
-            AgentSay { text, thread, .. } => within(text, 8000) && within_opt(thread, 90),
+            // No limit of our own below the frame size; Discord's own limit is handled when posting (see `split_for_discord`).
+            AgentSay { text, thread, .. } => within(text, 200_000) && within_opt(thread, 90),
             AgentAsk {
                 ask_id,
                 question,
@@ -386,11 +432,21 @@ impl NodeFrame {
             AgentHandoff { text, .. } => within(text, 8000),
             AgentAnswer { ask, text, .. } => within(ask, 300) && within(text, 4000),
             AgentPickup { .. } | AgentTeam { .. } => true,
+            AgentScreen { why, text, .. } => within(why, 200) && within(text, 4000),
+            AgentsHere { agent_ids } => {
+                agent_ids.len() <= 1000 && agent_ids.iter().all(|i| within(i, 200))
+            }
+            SpawnFailed {
+                project,
+                name,
+                reason,
+            } => is_slug(project) && is_slug(name) && within(reason, 300),
             FileChunk {
                 transfer_id,
                 name,
                 seq,
                 data,
+                sha256,
                 to,
                 caption,
                 thread,
@@ -400,6 +456,9 @@ impl NodeFrame {
                     && within(name, 255)
                     && *seq <= 1000
                     && within(data, (FILE_CHUNK_BYTES * 4).div_ceil(3) + 16)
+                    && sha256
+                        .as_deref()
+                        .is_none_or(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
                     && within_opt(to, 64)
                     && within_opt(caption, 1000)
                     && within_opt(thread, 90)
@@ -473,6 +532,13 @@ pub enum HubFrame {
         seq: u64,
         last: bool,
         data: String,
+        /// SHA-256 of the whole file (hex), on the last piece: the receiver checks what it put together against it.
+        #[serde(
+            default,
+            deserialize_with = "opt::de",
+            skip_serializing_if = "Option::is_none"
+        )]
+        sha256: Option<String>,
         #[serde(
             default,
             deserialize_with = "opt::de",
@@ -491,6 +557,11 @@ pub enum HubFrame {
     Spawn { agent: AgentSpec },
     #[serde(rename = "stop", rename_all = "camelCase")]
     Stop { agent_id: String },
+    /// Start this agent's program again from its base: a new session in a new terminal, same name and folder.
+    #[serde(rename = "restart", rename_all = "camelCase")]
+    Restart { agent_id: String },
+    /// Send back what this agent's terminal shows now.
+    Screen { agent_id: String },
     #[serde(rename = "killall")]
     Killall {
         #[serde(

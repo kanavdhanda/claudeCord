@@ -7,6 +7,15 @@
 use std::future::Future;
 use std::time::Duration;
 
+/// Aborts the task it was made for when dropped.
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Runs `make()` as a task and runs it again, after a growing pause, each time it panics. Returns when the task returns normally.
 pub fn supervised<F, Fut>(name: &'static str, mut make: F) -> tokio::task::JoinHandle<()>
 where
@@ -17,7 +26,11 @@ where
         let mut pause = Duration::from_secs(1);
         loop {
             let started = std::time::Instant::now();
-            match tokio::spawn(make()).await {
+            // Aborting this supervisor must end the task it runs too: a dropped JoinHandle only lets go of it, and the old task would keep
+            // running next to its replacement (two Discord bridges for one bot post every message twice).
+            let inner = tokio::spawn(make());
+            let _ends_with_us = AbortOnDrop(inner.abort_handle());
+            match inner.await {
                 Ok(()) => return,
                 Err(e) if e.is_panic() => {
                     crate::error!(name, "stopped by a panic; starting it again in {pause:?}");

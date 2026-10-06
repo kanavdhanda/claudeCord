@@ -73,6 +73,7 @@ fn fast(extra: Vec<PathBuf>, max_agents: usize, labels: Vec<String>) -> Options 
         labels,
         backend: Backend::Pty,
         auto_startup: false,
+        idle_exit: None,
     }
 }
 
@@ -384,13 +385,13 @@ async fn a_file_sent_from_chat_lands_in_the_agents_inbox_and_the_agent_is_told_w
         })
         .await;
     eventually("file saved", async || {
-        std::fs::read(r.project.join(".claudecord/inbox/t1-plan.txt"))
+        std::fs::read(r.project.join(".claudecord/files/t1-plan.txt"))
             .is_ok_and(|b| b == b"the plan")
     })
     .await;
     eventually("agent told", async || {
         std::fs::read_to_string(r.project.join("fake.log"))
-            .is_ok_and(|s| s.contains(".claudecord/inbox/t1-plan.txt"))
+            .is_ok_and(|s| s.contains(".claudecord/files/t1-plan.txt"))
     })
     .await;
     r.hub.shutdown().await;
@@ -525,23 +526,22 @@ async fn a_second_agent_in_the_same_git_folder_gets_its_own_worktree() {
     git(&["add", "."]);
     git(&["commit", "-q", "-m", "init"]);
     up(&r, "otter").await;
-    // Without asking for a worktree, a second agent in the same folder is refused.
-    let refused = up_with(&r, "heron", UpOpts::default()).await;
-    assert!(
-        !refused.ok && refused.msg.contains("--worktree"),
-        "{}",
-        refused.msg
-    );
-    let resp = up_with(
-        &r,
-        "heron",
-        UpOpts {
-            worktree: true,
-            ..Default::default()
-        },
-    )
-    .await;
+    // No flag needed: another agent already works here, so the second one is given its own worktree, and the answer says so.
+    let resp = up_with(&r, "heron", UpOpts::default()).await;
     assert!(resp.ok, "{}", resp.msg);
+    assert!(
+        resp.data.as_ref().unwrap()["worktree"]
+            .as_str()
+            .is_some_and(|t| t.contains("demo-heron")),
+        "{:?}",
+        resp.data
+    );
+    // Agents a person started are kept to offer again.
+    let saved = std::fs::read_to_string(r.dir.join("agents.json")).unwrap_or_default();
+    assert!(
+        saved.contains("otter") && saved.contains("heron"),
+        "{saved}"
+    );
     let tree = r.project.join(".claudecord/worktrees/demo-heron");
     assert!(
         tree.join("a.txt").exists(),
@@ -568,8 +568,8 @@ async fn a_second_agent_in_the_same_git_folder_gets_its_own_worktree() {
     )
     .await;
     assert!(
-        !r.project.join("fake.log").exists(),
-        "the first agent's folder was not touched"
+        std::fs::read_to_string(r.project.join("fake.log")).is_ok_and(|s| !s.contains("hello")),
+        "the first agent's folder did not get the second agent's message"
     );
     r.hub.shutdown().await;
 }
@@ -697,6 +697,9 @@ async fn a_raw_command_reaches_the_terminal_exactly_as_typed_without_a_header() 
 // Nothing happens by itself, and agents cannot act as each other.
 
 /// Shows a start-up trust dialog and waits for Enter before going on.
+/// The same question as the real Claude Code shows it: options without numbers, blank lines between the parts and before the footer.
+const TRUST_DIALOG_PLAIN: &str = "#!/bin/sh\nprintf '\\n Accessing workspace:\\n /work/eeg\\n Quick safety check: Is this a project you created or one you trust?\\n\\n Security guide\\n\\n ❯ No, exit\\n   Yes, I trust this folder\\n\\n Enter to confirm · Esc to cancel\\n'\nIFS= read -r line\necho \"got:[$line]\" >> trust.log\nsleep 30\n";
+
 const TRUST_DIALOG: &str = "#!/bin/sh\necho 'Do you trust the files in this folder?'\necho '> 1. Yes, proceed'\necho '  2. No, exit'\nIFS= read -r line\necho \"got:[$line]\" >> trust.log\necho 'fake claude'\nprintf '? for shortcuts\\n'\nsleep 30\n";
 
 async fn second_agent_elsewhere(r: &Rig, name: &str) -> (String, std::path::PathBuf) {
@@ -1246,5 +1249,278 @@ async fn an_agent_whose_program_is_missing_or_whose_folder_is_gone_is_refused_at
     // Neither left anything behind: a good start still works afterwards.
     let good = up_with(&r, "wren", UpOpts::default()).await;
     assert!(good.ok, "{}", good.msg);
+    r.hub.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_up_question_without_numbers_reaches_a_person_too_and_nothing_is_typed_for_them() {
+    let r = rig_with("trustplain", TRUST_DIALOG_PLAIN).await;
+    let mut chat = r.hub.chat();
+    up(&r, "otter").await;
+    let asked = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(Chat::Permission { perm, .. }) = chat.recv().await {
+                return perm.action.contains("trust");
+            }
+        }
+    })
+    .await;
+    assert_eq!(asked, Ok(true), "the question was passed to a person");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !r.project.join("trust.log").exists(),
+        "nothing was typed into the dialog"
+    );
+    r.hub.shutdown().await;
+}
+
+/// Like NORMAL, and every start is counted as a line in ./starts.log.
+const COUNTING: &str = "#!/bin/sh\necho run >> starts.log\necho 'fake claude'\nprintf '? for shortcuts\\n'\nwhile IFS= read -r line; do\n  printf '%s\\n' \"$line\" >> fake.log\n  echo \"ack: $line\"\n  printf '? for shortcuts\\n'\ndone\n";
+
+#[tokio::test]
+async fn restart_starts_the_same_agent_again_and_it_keeps_its_place_and_keeps_working() {
+    let r = rig_with("restart", COUNTING).await;
+    assert!(up_with(&r, "otter", UpOpts::default()).await.ok);
+    let starts =
+        || std::fs::read_to_string(r.project.join("starts.log")).map_or(0, |s| s.lines().count());
+    eventually("started once", async || starts() == 1).await;
+    // Asking for one that is not here says so and changes nothing.
+    let bad = ipc::call(
+        &r.dir,
+        &Req::Restart {
+            agent: Some("demo/nobody".into()),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(!bad.ok && bad.msg.contains("nobody"), "{}", bad.msg);
+    assert_eq!(starts(), 1);
+    // Restart by name, then everything: each is one more start, and the agent is still the same one in the team.
+    let one = ipc::call(
+        &r.dir,
+        &Req::Restart {
+            agent: Some("demo/otter".into()),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(one.ok, "{}", one.msg);
+    eventually("started a second time", async || starts() == 2).await;
+    let all = ipc::call(&r.dir, &Req::Restart { agent: None })
+        .await
+        .unwrap();
+    assert!(all.ok && all.msg.contains('1'), "{}", all.msg);
+    eventually("started a third time", async || starts() == 3).await;
+    assert!(
+        r.hub
+            .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
+            .await
+            .unwrap(),
+        "still registered"
+    );
+    r.hub
+        .call(|c, now| {
+            let r = c
+                .human_message(
+                    &kd(),
+                    "demo",
+                    "after the restart",
+                    &MessageOpts::default(),
+                    now,
+                )
+                .unwrap();
+            ((), r.1)
+        })
+        .await;
+    eventually("the restarted agent hears it", async || {
+        std::fs::read_to_string(r.project.join("fake.log"))
+            .is_ok_and(|s| s.contains("after the restart"))
+    })
+    .await;
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_agents_own_shell_command_can_speak_to_the_team_and_only_with_its_own_key() {
+    let r = rig("shellsay").await;
+    let mut chat = r.hub.chat();
+    let key = up(&r, "otter").await;
+    eventually("registered", async || {
+        r.hub
+            .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    // The real program, run the way an agent's shell runs it: its environment holds who it is and its secret key, nothing else is passed.
+    let run = |agent: &str, key: &str| {
+        let (home, agent, key) = (r.dir.clone(), agent.to_string(), key.to_string());
+        tokio::task::spawn_blocking(move || {
+            std::process::Command::new(env!("CARGO_BIN_EXE_claudecord"))
+                .args(["say", "hello from the shell"])
+                .env("CLAUDECORD_HOME", home)
+                .env("CLAUDECORD_AGENT", agent)
+                .env("CLAUDECORD_AGENT_KEY", key)
+                .output()
+                .unwrap()
+        })
+    };
+    let wrong = run("demo/otter", "not-its-key").await.unwrap();
+    assert!(!wrong.status.success(), "a wrong key is refused");
+    let right = run("demo/otter", &key).await.unwrap();
+    assert!(
+        right.status.success(),
+        "{}",
+        String::from_utf8_lossy(&right.stderr)
+    );
+    let said = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(Chat::Post { text, .. }) = chat.recv().await
+                && text == "hello from the shell"
+            {
+                return true;
+            }
+        }
+    })
+    .await;
+    assert_eq!(said, Ok(true), "what the agent said reached the chat");
+    // Several lines are piped in (`say -`), so they arrive as real lines and not as one line with backslash-n in it.
+    let (home, k) = (r.dir.clone(), key.clone());
+    let piped = tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        let mut c = std::process::Command::new(env!("CARGO_BIN_EXE_claudecord"))
+            .args(["say", "-"])
+            .env("CLAUDECORD_HOME", home)
+            .env("CLAUDECORD_AGENT", "demo/otter")
+            .env("CLAUDECORD_AGENT_KEY", k)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        c.stdin
+            .take()
+            .unwrap()
+            .write_all(b"first line\n- second line\n")
+            .unwrap();
+        c.wait().unwrap().success()
+    })
+    .await
+    .unwrap();
+    assert!(piped);
+    let lines = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(Chat::Post { text, .. }) = chat.recv().await
+                && text.starts_with("first line")
+            {
+                return text;
+            }
+        }
+    })
+    .await;
+    assert_eq!(lines.as_deref(), Ok("first line\n- second line"));
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_second_agent_in_a_folder_that_is_not_a_git_repository_is_refused_and_told_why() {
+    let r = rig("nogit").await;
+    up(&r, "otter").await;
+    let refused = up_with(&r, "heron", UpOpts::default()).await;
+    assert!(
+        !refused.ok
+            && refused.msg.contains("not a git repository")
+            && refused.msg.contains("different folder"),
+        "{}",
+        refused.msg
+    );
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_file_that_loses_a_piece_on_the_way_is_not_kept_and_the_agent_is_told() {
+    let r = rig("lostpiece").await;
+    up(&r, "otter").await;
+    eventually("registered", async || {
+        r.hub
+            .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    let data = vec![b'x'; 450 * 1024]; // three pieces
+    r.hub
+        .call(move |c, _| {
+            let (_, fx) = c
+                .send_file(&kd(), "demo", "see this", "big.bin", &data, None, "t2")
+                .unwrap();
+            // The second piece is lost.
+            let fx = fx
+                .into_iter()
+                .filter(|e| {
+                    !matches!(
+                        e,
+                        Effect::Send {
+                            frame: claudecord::protocol::HubFrame::FileChunk { seq: 1, .. },
+                            ..
+                        }
+                    )
+                })
+                .collect();
+            ((), fx)
+        })
+        .await;
+    eventually("agent told it did not arrive", async || {
+        std::fs::read_to_string(r.project.join("fake.log"))
+            .is_ok_and(|s| s.contains("big.bin did not arrive complete"))
+    })
+    .await;
+    let dir = r.project.join(".claudecord/files");
+    let left: Vec<_> = std::fs::read_dir(&dir)
+        .map(|d| d.filter_map(|e| e.ok()).map(|e| e.file_name()).collect())
+        .unwrap_or_default();
+    assert!(left.is_empty(), "nothing partial is kept: {left:?}");
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_file_changed_on_the_way_fails_its_checksum_and_is_not_kept() {
+    let r = rig("badsum").await;
+    up(&r, "otter").await;
+    eventually("registered", async || {
+        r.hub
+            .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    let data = vec![b'x'; 300 * 1024]; // two pieces
+    r.hub
+        .call(move |c, _| {
+            let (_, mut fx) = c
+                .send_file(&kd(), "demo", "see this", "big.bin", &data, None, "t3")
+                .unwrap();
+            // One piece arrives with different bytes (same length, so the pieces still add up).
+            for e in &mut fx {
+                if let Effect::Send {
+                    frame: claudecord::protocol::HubFrame::FileChunk { seq: 0, data, .. },
+                    ..
+                } = e
+                {
+                    *data = data.replacen('e', "f", 1);
+                    *data = data.replacen('e', "f", 1);
+                }
+            }
+            ((), fx)
+        })
+        .await;
+    eventually("agent told it was damaged", async || {
+        std::fs::read_to_string(r.project.join("fake.log"))
+            .is_ok_and(|s| s.contains("arrived damaged"))
+    })
+    .await;
+    let left: Vec<_> = std::fs::read_dir(r.project.join(".claudecord/files"))
+        .map(|d| d.filter_map(|e| e.ok()).map(|e| e.file_name()).collect())
+        .unwrap_or_default();
+    assert!(left.is_empty(), "nothing damaged is kept: {left:?}");
     r.hub.shutdown().await;
 }

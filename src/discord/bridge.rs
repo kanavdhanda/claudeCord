@@ -83,6 +83,10 @@ async fn watch(handle: &HubHandle, channel: &str) {
 }
 
 const CHECK: &str = "\u{2705}";
+/// The message reached the hub and is queued for the agent (the check mark comes when the agent has taken it up).
+const SEEN: &str = "\u{1F440}";
+/// The agent's machine is not connected, so the message waits for it.
+const WAITING: &str = "\u{23F3}";
 const REFUSED: &str = "\u{26D4}";
 
 /// Starts the bridge in the background, supervised: if it panics it is logged and started again, so Discord never quietly stops
@@ -110,6 +114,12 @@ struct Bridge {
     owner: Option<String>,
     /// The last status text shown per project, and when, so the status message is only edited when it changes.
     status_shown: HashMap<String, (String, Instant)>,
+    /// Whether the missing Manage Roles permission was already reported, so the log says it once.
+    roles_warned: bool,
+    /// When each server's leftover agent roles were last looked for.
+    pruned: HashMap<String, (std::time::Instant, String)>,
+    /// People already reported as ignored, so the log says it once per person.
+    ignored_said: std::collections::HashSet<String>,
 }
 
 /// The main loop: chat effects out, Discord events in.
@@ -203,6 +213,9 @@ async fn run(handle: HubHandle, mut chat: broadcast::Receiver<Chat>, cfg: Bridge
         guild: cfg.guild.clone(),
         owner,
         status_shown: HashMap::new(),
+        roles_warned: false,
+        pruned: HashMap::new(),
+        ignored_said: Default::default(),
     };
     b.watch_known().await;
     loop {
@@ -436,13 +449,18 @@ impl Bridge {
                 Chat::Post { project, agent, text, thread } => {
                     let (ch, th) = self.place(&project, thread.as_deref()).await.ok_or("no channel")?;
                     let (id, tok) = self.webhook(&ch).await.ok_or("no webhook")?;
-                    self.rest.webhook_send(&id, &tok, &agent.name, &text, th.as_deref()).await.map_err(|e| e.to_string())?;
+                    // A person the agent addressed by name is really tagged (and notified); the message is remembered as this agent's, so a reply to it goes to it.
+                    let (text, notify) = self.tag_people(&super::api::tidy_for_discord(&text));
+                    let posted = self.rest.webhook_send_to(&id, &tok, &agent.name, &text, th.as_deref(), &notify).await.map_err(|e| e.to_string())?;
+                    self.set(&format!("agentmsg:{posted}"), &agent.name);
                 }
                 Chat::Report { project, agent, title, summary, artifacts } => {
                     let (ch, _) = self.place(&project, None).await.ok_or("no channel")?;
                     let (id, tok) = self.webhook(&ch).await.ok_or("no webhook")?;
                     let list = artifacts.map(|a| format!("\n{}", a.join("\n"))).unwrap_or_default();
-                    self.rest.webhook_send(&id, &tok, &agent.name, &format!("**{title}**\n{summary}{list}"), None).await.map_err(|e| e.to_string())?;
+                    let (body, notify) = self.tag_people(&super::api::tidy_for_discord(&format!("**{title}**\n{summary}{list}")));
+                    let posted = self.rest.webhook_send_to(&id, &tok, &agent.name, &body, None, &notify).await.map_err(|e| e.to_string())?;
+                    self.set(&format!("agentmsg:{posted}"), &agent.name);
                 }
                 Chat::File { project, agent, name, data, caption, thread } => {
                     let (ch, th) = self.place(&project, thread.as_deref()).await.ok_or("no channel")?;
@@ -457,7 +475,7 @@ impl Bridge {
                         let row: Vec<Value> = opts.iter().take(5).enumerate().map(|(i, o)| json!({"type": 2, "style": 1, "label": o.chars().take(80).collect::<String>(), "custom_id": format!("ask:{project}:{label}:{i}")})).collect();
                         json!([{"type": 1, "components": row}])
                     });
-                    let text = format!("**{} asks ({label})**\n{}\nReply to this message to answer.", agent.name, ask.question);
+                    let text = format!("**{} asks ({label})**\n{}\nJust answer here (or reply to this message). Only {} gets it.", agent.name, ask.question, agent.name);
                     let mid = self.rest.send(&target, &text, buttons, &[]).await.map_err(|e| e.to_string())?;
                     self.set(&format!("msg:{project}:{label}"), &format!("{target}:{mid}"));
                     self.set(&format!("askmsg:{mid}"), &format!("{project}:{label}"));
@@ -497,9 +515,14 @@ impl Bridge {
                 Chat::Confirm { reference, .. } => {
                     if let Some((ch, mid)) = reference.split_once(':') {
                         self.rest.react(ch, mid, CHECK).await.map_err(|e| e.to_string())?;
+                        // The eyes (and the hourglass) said "received, waiting"; the check mark replaces them. Taking them off is only tidiness,
+                        // so if it fails nothing else does.
+                        let _ = self.rest.unreact(ch, mid, SEEN).await;
+                        let _ = self.rest.unreact(ch, mid, WAITING).await;
                     }
                 }
                 Chat::RefreshStatus(project) => self.refresh_status(&project).await?,
+                Chat::Clear(project) => self.clear_channel(&project).await?,
             }
             Ok(())
         }
@@ -513,7 +536,7 @@ impl Bridge {
     /// seconds and only when the text changed, so a flurry of status changes is one edit.
     async fn refresh_status(&mut self, project: &str) -> Result<(), String> {
         let p = project.to_string();
-        let lines: Vec<String> = self
+        let (lines, names): (Vec<String>, Vec<String>) = self
             .handle
             .call(move |c, _| {
                 let rows = c
@@ -528,10 +551,17 @@ impl Bridge {
                         )
                     })
                     .collect();
-                (rows, vec![])
+                let names = c
+                    .agents_of_project(&p)
+                    .iter()
+                    .map(|a| a.name.clone())
+                    .collect();
+                ((rows, names), vec![])
             })
             .await
             .unwrap_or_default();
+        self.ensure_roles(project, &names).await;
+        self.prune_roles(project).await;
         let text = format!("**Team**\n{}", lines.join("\n"));
         if self
             .status_shown
@@ -561,6 +591,221 @@ impl Bridge {
         self.status_shown
             .insert(project.to_string(), (text, Instant::now()));
         Ok(())
+    }
+
+    /// Starts a fresh chat in a project's channel: deletes its recent messages (not the pinned ones, nor the status board, and Discord will not delete
+    /// anything older than two weeks in bulk) and says that a new chat has started.
+    async fn clear_channel(&mut self, project: &str) -> Result<(), String> {
+        let ch = self.channel(project).await.ok_or("no channel")?;
+        let keep = self
+            .get(&format!("status:{project}"))
+            .and_then(|v| v.split_once(':').map(|(_, m)| m.to_string()));
+        // Thirteen days back, a day inside Discord's two-week limit for deleting in bulk.
+        let two_weeks_ago =
+            ((crate::now_ms() - 1_420_070_400_000 - 13 * 24 * 3_600_000).max(0) as u64) << 22;
+        let ids: Vec<String> = self
+            .rest
+            .recent_messages(&ch)
+            .await
+            .map_err(|e| e.to_string())?
+            .iter()
+            .filter(|m| m["pinned"] != true)
+            .filter_map(|m| m["id"].as_str())
+            .filter(|id| keep.as_deref() != Some(*id))
+            .filter(|id| id.parse::<u64>().is_ok_and(|n| n > two_weeks_ago))
+            .map(String::from)
+            .collect();
+        for chunk in ids.chunks(100) {
+            match chunk {
+                [] => {}
+                [one] => self
+                    .rest
+                    .delete_message(&ch, one)
+                    .await
+                    .map_err(|e| e.to_string())?,
+                many => self
+                    .rest
+                    .bulk_delete(&ch, many)
+                    .await
+                    .map_err(|e| e.to_string())?,
+            }
+        }
+        self.rest
+            .send(&ch, "New chat. The agents have started over.", None, &[])
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// The Discord server a project lives in, if it is known yet.
+    fn guild_of(&self, project: &str) -> Option<String> {
+        match &self.scope {
+            Some(sc) => sc.targets.target(project).map(|(_, t)| t.guild),
+            None => Some(self.guild.clone()),
+        }
+    }
+
+    /// Gives each agent a mentionable role named `name (agent)` in the project's server, so that typing `@name` in Discord offers it. A role
+    /// that is already there (made earlier, or by a previous run) is reused. Without the Manage Roles permission nothing breaks: `@name`
+    /// typed out in full still reaches the agent, only the pick-list is missing, and the log says what to do once.
+    /// Deletes the roles this bridge made for agents that are gone (`name (agent)`, mentionable, no permissions), whether it remembers making them or
+    /// not: a role left from an earlier run is found by its name. At most once a minute per server.
+    async fn prune_roles(&mut self, project: &str) {
+        let Some(guild) = self.guild_of(project) else {
+            return;
+        };
+        let mut alive: Vec<String> = self
+            .handle
+            .call(|c, _| {
+                let v = c
+                    .projects()
+                    .iter()
+                    .flat_map(|p| {
+                        c.agents_of_project(p)
+                            .iter()
+                            .map(|a| a.name.clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                (v, vec![])
+            })
+            .await
+            .unwrap_or_default();
+        alive.sort();
+        // Looked at when the agents here change (one has gone), and otherwise at most once a minute.
+        let key = alive.join(",");
+        if self
+            .pruned
+            .get(&guild)
+            .is_some_and(|(t, k)| *k == key && t.elapsed() < Duration::from_secs(60))
+        {
+            return;
+        }
+        self.pruned
+            .insert(guild.clone(), (std::time::Instant::now(), key));
+        let Ok(roles) = self.rest.guild_roles(&guild).await else {
+            return;
+        };
+        for r in roles {
+            let (Some(id), Some(name)) = (r["id"].as_str(), r["name"].as_str()) else {
+                continue;
+            };
+            let Some(base) = name.strip_suffix(" (agent)") else {
+                continue;
+            };
+            let ours = r["mentionable"].as_bool() == Some(true)
+                && r["managed"].as_bool() != Some(true)
+                && r["permissions"].as_str().is_none_or(|p| p == "0");
+            if !ours || alive.iter().any(|n| n == base) {
+                continue;
+            }
+            if self.rest.delete_role(&guild, id).await.is_ok() {
+                let _ = self.kv.kv_del(&format!("role:{guild}:{base}"));
+                let _ = self.kv.kv_del(&format!("rolerev:{guild}:{id}"));
+            }
+        }
+    }
+
+    async fn ensure_roles(&mut self, project: &str, names: &[String]) {
+        let Some(guild) = self.guild_of(project) else {
+            return;
+        };
+        let mut existing: Option<Vec<Value>> = None;
+        for n in names {
+            if self.get(&format!("role:{guild}:{n}")).is_some() {
+                continue;
+            }
+            let label = format!("{n} (agent)");
+            if existing.is_none() {
+                match self.rest.guild_roles(&guild).await {
+                    Ok(r) => existing = Some(r),
+                    Err(e) => return self.roles_trouble(&e.to_string()),
+                }
+            }
+            let found = existing
+                .iter()
+                .flatten()
+                .find(|r| r["name"].as_str() == Some(label.as_str()))
+                .and_then(|r| r["id"].as_str())
+                .map(String::from);
+            let id = match found {
+                Some(id) => id,
+                None => match self.rest.create_role(&guild, &label).await {
+                    Ok(id) => id,
+                    Err(e) => return self.roles_trouble(&e.to_string()),
+                },
+            };
+            self.set(&format!("role:{guild}:{n}"), &id);
+            self.set(&format!("rolerev:{guild}:{id}"), n);
+        }
+    }
+
+    fn roles_trouble(&mut self, why: &str) {
+        if !self.roles_warned {
+            self.roles_warned = true;
+            crate::warn!(
+                "discord",
+                "could not make the @mention roles for agents ({why}). Give the bot the Manage Roles permission (invite it again from the dashboard) to get them; typing @name in full still works"
+            );
+        }
+    }
+
+    /// Remembers the names a person goes by in Discord (username, display name, server nickname) against their id, so an agent writing `@kd256` can
+    /// really tag them. Names with spaces cannot be written as an `@name`, so they are not kept.
+    fn learn_person(&self, m: &Value, uid: &str) {
+        for n in [
+            m["author"]["username"].as_str(),
+            m["author"]["global_name"].as_str(),
+            m["member"]["nick"].as_str(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !n.is_empty() && !n.contains(' ') {
+                self.set(&format!("person:{}", n.to_lowercase()), uid);
+            }
+        }
+    }
+
+    /// Turns `@name` of a person this bridge has seen into a real tag (`<@id>`), and says whom to notify. Anything else (an agent's name, an
+    /// unknown name, an address like `me@name`) is left as written.
+    fn tag_people(&self, text: &str) -> (String, Vec<String>) {
+        static AT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new(r"(^|[^A-Za-z0-9_<@&])@([A-Za-z0-9_.-]{2,32})").expect("tag")
+        });
+        let mut notify: Vec<String> = Vec::new();
+        let out = AT
+            .replace_all(text, |c: &regex::Captures| {
+                let name = c[2].trim_end_matches(['.', '-']);
+                match self.get(&format!("person:{}", name.to_lowercase())) {
+                    Some(id) => {
+                        if !notify.contains(&id) {
+                            notify.push(id.clone());
+                        }
+                        format!("{}<@{id}>{}", &c[1], &c[2][name.len()..])
+                    }
+                    None => c[0].to_string(),
+                }
+            })
+            .into_owned();
+        (out, notify)
+    }
+
+    /// Turns a mention of an agent's role (`<@&123>`, what Discord sends when someone picks it from the list) into the plain `@name` the hub
+    /// routes on. Mentions of any other role are left as they are.
+    fn plain_mentions(&self, project: &str, text: &str) -> String {
+        static ROLE: std::sync::LazyLock<regex::Regex> =
+            std::sync::LazyLock::new(|| regex::Regex::new(r"<@&(\d+)>").expect("role mention"));
+        let Some(guild) = self.guild_of(project) else {
+            return text.to_string();
+        };
+        ROLE.replace_all(text, |c: &regex::Captures| {
+            match self.get(&format!("rolerev:{guild}:{}", &c[1])) {
+                Some(name) => format!("@{name}"),
+                None => c[0].to_string(),
+            }
+        })
+        .into_owned()
     }
 
     /// Which project (and thread name) a Discord channel belongs to.
@@ -634,7 +879,16 @@ impl Bridge {
             id: uid.to_string(),
             name,
         };
-        let text = m["content"].as_str().unwrap_or("").to_string();
+        self.learn_person(m, uid);
+        let mut text = self.plain_mentions(&project, m["content"].as_str().unwrap_or(""));
+        // Replying to an agent's message is talking to that agent: without a name in the text, it goes to the one replied to, not to the lead.
+        if !text.contains('@')
+            && let Some(agent) = m["message_reference"]["message_id"]
+                .as_str()
+                .and_then(|r| self.get(&format!("agentmsg:{r}")))
+        {
+            text = format!("@{agent} {text}");
+        }
         let answers = m["message_reference"]["message_id"]
             .as_str()
             .and_then(|r| self.get(&format!("askmsg:{r}")))
@@ -665,6 +919,14 @@ impl Bridge {
             .await
             .unwrap_or(false)
         {
+            // Silent in the channel (a stranger gets nothing), but the operator is told once, with the id to add if it is someone who should be let in.
+            if self.ignored_said.insert(uid.to_string()) {
+                crate::warn!(
+                    "discord",
+                    "ignored a message from {} (Discord user id {uid}) in the channel of project {project}: that person is not on the project's list. If it is you, run the hub with --owner-id {uid}",
+                    human.name
+                );
+            }
             return;
         }
         // The attachments are fetched first, so that the message and its files are taken in ONE step below: either all of it is saved, or
@@ -686,8 +948,25 @@ impl Bridge {
                     .await;
                 continue;
             }
-            if let Ok(data) = self.rest.download(&url).await {
-                fetched.push((fid, fname, data));
+            // Two tries; if the file cannot be fetched the sender is told, instead of the message going on without it in silence.
+            let mut got = self.rest.download(&url).await;
+            if got.is_err() {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                got = self.rest.download(&url).await;
+            }
+            match got {
+                Ok(data) => fetched.push((fid, fname, data)),
+                Err(e) => {
+                    let _ = self
+                        .rest
+                        .send(
+                            channel,
+                            &format!("Could not fetch {fname} from Discord ({e}), so the agents did not get it. Send it again."),
+                            None,
+                            &[],
+                        )
+                        .await;
+                }
             }
         }
         let reference = format!("{channel}:{mid}");
@@ -708,7 +987,7 @@ impl Bridge {
                 if let Some(n) = mid_num
                     && !c.take_chat_message(&chan, n)
                 {
-                    return (Ok(()), vec![]);
+                    return (Ok(None), vec![]);
                 }
                 let opts = MessageOpts {
                     thread: th2.as_deref(),
@@ -716,8 +995,8 @@ impl Bridge {
                     answers_ask: answers.as_deref(),
                     attachments: &[],
                 };
-                let mut fx = match c.human_message(&h2, &p2, &t2, &opts, now) {
-                    Ok((_, fx)) => fx,
+                let (routed, mut fx) = match c.human_message(&h2, &p2, &t2, &opts, now) {
+                    Ok(r) => r,
                     Err(d) => return (Err(d), vec![]),
                 };
                 for (fid, fname, data) in &fetched {
@@ -725,7 +1004,7 @@ impl Bridge {
                         fx.extend(f);
                     }
                 }
-                (Ok(()), fx)
+                (Ok(Some(routed)), fx)
             })
             .await;
         match outcome {
@@ -733,7 +1012,25 @@ impl Bridge {
             Some(Err(_)) => {
                 let _ = self.rest.react(channel, mid, REFUSED).await;
             }
-            Some(Ok(())) => {}
+            Some(Ok(None)) => {}
+            // Say at once what became of the message, so nobody has to wonder whether it arrived.
+            Some(Ok(Some(routed))) => {
+                if routed.targets.is_empty() {
+                    let _ = self
+                        .rest
+                        .send(
+                            channel,
+                            "Nobody is running in this project right now, so no agent got that. Start one with `claudecord start` in the project's folder.",
+                            None,
+                            &[],
+                        )
+                        .await;
+                } else if routed.offline.len() == routed.targets.len() {
+                    let _ = self.rest.react(channel, mid, WAITING).await;
+                } else {
+                    let _ = self.rest.react(channel, mid, SEEN).await;
+                }
+            }
         }
     }
 
@@ -750,6 +1047,35 @@ impl Bridge {
         let Some(uid) = user["id"].as_str() else {
             return;
         };
+        // Someone is typing an agent's name: list the agents here that match so far.
+        if i["type"].as_u64() == Some(4) {
+            if let Some((project, _)) = self.project_of(channel) {
+                let mut todo: Vec<Value> =
+                    i["data"]["options"].as_array().cloned().unwrap_or_default();
+                let mut typed = String::new();
+                while let Some(o) = todo.pop() {
+                    if o["focused"].as_bool() == Some(true) {
+                        typed = o["value"].as_str().unwrap_or("").to_lowercase();
+                    }
+                    todo.extend(o["options"].as_array().cloned().unwrap_or_default());
+                }
+                let names: Vec<String> = self
+                    .handle
+                    .call(move |c, _| {
+                        let v = c
+                            .agents_of_project(&project)
+                            .iter()
+                            .map(|a| a.name.clone())
+                            .filter(|n| n.to_lowercase().contains(&typed))
+                            .collect::<Vec<_>>();
+                        (v, vec![])
+                    })
+                    .await
+                    .unwrap_or_default();
+                let _ = self.rest.choices(iid, token, &names).await;
+            }
+            return;
+        }
         let Some((project, _)) = self.project_of(channel) else {
             let _ = self
                 .rest
@@ -780,7 +1106,17 @@ impl Bridge {
             Some(2) => {
                 let cmd = i["data"]["name"].as_str().unwrap_or("").to_string();
                 let mut opts: commands::Opts = HashMap::new();
-                for o in i["data"]["options"].as_array().cloned().unwrap_or_default() {
+                // A sub-command (`/clear agent`, `/clear chat`) arrives as an option that holds its own options: its name is kept as `sub`.
+                let mut todo: Vec<Value> =
+                    i["data"]["options"].as_array().cloned().unwrap_or_default();
+                while let Some(o) = todo.pop() {
+                    if o["type"] == 1 {
+                        if let Some(n) = o["name"].as_str() {
+                            opts.insert("sub".into(), n.to_string());
+                        }
+                        todo.extend(o["options"].as_array().cloned().unwrap_or_default());
+                        continue;
+                    }
                     let (Some(k), v) = (o["name"].as_str(), &o["value"]) else {
                         continue;
                     };

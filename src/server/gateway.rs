@@ -16,7 +16,7 @@ use crate::security::limits::FailureLimiter;
 use crate::sync::Lock;
 use axum::{
     Json, Router,
-    extract::{ConnectInfo, Query, State, WebSocketUpgrade},
+    extract::{ConnectInfo, Path, Query, State, WebSocketUpgrade},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
@@ -43,6 +43,8 @@ pub struct GatewayConfig {
     pub discord: crate::control::registry::DiscordSettings,
     /// Local preview: `/auth/dev` signs anyone in without Discord. Refused unless the service listens on this machine only.
     pub dev: bool,
+    /// Discord people who own every account's projects, besides the account's own person. Empty for the real service.
+    pub extra_owners: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -58,7 +60,29 @@ pub(crate) struct Gateway {
     pub(crate) failures: Arc<Mutex<FailureLimiter>>,
     /// Asking for new device codes, per address, so nobody fills the table.
     pub(crate) code_asks: Arc<Mutex<FailureLimiter>>,
+    /// Project choices waiting to be made on the dashboard, by short code (see `pick_start`).
+    pub(crate) picks: Arc<Mutex<HashMap<String, Pick>>>,
+    /// What Discord said lately about the servers a bot is in, by `account/bot`, so the dashboard asking often does not ask Discord as often.
+    pub(crate) guild_cache: Arc<Mutex<GuildCache>>,
 }
+
+/// The servers of each bot as Discord last said, with when (milliseconds), by `account/bot`.
+pub(crate) type GuildCache = HashMap<String, (i64, Vec<serde_json::Value>)>;
+
+/// A machine asking the person to choose, on the dashboard, which project a folder belongs to.
+pub(crate) struct Pick {
+    tenant: String,
+    node: String,
+    folder: String,
+    chosen: Option<String>,
+    /// What else the page asked for with the project: the first agent's name and program.
+    agent: Option<String>,
+    adapter: Option<String>,
+    at: i64,
+}
+
+/// How long a pick waits for the person before it is forgotten.
+const PICK_TTL_MS: i64 = 60 * 60_000;
 
 /// A running gateway.
 pub struct GatewayHandle {
@@ -104,7 +128,8 @@ pub async fn start_gateway(
             keys.clone(),
             cfg.discord.clone(),
         )
-        .with_bucket(cfg.bucket),
+        .with_bucket(cfg.bucket)
+        .with_extra_owners(cfg.extra_owners.clone()),
     );
     let gw = Gateway {
         control: control.clone(),
@@ -116,6 +141,8 @@ pub async fn start_gateway(
         dev: cfg.dev,
         failures: Arc::new(Mutex::new(FailureLimiter::new(10, 60_000.0))),
         code_asks: Arc::new(Mutex::new(FailureLimiter::new(20, 60_000.0))),
+        picks: Arc::new(Mutex::new(HashMap::new())),
+        guild_cache: Arc::new(Mutex::new(HashMap::new())),
     };
     let app = router(gw).layer(axum::middleware::from_fn(super::real_client));
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
@@ -148,6 +175,10 @@ pub(crate) fn router(gw: Gateway) -> Router {
         .route("/auth/callback", get(auth_callback))
         .route("/auth/dev", get(auth_dev))
         .route("/auth/logout", post(auth_logout))
+        .route("/api/device/project/{name}", get(device_project))
+        .route("/api/device/pick", post(pick_start))
+        .route("/api/device/pick/{code}", get(pick_poll))
+        .route("/api/v1/pick/{code}", get(pick_view).post(pick_choose))
         .route("/api/device/code", post(device_code))
         .route("/api/device/token", post(device_token))
         .route("/api/device/lookup", get(device_lookup))
@@ -231,6 +262,212 @@ async fn connect(
         Ok(Some(t)) => admit(&t.state, &ip, node, ws),
         _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
+}
+
+/// `GET /api/device/project/{name}`: asks, with a machine's own token, whether a project of its account has a Discord channel yet, so that
+/// `claudecord start` can send the person to the dashboard's setup page only when it is needed. It says nothing else about the account.
+async fn device_project(
+    State(gw): State<Gateway>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    let (tenant, _) = match machine_auth(&gw, &headers, &ip_of(peer), crate::now_ms() as f64) {
+        Ok(m) => m,
+        Err(r) => return *r,
+    };
+    if !crate::protocol::is_slug(&name) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let target = gw.control.target(&tenant, &name).ok().flatten();
+    let problem = match &target {
+        Some(t) => super::bots::project_problem(&gw, &tenant, t).await,
+        None => None,
+    };
+    json_reply(
+        StatusCode::OK,
+        json!({ "placed": target.is_some(), "problem": problem }),
+    )
+}
+
+/// The machine behind a request's token: (account, machine name). A wrong or missing token counts against the caller's address.
+fn machine_auth(
+    gw: &Gateway,
+    headers: &HeaderMap,
+    ip: &str,
+    now: f64,
+) -> Result<(String, String), Box<Response>> {
+    if gw.failures.locked().blocked(ip, now) {
+        return Err(Box::new(StatusCode::TOO_MANY_REQUESTS.into_response()));
+    }
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+    let found = if token.is_empty() {
+        None
+    } else {
+        gw.control.machine_for_token(token).ok().flatten()
+    };
+    found.ok_or_else(|| {
+        gw.failures.locked().fail(ip, now);
+        Box::new(StatusCode::UNAUTHORIZED.into_response())
+    })
+}
+
+#[derive(Deserialize)]
+struct PickStart {
+    folder: String,
+}
+
+/// `POST /api/device/pick`: `claudecord start` in a folder that belongs to no project yet asks for a short code. The person opens
+/// `/pick?code=...` on the dashboard, chooses or names the project there, and the machine collects the answer (`pick_poll`). The choice is
+/// only ever made on the dashboard, by a signed-in person of the same account.
+async fn pick_start(
+    State(gw): State<Gateway>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(b): Json<PickStart>,
+) -> Response {
+    let (ip, now) = (ip_of(peer), crate::now_ms());
+    let (tenant, node) = match machine_auth(&gw, &headers, &ip, now as f64) {
+        Ok(m) => m,
+        Err(r) => return *r,
+    };
+    let folder: String = b
+        .folder
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(100)
+        .collect();
+    let mut picks = gw.picks.locked();
+    picks.retain(|_, p| now - p.at < PICK_TTL_MS);
+    if picks.len() >= 500 {
+        return err(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many waiting, try again in a few minutes",
+        );
+    }
+    let code = random_hex().chars().take(12).collect::<String>();
+    picks.insert(
+        code.clone(),
+        Pick {
+            tenant,
+            node,
+            folder,
+            chosen: None,
+            agent: None,
+            adapter: None,
+            at: now,
+        },
+    );
+    json_reply(StatusCode::OK, json!({ "code": code }))
+}
+
+/// `GET /api/device/pick/{code}`: the machine that asked collects the answer: null until the person has chosen.
+async fn pick_poll(
+    State(gw): State<Gateway>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(code): Path<String>,
+) -> Response {
+    let (ip, now) = (ip_of(peer), crate::now_ms());
+    let (tenant, node) = match machine_auth(&gw, &headers, &ip, now as f64) {
+        Ok(m) => m,
+        Err(r) => return *r,
+    };
+    let mut picks = gw.picks.locked();
+    match picks.get(&code) {
+        Some(p) if p.tenant == tenant && p.node == node && now - p.at < PICK_TTL_MS => {
+            let (chosen, agent, adapter) = (p.chosen.clone(), p.agent.clone(), p.adapter.clone());
+            if chosen.is_some() {
+                picks.remove(&code);
+            }
+            json_reply(
+                StatusCode::OK,
+                json!({ "chosen": chosen, "agent": agent, "adapter": adapter }),
+            )
+        }
+        _ => err(
+            StatusCode::NOT_FOUND,
+            "that choice expired; run the command again",
+        ),
+    }
+}
+
+/// `GET /api/v1/pick/{code}`: the dashboard page asks what is being chosen (the folder and the machine), for the signed-in owner only.
+async fn pick_view(
+    State(gw): State<Gateway>,
+    headers: HeaderMap,
+    Path(code): Path<String>,
+) -> Response {
+    let Some(a) = account_of(&gw, &headers) else {
+        return err(StatusCode::UNAUTHORIZED, "sign in first");
+    };
+    let now = crate::now_ms();
+    match gw.picks.locked().get(&code) {
+        Some(p) if p.tenant == a.id && now - p.at < PICK_TTL_MS => json_reply(
+            StatusCode::OK,
+            json!({ "folder": p.folder, "node": p.node }),
+        ),
+        _ => err(
+            StatusCode::NOT_FOUND,
+            "that choice expired; run the command again",
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+struct PickChoose {
+    project: String,
+    agent: Option<String>,
+    adapter: Option<String>,
+}
+
+/// `POST /api/v1/pick/{code}`: the person chooses the project on the dashboard.
+async fn pick_choose(
+    State(gw): State<Gateway>,
+    headers: HeaderMap,
+    Path(code): Path<String>,
+    Json(b): Json<PickChoose>,
+) -> Response {
+    let Some(a) = account_of(&gw, &headers) else {
+        return err(StatusCode::UNAUTHORIZED, "sign in first");
+    };
+    if !crate::protocol::is_slug(&b.project) {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "names use letters, digits, dots, dashes and underscores",
+        );
+    }
+    let now = crate::now_ms();
+    let mine = gw
+        .picks
+        .locked()
+        .get(&code)
+        .is_some_and(|p| p.tenant == a.id && now - p.at < PICK_TTL_MS);
+    if !mine {
+        return err(
+            StatusCode::NOT_FOUND,
+            "that choice expired; run the command again",
+        );
+    }
+    // Nothing continues without a Discord bot that is really in a server with the permissions it needs. (A saved bot is one Discord confirmed the
+    // token of; being in a server with the right permissions is checked with Discord now.)
+    if let Err(why) = super::bots::account_ready(&gw, &a.id).await {
+        return err(StatusCode::CONFLICT, &why);
+    }
+    if let Some(p) = gw.picks.locked().get_mut(&code) {
+        p.chosen = Some(b.project);
+        p.agent = b
+            .agent
+            .filter(|n| crate::protocol::agent_name_problem(n).is_none() && !n.is_empty());
+        p.adapter = b
+            .adapter
+            .filter(|a| matches!(a.as_str(), "claude" | "codex" | "agy"));
+    }
+    json_reply(StatusCode::OK, json!({ "ok": true }))
 }
 
 /// Whether the gateway can do its job: its database answers.

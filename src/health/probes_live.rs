@@ -94,7 +94,7 @@ pub fn features() -> Vec<Feature> {
         },
         Feature {
             name: "tmux sessions: start, paste, read, log, stop",
-            covers: &["device/tmux", "device/logs"],
+            covers: &["device/tmux", "device/logs", "device/shot"],
             probe: tmux_probe,
         },
         Feature {
@@ -362,6 +362,7 @@ fn tmux_probe() -> Probe {
         let t = TmuxTerminal::spawn(
             &socket,
             "probe-otter",
+            "probe/otter",
             &["cat".into()],
             Path::new("/tmp"),
             &[],
@@ -424,6 +425,7 @@ async fn rig(
         labels: vec![],
         backend: crate::device::terminal::Backend::Pty,
         auto_startup: false,
+        idle_exit: None,
     };
     let d = dir.clone();
     tokio::spawn(async move {
@@ -597,7 +599,7 @@ fn daemon_flow() -> Probe {
         .await;
         ensure!(
             eventually(
-                async || std::fs::read(project.join(".claudecord/inbox/t1-plan.txt"))
+                async || std::fs::read(project.join(".claudecord/files/t1-plan.txt"))
                     .is_ok_and(|b| b == b"the plan")
             )
             .await,

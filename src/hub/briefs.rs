@@ -26,10 +26,13 @@ pub fn lead(a: &AgentRow, peers: &[&AgentRow]) -> String {
 
 /// Instructions for an agent that is not the lead. It is told about the other workers too, so it knows who it can @name.
 pub fn worker(a: &AgentRow, lead: &AgentRow, others: &[&AgentRow]) -> String {
+    // Not "do their tasks": people write to a worker directly too, and an agent told it must be doing assigned work answers a plain message with
+    // "I have no task". So: who leads, that people may write to it, and how a task ends.
     let mut s = format!(
-        "{} leads {}. Do their tasks, then run done <id> <summary>.",
+        "{} leads {}. People may also write to you directly: answer them with say. A task from {} ends with done <id> <summary>.",
         who(lead),
-        a.project
+        a.project,
+        lead.name
     );
     if !others.is_empty() {
         let names: Vec<String> = others.iter().map(|p| who(p)).collect();

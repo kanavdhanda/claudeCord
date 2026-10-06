@@ -42,15 +42,24 @@ pub struct ServeArgs {
     #[arg(long)]
     pub public_url: String,
     /// The Discord application used to sign people in (not their bots). Create it in the Discord developer portal.
-    #[arg(long, required_unless_present = "dev")]
+    #[arg(long, required_unless_present_any = ["dev", "demo"])]
     pub client_id: Option<String>,
     /// File holding that application's client secret.
-    #[arg(long, required_unless_present = "dev")]
+    #[arg(long, required_unless_present_any = ["dev", "demo"])]
     pub secret_file: Option<PathBuf>,
-    /// Try it on this machine with no Discord at all: sign-in lets you in as a made-up person and the servers and channels come from a
-    /// built-in stand-in. Only runs on 127.0.0.1.
-    #[arg(long)]
+    /// For working on this program on your own machine: sign-in lets you in as a made-up person (there is no Discord login app to set up locally).
+    /// Everything else is real: bots must be real Discord bot tokens, checked with Discord, and there is no pre-filled data. Only runs on 127.0.0.1.
+    #[arg(long, hide = true)]
     pub dev: bool,
+    /// A Discord user id that owns every account's projects here (repeat for several), besides the account's own person. For `--dev`, where the
+    /// made-up sign-in is not the Discord person typing in the channel: put YOUR Discord user id here (Discord: Settings, Advanced, Developer Mode,
+    /// then right-click your name and Copy User ID). The hub's log says it when it ignores someone, with their id.
+    #[arg(long = "owner-id", hide = true)]
+    pub owner_ids: Vec<String>,
+    /// A look around with no Discord at all (implies --dev): a stand-in Discord keeps every page working with no account and no bot, and the
+    /// dashboard is pre-filled with a made-up project, machine and agents. Only runs on 127.0.0.1.
+    #[arg(long, hide = true)]
+    pub demo: bool,
     /// Allow listening on a public address without TLS.
     #[arg(long)]
     pub allow_plain: bool,
@@ -356,12 +365,12 @@ pub async fn run_serve(a: ServeArgs) -> Result<(), String> {
         _ => None,
     };
     // Local preview: a stand-in Discord keeps every page of the wizard working with no account and no bot.
-    let discord = if a.dev {
+    let discord = if a.demo {
         let (fake, addr) = crate::discord::fake::start_fake().await;
         std::mem::forget(fake);
         crate::info!(
             "hub",
-            "dev mode: a stand-in Discord is running, nothing here reaches the real one"
+            "demo mode: a stand-in Discord is running, nothing here reaches the real one"
         );
         crate::control::registry::DiscordSettings {
             api_base: format!("http://{addr}/api"),
@@ -370,6 +379,18 @@ pub async fn run_serve(a: ServeArgs) -> Result<(), String> {
     } else {
         Default::default()
     };
+    if !a.owner_ids.is_empty() && !(a.dev || a.demo) {
+        return Err("--owner-id is only for --dev or --demo (it is for working on claudeCord on one machine)".into());
+    }
+    if let Some(bad) = a
+        .owner_ids
+        .iter()
+        .find(|o| o.is_empty() || !o.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Err(format!(
+            "--owner-id is a Discord user id, digits only (got {bad:?})"
+        ));
+    }
     let stop = crate::task::stop_listener();
     std::fs::create_dir_all(&a.data).map_err(|e| e.to_string())?;
     crate::log::init(Some(a.data.join("hub.log")));
@@ -392,8 +413,9 @@ pub async fn run_serve(a: ServeArgs) -> Result<(), String> {
             oauth,
             hub: Config::default(),
             discord,
-            dev: a.dev,
+            dev: a.dev || a.demo,
             bucket,
+            extra_owners: a.owner_ids.clone(),
         },
         a.data.clone(),
         control,
@@ -406,12 +428,12 @@ pub async fn run_serve(a: ServeArgs) -> Result<(), String> {
         }
         _ => e.to_string(),
     })?;
-    if a.dev {
+    if a.demo {
         // So the dashboard has something to show: a made-up account with a placed project, a machine, agents and a few hours of work.
         server::demo::seed(&g.control, &g.registry, keys.as_ref())
             .await
             .map_err(|e| format!("could not make the demo data: {e}"))?;
-        crate::info!("hub", "dev mode: sign in to see a demo account");
+        crate::info!("hub", "demo mode: sign in to see a demo account");
     }
     crate::info!(
         "hub",

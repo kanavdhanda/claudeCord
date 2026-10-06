@@ -49,16 +49,19 @@ Discord threads).
     claudecord serve --data claudecord-data --public-url https://claudecord.example.com --client-id DISCORD_APP_ID --secret-file secret.txt
 
 With Docker (built on the server itself, nothing is pulled from a registry): `deploy/compose.yml` has the steps; put nginx or Caddy in front for TLS. `deploy/baremetal/bootstrap.sh` does it without Docker on a fresh Ubuntu or Debian machine (service, TLS, firewall). The Discord application given here only signs people
-in; their bots are saved on the dashboard, encrypted with a key the program makes in the data folder (**back up the file `kek`**). To try everything
-on your own computer with no Discord at all: `claudecord serve --dev --public-url http://127.0.0.1:8787`, then `cd web && npm run dev`.
+in; their bots are saved on the dashboard, encrypted with a key the program makes in the data folder (**back up the file `kek`**). To look around
+on your own computer with no Discord at all: `claudecord serve --demo --public-url http://127.0.0.1:8787` (a stand-in Discord and pre-filled demo data), then `cd web && npm run dev`. `--dev` alone keeps only the made-up sign-in: bots must be real, and nothing is pre-filled.
 
 The older single-team mode still exists for one team on one server: `claudecord hub`, `claudecord discord set`, `claudecord token`.
+
+`claudecord` on its own lists the agents running here (the one in this folder highlighted) and the ways to start one; Enter takes the highlighted line and each line shows the command it runs. `claudecord stop` lists what is running, asks, then stops everything here (every agent, and the connection to the hub; `-y` skips the question); `claudecord stop NAME` stops one. `claudecord restart` starts every
+agent's program again with the same name and folder (`claudecord restart NAME` for one).
 
 `claudecord start` does exactly what you ask and nothing more. Every extra is a flag you choose:
 
 | Flag | Does |
 |---|---|
-| `--worktree` | gives the agent its own git worktree and branch (without it, a second agent in a busy folder is refused) |
+| `--worktree` | gives the agent its own git worktree and branch (this happens by itself when another agent already works in the folder; a folder that is not a git repository can only hold one agent) |
 | `--pickup` | hands over the state the previous session saved |
 | `--restart N` | starts the agent again up to N times if it dies (default: never) |
 | `-- COMMAND...` | runs that program instead of the adapter's default |
@@ -97,7 +100,8 @@ includes every agent's own posts) are never treated as a person.
 ## Slash commands in Discord
 
 `/agents` `/devices` `/status` `/pause` `/resume` `/stop` `/killall` `/btw` `/grant` `/revoke` `/role` `/dump` `/pickup` `/raw`
-`/spawn`. Roles are checked by the hub for each one.
+`/spawn` `/clear` `/lead` `/screen`. Roles are checked by the hub for each one. `/clear agent [name]` (operator) starts one agent over with a clean memory (default: the lead) and leaves the channel alone, and closes its open questions. `/screen [agent]` posts a picture of that agent's terminal (tmux agents; it is also posted by itself, at most once per five minutes per agent, when an agent finishes without answering, looks stuck, asks for permission, hits a usage limit or its program ends). `/lead agent:NAME` (owner) chooses which agent leads; if the lead leaves, the one that has been in the project longest takes over. `/clear chat` (owner) starts a fresh chat:
+it deletes the channel's recent messages (not pinned ones) and starts every agent over.
 
 ## Permissions
 

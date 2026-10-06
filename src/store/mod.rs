@@ -193,6 +193,13 @@ impl Store {
         Ok(())
     }
 
+    /// Forgets a remembered fact.
+    pub fn kv_del(&self, key: &str) -> rusqlite::Result<()> {
+        self.conn
+            .execute("DELETE FROM kv WHERE key = ?1", params![key])?;
+        Ok(())
+    }
+
     /// A remembered fact, if there is one.
     pub fn kv_get(&self, key: &str) -> rusqlite::Result<Option<String>> {
         self.conn

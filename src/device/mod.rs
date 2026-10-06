@@ -9,6 +9,7 @@
 //! - `terminal` the one interface to an agent's terminal, and the choice between tmux and the built-in terminal
 //! - `tmux`    the tmux way: one tmux session per agent, attach with ordinary tmux
 //! - `pty`     the built-in pseudo-terminal way, for machines without tmux (Windows without WSL)
+//! - `shot`    draws a terminal screen (with its colours) as a PNG picture, to show in the chat what an agent's terminal looks like
 //! - `daemon`  the program on a machine: link, agents, safe pasting, status reporting, the local command door
 //! - `doctor`  step-by-step check of whether this machine can reach the hub, and where it stops
 //! - `logs`    what is written down about each agent (events and terminal), for handing work on
@@ -23,5 +24,6 @@ pub mod ipc;
 pub mod link;
 pub mod logs;
 pub mod pty;
+pub mod shot;
 pub mod terminal;
 pub mod tmux;

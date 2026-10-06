@@ -10,9 +10,16 @@ export function Overview() {
   const state = useLoad(api.state, 3000)
   const projects = useLoad(api.projects, 6000)
   const bots = useLoad(api.bots)
+  const approved = useLoad(api.machines, 6000)
   if (!state.data || !projects.data) return <p className="muted">Loading…</p>
   const placed = new Map(projects.data.map((p) => [p.project, p]))
   const names = [...new Set([...Object.keys(state.data.projects), ...projects.data.map((p) => p.project)])].sort()
+  // Every approved machine, connected or not: one that has just been approved has not connected yet.
+  const seen = new Map(state.data.devices.map((d) => [d.node, d]))
+  const devices = [
+    ...state.data.devices,
+    ...(approved.data ?? []).filter((m) => !seen.has(m.node)).map((m) => ({ node: m.node, connected: false, agents: 0, max: null, labels: [], lastSeen: null })),
+  ]
   const empty = bots.data && bots.data.length === 0
 
   return (
@@ -30,20 +37,20 @@ export function Overview() {
 
       <section className="stack">
         <h2>Machines</h2>
-        {state.data.devices.length === 0 ? (
+        {devices.length === 0 ? (
           <p className="muted">
             No machine has connected yet. On a machine, run <code>npx claudecord</code> and approve it in your browser.
           </p>
         ) : (
           <div className="grid">
-            {state.data.devices.map((d) => (
+            {devices.map((d) => (
               <div key={d.node} className="card tight">
                 <div className="row between">
                   <b>{d.node}</b>
                   <span className={`pill ${d.connected ? 'ok' : 'off'}`}>{d.connected ? 'connected' : 'away'}</span>
                 </div>
                 <div className="muted small">
-                  {d.agents}{d.max ? ` of ${d.max}` : ''} agents · seen {ago(d.lastSeen)}
+                  {d.lastSeen == null ? 'approved, not connected yet' : <>{d.agents}{d.max ? ` of ${d.max}` : ''} agents · seen {ago(d.lastSeen)}</>}
                 </div>
               </div>
             ))}
@@ -74,9 +81,16 @@ function ProjectCard({ name, place, s, machines }: { name: string; place?: Proje
         <div>
           <h3>{name}</h3>
           {place?.placed ? (
-            <span className="muted small">
-              #{place.channel_name} in {place.guild_name}
-            </span>
+            <>
+              <span className="muted small">
+                #{place.channel_name} in {place.guild_name}
+              </span>
+              {place.problem && (
+                <p className="error small">
+                  Discord is not working for this project: {place.problem} <Link to="/bots">Discord bots</Link>
+                </p>
+              )}
+            </>
           ) : (
             <span className="warn small">Not placed in Discord yet — its agents' messages go nowhere. <Link to="/setup">Choose where</Link></span>
           )}
@@ -140,7 +154,11 @@ function SpawnForm({ project, machines, done }: { project: string; machines: str
         <option value="">Any machine</option>
         {machines.map((m) => <option key={m}>{m}</option>)}
       </select>
-      <button className="btn primary" disabled={act.busy || !name} onClick={() => act.run(async () => setResult((await api.spawn(project, name, adapter, node || undefined)).node))}>Start</button>
+      <button className="btn primary" disabled={act.busy || !name} onClick={() => act.run(async () => {
+        setResult((await api.spawn(project, name, adapter, node || undefined)).node)
+        // Say it was asked, then close by itself.
+        setTimeout(done, 2000)
+      })}>Start</button>
       <button className="btn" onClick={done}>Close</button>
       {act.error && <span className="error">{act.error}</span>}
       {result && <span className="ok">Asked {result} to start {name}.</span>}

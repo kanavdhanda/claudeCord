@@ -93,6 +93,9 @@ pub struct Registry {
     /// Where old history and backups go, if the operator set up a bucket. Each account gets its own folder in it.
     bucket: Option<crate::store::bucket::Bucket>,
     cfg: Config,
+    /// Discord people who own every account's projects here, besides each account's own person (for trying things out on one machine, where the
+    /// made-up sign-in is not the person typing in Discord).
+    extra_owners: Vec<String>,
     tenants: Mutex<HashMap<String, Arc<Tenant>>>,
 }
 
@@ -113,8 +116,15 @@ impl Registry {
             discord,
             bucket: None,
             cfg,
+            extra_owners: Vec::new(),
             tenants: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Adds Discord people who own every account's projects (see the field).
+    pub fn with_extra_owners(mut self, owners: Vec<String>) -> Self {
+        self.extra_owners = owners;
+        self
     }
 
     /// Uses a bucket for every account's old history and backups, each under `tenants/<id>/` so accounts never share a path.
@@ -144,6 +154,9 @@ impl Registry {
         }));
         let mut core = HubCore::default();
         core.add_owner(&account.discord_id);
+        for o in &self.extra_owners {
+            core.add_owner(o);
+        }
         let mut cfg = self.cfg.clone();
         cfg.log_path = None;
         let hub = spawn_core(cfg, core, store);
@@ -216,7 +229,9 @@ impl Registry {
             guild: String::new(),
             gateway_url: self.discord.gateway_url.clone(),
             db_path: self.data.join("tenants").join(&tenant.id).join("hub.db"),
-            owners: vec![tenant.account.discord_id.clone()],
+            owners: std::iter::once(tenant.account.discord_id.clone())
+                .chain(self.extra_owners.iter().cloned())
+                .collect(),
             backoff_max: Duration::from_secs(60),
         };
         let handle = bridge::spawn(tenant.state.handle.clone(), tenant.chat.subscribe(), cfg);

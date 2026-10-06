@@ -57,6 +57,12 @@ pub struct StartArgs {
     /// Start the agent again up to this many times (in ten minutes) if its program ends. Otherwise never.
     #[arg(long, default_value_t = 0)]
     pub restart: u32,
+    /// Choose the project on the dashboard again, even if this folder already belongs to one.
+    #[arg(long)]
+    pub pick: bool,
+    /// Do not write the team-chat guide into this folder's AGENTS.md.
+    #[arg(long)]
+    pub no_guide: bool,
     /// Run this command instead of the agent program (anything that runs in a terminal). Put it after `--`.
     #[arg(last = true)]
     pub command: Vec<String>,
@@ -78,40 +84,35 @@ pub async fn login(a: LoginArgs) -> Result<(), String> {
         None => browser_login(&hub, &name).await?,
     };
     cfg.save(&home_dir()).map_err(|e| e.to_string())?;
-    println!("saved. Next: {} start (in a project folder)", me());
+    println!(
+        "saved. This machine is connected. Next: {} start, in the folder of a project.",
+        me()
+    );
     Ok(())
 }
 
-/// What bare `claudecord` (and `npx claudecord`) does. A machine that has never joined opens the browser to sign in and approve it; one
-/// that has says where it is connected and what to do next.
+/// What bare `claudecord` (and `npx claudecord`) does. A machine that has never joined opens the browser to sign in and approve it. One that has
+/// shows the agents here and the ways to start one, to choose from (nothing starts by itself). Without a terminal to ask on it only says what is running.
 pub async fn home() -> Result<(), String> {
+    use std::io::IsTerminal;
     if let Some(cfg) = Config::load(&home_dir()) {
-        println!("Connected to {} as {}.", cfg.hub_url, cfg.node_name);
         // The daemon is never started just to look: if it is not running, nothing is.
-        match ipc::call(&home_dir(), &Req::List).await {
-            Ok(r) if r.ok => {
-                let rows = r
-                    .data
-                    .and_then(|d| d.as_array().cloned())
-                    .unwrap_or_default();
-                println!("\nRunning here ({}):", rows.len());
-                for a in &rows {
-                    println!(
-                        "  {:28} {:12} {}",
-                        a["agent"].as_str().unwrap_or(""),
-                        a["status"].as_str().unwrap_or(""),
-                        a["cwd"].as_str().unwrap_or("")
-                    );
-                }
-                if !rows.is_empty() {
-                    println!("Open one:  {} attach NAME", me());
-                }
+        let rows = list_agents().await;
+        if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+            println!("Connected to {} as {}.", cfg.hub_url, cfg.node_name);
+            println!("Running here: {}", rows.len());
+            for a in &rows {
+                println!(
+                    "  {:28} {:12} {}",
+                    a["agent"].as_str().unwrap_or(""),
+                    a["status"].as_str().unwrap_or(""),
+                    a["cwd"].as_str().unwrap_or("")
+                );
             }
-            _ => println!("\nNothing is running here (the daemon is off)."),
+            println!("Start an agent in a project folder:  {} start", me());
+            return Ok(());
         }
-        println!("\nStart an agent in a project folder:  {} start", me());
-        println!("Everything else:                      {} --help", me());
-        return Ok(());
+        return pick_and_attach(&rows, true).await;
     }
     login(LoginArgs {
         hub: None,
@@ -120,7 +121,7 @@ pub async fn home() -> Result<(), String> {
     })
     .await?;
     println!(
-        "Connected. Open the dashboard to pick where your project lives, then run `{} start` in a project folder.",
+        "Connected. Start an agent with `{} start` in a project folder.",
         me()
     );
     Ok(())
@@ -145,9 +146,25 @@ pub async fn run_daemon() -> Result<(), String> {
         Config::load(&dir).ok_or_else(|| format!("not logged in: run {} login first", me()))?;
     // The daemon logs to the terminal, which `claudecord start` points at daemon.log when it starts the daemon for you.
     crate::log::init(None);
-    daemon::run(cfg, dir, Options::default())
-        .await
-        .map_err(|e| e.to_string())
+    // Gone by itself 20 seconds after the last agent ends, unless the person turned on keep-running.
+    let opts = Options {
+        idle_exit: Some(Duration::from_secs(20)),
+        ..Options::default()
+    };
+    daemon::run(cfg, dir, opts).await.map_err(|e| e.to_string())
+}
+
+/// A machine that has never joined: this is the first run, so sign in through the browser now rather than failing.
+async fn ensure_login() -> Result<(), String> {
+    if Config::load(&home_dir()).is_none() {
+        login(LoginArgs {
+            hub: None,
+            token: None,
+            name: None,
+        })
+        .await?;
+    }
+    Ok(())
 }
 
 /// Makes sure a daemon is listening, starting one in the background if not.
@@ -156,15 +173,7 @@ async fn ensure_daemon() -> Result<(), String> {
     if ipc::call(&dir, &Req::Ping).await.is_ok() {
         return Ok(());
     }
-    if Config::load(&dir).is_none() {
-        // A machine that has never joined: this is the first run, so sign in through the browser now rather than failing.
-        login(LoginArgs {
-            hub: None,
-            token: None,
-            name: None,
-        })
-        .await?;
-    }
+    ensure_login().await?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     // Appended to, so the history of earlier runs is still there when something went wrong.
     let log = std::fs::OpenOptions::new()
@@ -205,27 +214,43 @@ fn expect_ok(r: Resp) -> Result<Resp, String> {
     if r.ok { Ok(r) } else { Err(r.msg) }
 }
 
-/// `claudecord start`: starts the daemon if it is not running (and says so), starts an agent in the current folder, and opens its
-/// terminal unless asked not to. It does exactly what was asked and nothing more: no handoff, no restarts, no shared folders.
+/// `claudecord start`: starts the daemon if it is not running, asks which project this folder belongs to (the first time), starts an agent in the
+/// current folder, writes the team guide into AGENTS.md, opens the dashboard if the project has no Discord channel yet, and opens the agent's terminal
+/// unless asked not to. Nothing else: no handoff, no restarts, no shared folders.
 pub async fn start(a: StartArgs) -> Result<(), String> {
-    ensure_daemon().await?;
+    ensure_login().await?;
+    let dir = home_dir();
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let name = match a.name.clone() {
-        Some(n) => Some(n),
-        None => ask_name()?,
+    // The project is chosen on the dashboard, never here, and before the daemon starts (a person may take longer than the daemon's idle wait).
+    let mut picked = false;
+    let mut chosen = Picked::default();
+    let project = match a.project.clone() {
+        Some(p) => p,
+        None => match crate::device::config::project_of_folder(&dir, &cwd).filter(|_| !a.pick) {
+            Some(p) => p,
+            None => {
+                picked = true;
+                chosen = pick_on_dashboard(&cwd).await?;
+                chosen.project.clone()
+            }
+        },
     };
-    let project = a.project.unwrap_or_else(|| {
-        cwd.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "project".into())
-    });
+    // No name given: the daemon makes a friendly one (shown below and in the agent's window).
+    wait_until_connected(&project, picked).await?;
+    // What was typed on the command line wins over what the page sent.
+    let name = a.name.clone().or(chosen.agent);
+    let adapter = chosen
+        .adapter
+        .filter(|_| a.adapter == "claude")
+        .unwrap_or(a.adapter.clone());
+    ensure_daemon().await?;
     let (cols, rows) = terminal_size();
     let r = ipc::call(
-        &home_dir(),
+        &dir,
         &Req::Up {
             project,
             name,
-            adapter: a.adapter,
+            adapter,
             model: a.model,
             role: a.role,
             cwd: cwd.to_string_lossy().into(),
@@ -242,13 +267,175 @@ pub async fn start(a: StartArgs) -> Result<(), String> {
     )
     .await
     .map_err(|e| e.to_string())?;
-    let agent = expect_ok(r)?.msg;
+    let reply = expect_ok(r)?;
+    let agent = reply.msg.clone();
     println!("started {agent}");
+    if let Some(tree) = reply.data.as_ref().and_then(|d| d["worktree"].as_str()) {
+        println!(
+            "another agent already works in this folder, so {agent} has its own git worktree: {tree}"
+        );
+    }
+    if !a.no_guide {
+        for line in install_guide(&cwd, false)? {
+            if line.starts_with("wrote") {
+                println!("{line}");
+            }
+        }
+    }
     if a.detach {
         println!("attach later with: {} attach {agent}", me());
         return Ok(());
     }
+    println!(
+        "In the agent: Ctrl-] leaves it running. /exit (or {} stop {agent}) ends it. Come back with: {} attach {agent}",
+        me(),
+        me()
+    );
     attach(&agent).await
+}
+
+/// What the dashboard's start page sent back: the project, and the first agent's name and program if the person set them.
+#[derive(Default)]
+struct Picked {
+    project: String,
+    agent: Option<String>,
+    adapter: Option<String>,
+}
+
+/// Has the person choose, on the dashboard, which project this folder belongs to: the hub gives a short code, the dashboard's pick page shows
+/// it, and this waits for the answer. If the hub is an older one with no such page, the folder's name is used.
+async fn pick_on_dashboard(cwd: &std::path::Path) -> Result<Picked, String> {
+    let folder = cwd
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "project".into());
+    let cfg = Config::load(&home_dir()).ok_or("not logged in")?;
+    let base = enroll::http_base(&cfg.hub_url);
+    let http = reqwest::Client::new();
+    let asked = http
+        .post(format!("{base}/api/device/pick"))
+        .bearer_auth(&cfg.token)
+        .json(&serde_json::json!({ "folder": folder }))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await;
+    let code = match asked {
+        Ok(r) if r.status().is_success() => r
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|v| v["code"].as_str().map(String::from)),
+        _ => None,
+    };
+    let Some(code) = code else {
+        println!(
+            "This hub cannot ask you on the dashboard, so the project is named after the folder: {folder}"
+        );
+        return Ok(Picked {
+            project: folder,
+            ..Default::default()
+        });
+    };
+    let url = format!("{base}/pick?code={code}");
+    println!("Choose which project \"{folder}\" belongs to, on the dashboard:\n  {url}");
+    println!("Waiting for your choice... (Ctrl-C to cancel; nothing has been started)");
+    enroll::open_browser(&url);
+    for _ in 0..3600 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let Ok(r) = http
+            .get(format!("{base}/api/device/pick/{code}"))
+            .bearer_auth(&cfg.token)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+        else {
+            continue;
+        };
+        if r.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err(format!("that choice expired: run {} start again", me()));
+        }
+        if let Ok(v) = r.json::<serde_json::Value>().await
+            && let Some(p) = v["chosen"].as_str()
+        {
+            println!("project: {p}");
+            return Ok(Picked {
+                project: p.to_string(),
+                agent: v["agent"].as_str().map(String::from),
+                adapter: v["adapter"].as_str().map(String::from),
+            });
+        }
+    }
+    Err(format!(
+        "no choice was made in an hour: run {} start again",
+        me()
+    ))
+}
+
+/// Waits until the project is connected to a Discord channel where its bot can really work, before anything is started: no agent is made for a
+/// project whose messages would go nowhere. If the bot was later removed from the server or lost a permission, it says what, and carries on by
+/// itself once that is fixed. A hub too old to be asked, or one that cannot be reached, never blocks a start. Without a person at the keyboard
+/// it only says what is missing.
+async fn wait_until_connected(project: &str, just_chose: bool) -> Result<(), String> {
+    use std::io::IsTerminal;
+    let Some(cfg) = Config::load(&home_dir()) else {
+        return Ok(());
+    };
+    let base = enroll::http_base(&cfg.hub_url);
+    let http = reqwest::Client::new();
+    let mut said: Option<String> = None;
+    for _ in 0..450 {
+        let asked = http
+            .get(format!("{base}/api/device/project/{project}"))
+            .bearer_auth(&cfg.token)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await;
+        let answer = match asked {
+            Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.ok(),
+            _ => None,
+        };
+        let Some(v) = answer.filter(|v| v.get("placed").is_some()) else {
+            return Ok(());
+        };
+        let problem = v["problem"].as_str().map(String::from);
+        if v["placed"].as_bool() == Some(true) && problem.is_none() {
+            if said.is_some() {
+                println!("connected.");
+            }
+            return Ok(());
+        }
+        let now = problem.clone().unwrap_or_else(|| "unplaced".into());
+        if said.as_deref() != Some(now.as_str()) {
+            let (url, line) = match &problem {
+                Some(why) => (
+                    format!("{base}/bots"),
+                    format!(
+                        "The project \"{project}\" is set up in Discord, but it cannot work right now: {why}"
+                    ),
+                ),
+                None => (
+                    format!("{base}/setup?project={project}"),
+                    format!("The project \"{project}\" is not connected to a Discord channel yet."),
+                ),
+            };
+            println!("{line}\n  Set it up here: {url}");
+            if !std::io::stdin().is_terminal() {
+                return Ok(());
+            }
+            println!(
+                "Waiting for that to be fixed... (Ctrl-C to cancel; nothing has been started)"
+            );
+            if problem.is_none() && !just_chose {
+                enroll::open_browser(&url);
+            }
+            said = Some(now);
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    Err(format!(
+        "the project \"{project}\" was still not connected to Discord after 15 minutes: run {} start again once it is",
+        me()
+    ))
 }
 
 /// Lists the agents on this machine.
@@ -272,13 +459,37 @@ pub async fn ls() -> Result<(), String> {
     Ok(())
 }
 
-/// Stops one agent.
-pub async fn stop(agent: &str) -> Result<(), String> {
+/// Stops one agent, or with no name everything here: every agent and the daemon. Everything asks first (unless `yes`, or nobody is there to ask).
+pub async fn stop(agent: Option<String>, yes: bool) -> Result<(), String> {
+    let Some(agent) = agent else {
+        let rows = list_agents().await;
+        if ipc::call(&home_dir(), &Req::Ping).await.is_err() {
+            println!("nothing was running here");
+            return Ok(());
+        }
+        if !yes && !rows.is_empty() && !confirm(&rows) {
+            println!("nothing stopped");
+            return Ok(());
+        }
+        let _ = ipc::call(&home_dir(), &Req::Shutdown).await;
+        // The daemon answers first and goes a moment later: say "stopped" only once it has.
+        for _ in 0..30 {
+            if ipc::call(&home_dir(), &Req::Ping).await.is_err() {
+                println!(
+                    "stopped {} agent(s) and disconnected this machine",
+                    rows.len()
+                );
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        return Err("asked the daemon to stop, but it is still answering; see daemon.log in the claudecord folder".into());
+    };
     expect_ok(
         ipc::call(
             &home_dir(),
             &Req::Stop {
-                agent: agent.into(),
+                agent: agent.clone(),
             },
         )
         .await
@@ -288,13 +499,25 @@ pub async fn stop(agent: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Stops the daemon, which stops every agent.
-pub async fn down() -> Result<(), String> {
-    match ipc::call(&home_dir(), &Req::Shutdown).await {
-        Ok(_) => println!("stopped"),
-        Err(_) => println!("no daemon was running"),
+/// Starts an agent's program again (every agent here with no name). It keeps its name, folder and place in the team.
+pub async fn restart(agent: Option<String>) -> Result<(), String> {
+    let r = ipc::call(&home_dir(), &Req::Restart { agent })
+        .await
+        .map_err(|_| "nothing is running here".to_string())?;
+    if !r.ok && r.msg == "bad request" {
+        // The daemon running here was started by an older build of this program and does not know the request.
+        return Err(format!(
+            "the daemon running here is from an older version and cannot restart agents. Run `{} stop` (that ends its agents) and start them again",
+            me()
+        ));
     }
+    println!("{}", expect_ok(r)?.msg);
     Ok(())
+}
+
+/// Stops the daemon, which stops every agent, without asking.
+pub async fn down() -> Result<(), String> {
+    stop(None, true).await
 }
 
 /// Checks whether this machine can reach the hub and prints each step.
@@ -401,11 +624,19 @@ pub async fn attach(agent: &str) -> Result<(), String> {
             .args(&cmd[1..])
             .status()
             .map_err(|e| format!("could not run {}: {e}", cmd[0]))?;
-        return if status.success() {
-            Ok(())
+        if !status.success() {
+            return Err(format!("{} ended with {status}", cmd[0]));
+        }
+        if still_running(agent).await {
+            println!(
+                "left {agent}; it is still running. {} attach {agent} to return, {} stop {agent} to end it.",
+                me(),
+                me()
+            );
         } else {
-            Err(format!("{} ended with {status}", cmd[0]))
-        };
+            println!("{agent} has ended.");
+        }
+        return Ok(());
     }
     let _raw = RawMode::enter();
     let _ = wr.write_all(&resize_frame()).await;
@@ -544,30 +775,6 @@ pub async fn handoff(agent: &str, out: Option<std::path::PathBuf>) -> Result<(),
     Ok(())
 }
 
-/// Asks what to call the agent, when a person is at the keyboard. Enter alone keeps the random friendly name.
-fn ask_name() -> Result<Option<String>, String> {
-    use std::io::{IsTerminal, Write};
-    if !std::io::stdin().is_terminal() {
-        return Ok(None);
-    }
-    loop {
-        print!("Name for this agent (Enter for a random one): ");
-        let _ = std::io::stdout().flush();
-        let mut line = String::new();
-        std::io::stdin()
-            .read_line(&mut line)
-            .map_err(|e| e.to_string())?;
-        let n = line.trim();
-        if n.is_empty() {
-            return Ok(None);
-        }
-        if crate::protocol::is_slug(n) {
-            return Ok(Some(n.to_string()));
-        }
-        println!("Names use letters, digits, dots, dashes and underscores.");
-    }
-}
-
 /// `claudecord attach` with or without a name: without one, lists what runs here and lets the person choose by number or name.
 pub async fn attach_or_pick(agent: Option<String>) -> Result<(), String> {
     if let Some(a) = agent {
@@ -580,87 +787,296 @@ pub async fn attach_or_pick(agent: Option<String>) -> Result<(), String> {
         .data
         .and_then(|d| d.as_array().cloned())
         .unwrap_or_default();
+    pick_and_attach(&rows, false).await
+}
+
+/// `claudecord start` with nothing typed after it: every option at its default.
+fn default_start_args() -> StartArgs {
+    #[derive(clap::Parser)]
+    struct Defaults {
+        #[command(flatten)]
+        a: StartArgs,
+    }
+    <Defaults as clap::Parser>::parse_from(["start"]).a
+}
+
+/// The agents the daemon here has (none if it is off). The daemon is never started for this.
+async fn list_agents() -> Vec<serde_json::Value> {
+    ipc::call(&home_dir(), &Req::List)
+        .await
+        .ok()
+        .and_then(|r| r.data)
+        .and_then(|d| d.as_array().cloned())
+        .unwrap_or_default()
+}
+
+/// Lists `rows` to choose from and opens the one chosen; each line says which command it runs. The agents working in this folder come first
+/// and the first line is highlighted, so Enter does the likely thing. With `with_new` the list ends with the ways to start an agent, and
+/// when no agent works in this folder the highlight goes to "new agent in this folder".
+async fn pick_and_attach(rows: &[serde_json::Value], with_new: bool) -> Result<(), String> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        return Err(format!("name one: {} attach NAME", me()));
+    }
+    if rows.is_empty() && !with_new {
+        return Err("nothing is running here".into());
+    }
+    let here = std::env::current_dir().unwrap_or_default();
+    let mut rows = rows.to_vec();
+    let mine = |a: &serde_json::Value| a["cwd"].as_str().is_some_and(|c| here.starts_with(c));
+    rows.sort_by_key(|a| !mine(a));
+    let any_here = rows.first().is_some_and(mine);
     let names: Vec<String> = rows
         .iter()
         .filter_map(|a| a["agent"].as_str().map(String::from))
         .collect();
-    match names.as_slice() {
-        [] => return Err("nothing is running here".into()),
-        [only] => return attach(only).await,
-        _ => {}
+    let mut labels: Vec<String> = rows
+        .iter()
+        .map(|a| {
+            format!(
+                "{:26} {:9} {:24} attach",
+                a["agent"].as_str().unwrap_or(""),
+                a["status"].as_str().unwrap_or(""),
+                {
+                    // A long folder keeps its end (the part that tells folders apart).
+                    let c = a["cwd"].as_str().unwrap_or("");
+                    let n = c.chars().count();
+                    if n > 24 {
+                        format!("…{}", c.chars().skip(n - 23).collect::<String>())
+                    } else {
+                        c.to_string()
+                    }
+                }
+            )
+        })
+        .collect();
+    if with_new {
+        labels.push(format!("{:56} start", "+ new agent in this folder"));
+        labels.push(format!(
+            "{:56} start --pick",
+            "+ new agent, different project"
+        ));
     }
-    use std::io::{IsTerminal, Write};
-    for (i, a) in rows.iter().enumerate() {
-        println!(
-            "{:>2}) {:28} {:12} {}",
-            i + 1,
-            a["agent"].as_str().unwrap_or(""),
-            a["status"].as_str().unwrap_or(""),
-            a["cwd"].as_str().unwrap_or("")
-        );
-    }
-    if !std::io::stdin().is_terminal() {
-        return Err(format!("name one: {} attach NAME", me()));
-    }
-    loop {
-        print!("Open which? (number or name, Enter to cancel): ");
-        let _ = std::io::stdout().flush();
-        let mut line = String::new();
-        std::io::stdin()
-            .read_line(&mut line)
-            .map_err(|e| e.to_string())?;
-        if line.trim().is_empty() {
-            return Ok(());
+    let first = if any_here { 0 } else { names.len() };
+    let title = if with_new {
+        "claudecord"
+    } else {
+        "Open which agent?"
+    };
+    let picked = tokio::task::spawn_blocking(move || pick_with_keys(title, &labels, first))
+        .await
+        .map_err(|e| e.to_string())??;
+    match picked {
+        Some(i) if i < names.len() => attach(&names[i]).await,
+        Some(i) => {
+            let mut a = default_start_args();
+            a.pick = i > names.len();
+            let programs = [
+                ("claude", "Claude Code"),
+                ("codex", "OpenAI Codex"),
+                ("agy", "Antigravity"),
+            ];
+            let labels: Vec<String> = programs
+                .iter()
+                .map(|(id, name)| format!("{id:8} {name}"))
+                .collect();
+            let Some(p) = tokio::task::spawn_blocking(move || {
+                pick_with_keys("Which agent program?", &labels, 0)
+            })
+            .await
+            .map_err(|e| e.to_string())??
+            else {
+                return Ok(());
+            };
+            a.adapter = programs[p].0.into();
+            // Both can be left empty: the name is then made up (or chosen on the dashboard), and the agent has no role.
+            // A name an agent here already has is refused now, not after the role has been typed too (ids are project/name).
+            a.name = loop {
+                let name = ask_line("Agent name (Enter for a random one): ");
+                match name.as_deref() {
+                    Some(n) if names.iter().any(|id| id.rsplit('/').next() == Some(n)) => {
+                        println!(
+                            "{n} is already running here; pick another name, or Enter for a random one."
+                        );
+                    }
+                    _ => break name,
+                }
+            };
+            a.role = ask_line("Role, e.g. lead, reviewer, tests (Enter for none): ");
+            start(a).await
         }
-        match choose(&names, &line) {
-            Some(a) => return attach(&a).await,
-            None => println!("No match. Type a number from the list, or a name."),
-        }
+        None => Ok(()),
     }
 }
 
-/// What the person typed at the list: a number, a full name, the short name after the project, or the start of a name that fits only one.
-fn choose(names: &[String], input: &str) -> Option<String> {
-    let t = input.trim();
-    if let Ok(n) = t.parse::<usize>() {
-        return names.get(n.checked_sub(1)?).cloned();
+/// What a key press does in the list.
+#[derive(Debug, PartialEq)]
+enum PickKey {
+    /// Move the highlight to this line.
+    Move(usize),
+    /// Open this line.
+    Open(usize),
+    Cancel,
+    Nothing,
+}
+
+/// The meaning of a key in a list of `len` lines with line `sel` highlighted: the arrow keys (or j and k) move, a digit opens that line at once,
+/// Enter opens the highlighted one, Esc, q and Ctrl-C leave.
+fn on_key(
+    code: crossterm::event::KeyCode,
+    mods: crossterm::event::KeyModifiers,
+    sel: usize,
+    len: usize,
+) -> PickKey {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    match code {
+        KeyCode::Up | KeyCode::Char('k') => PickKey::Move(if sel == 0 { len - 1 } else { sel - 1 }),
+        KeyCode::Down | KeyCode::Char('j') => PickKey::Move((sel + 1) % len),
+        KeyCode::Home => PickKey::Move(0),
+        KeyCode::End => PickKey::Move(len - 1),
+        KeyCode::Enter => PickKey::Open(sel),
+        KeyCode::Esc | KeyCode::Char('q') => PickKey::Cancel,
+        KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => PickKey::Cancel,
+        KeyCode::Char(d) if d.is_ascii_digit() && d != '0' && (d as usize - '1' as usize) < len => {
+            PickKey::Open(d as usize - '1' as usize)
+        }
+        _ => PickKey::Nothing,
     }
-    let hits: Vec<&String> = names
+}
+
+/// Shows `labels` as a list to go through with the keys (see `on_key`) and returns the line chosen, or None if the person left. The list is
+/// taken off the screen again afterwards.
+fn pick_with_keys(title: &str, labels: &[String], start: usize) -> Result<Option<usize>, String> {
+    use crossterm::event::{self, Event, KeyEventKind};
+    use crossterm::style::{Attribute, Print, SetAttribute};
+    use crossterm::terminal::{Clear, ClearType};
+    use crossterm::{cursor, queue};
+    use std::io::Write;
+    if labels.is_empty() {
+        return Ok(None);
+    }
+    // A terminal that does not say how wide it is (0) counts as 80 wide.
+    let width = crossterm::terminal::size()
+        .map(|(c, _)| c as usize)
+        .ok()
+        .filter(|c| *c >= 20)
+        .unwrap_or(80);
+    let shown: Vec<String> = labels
         .iter()
-        .filter(|a| a.as_str() == t || a.rsplit('/').next() == Some(t))
+        .enumerate()
+        .map(|(i, l)| {
+            let n = if i < 9 {
+                format!("{}", i + 1)
+            } else {
+                " ".into()
+            };
+            format!(" {n}  {l}")
+                .chars()
+                .take(width.saturating_sub(3))
+                .collect()
+        })
         .collect();
-    let hits = if hits.is_empty() {
-        names.iter().filter(|a| a.starts_with(t)).collect()
-    } else {
-        hits
+    let mut out = std::io::stdout();
+    let _raw = RawMode::enter();
+    let draw = |sel: usize, again: bool, out: &mut std::io::Stdout| -> std::io::Result<()> {
+        if again {
+            queue!(
+                out,
+                cursor::MoveUp(shown.len() as u16 + 1),
+                cursor::MoveToColumn(0),
+                Clear(ClearType::FromCursorDown)
+            )?;
+        }
+        queue!(
+            out,
+            Print(format!(
+                "{title}  (arrows or 1-9, Enter opens, Esc cancels)\r\n"
+            ))
+        )?;
+        for (i, l) in shown.iter().enumerate() {
+            if i == sel {
+                queue!(
+                    out,
+                    SetAttribute(Attribute::Reverse),
+                    Print(format!("\u{276F}{l}")),
+                    SetAttribute(Attribute::Reset),
+                    Print("\r\n")
+                )?;
+            } else {
+                queue!(out, Print(format!(" {l}\r\n")))?;
+            }
+        }
+        out.flush()
     };
-    (hits.len() == 1).then(|| hits[0].clone())
+    let mut sel = start.min(labels.len() - 1);
+    queue!(out, cursor::Hide).map_err(|e| e.to_string())?;
+    draw(sel, false, &mut out).map_err(|e| e.to_string())?;
+    let chosen = loop {
+        let Event::Key(k) = event::read().map_err(|e| e.to_string())? else {
+            continue;
+        };
+        if k.kind != KeyEventKind::Press {
+            continue;
+        }
+        match on_key(k.code, k.modifiers, sel, labels.len()) {
+            PickKey::Move(n) => {
+                sel = n;
+                draw(sel, true, &mut out).map_err(|e| e.to_string())?;
+            }
+            PickKey::Open(n) => break Some(n),
+            PickKey::Cancel => break None,
+            PickKey::Nothing => {}
+        }
+    };
+    let _ = queue!(
+        out,
+        cursor::MoveUp(shown.len() as u16 + 1),
+        cursor::MoveToColumn(0),
+        Clear(ClearType::FromCursorDown),
+        cursor::Show
+    );
+    let _ = out.flush();
+    Ok(chosen)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::choose;
+    use super::*;
+    use crossterm::event::{KeyCode, KeyModifiers};
 
     #[test]
-    fn the_list_takes_a_number_a_name_or_a_unique_start() {
-        let n: Vec<String> = ["demo/otter", "demo/heron", "web/otter"]
-            .map(String::from)
-            .to_vec();
-        assert_eq!(choose(&n, "2").as_deref(), Some("demo/heron"));
-        assert_eq!(choose(&n, "web/otter").as_deref(), Some("web/otter"));
-        assert_eq!(choose(&n, "heron").as_deref(), Some("demo/heron"));
-        assert_eq!(choose(&n, "otter"), None, "two agents are called otter");
-        assert_eq!(choose(&n, "de").as_deref(), None, "a start that fits two");
-        assert_eq!(choose(&n, "0"), None);
-        assert_eq!(choose(&n, "9"), None);
+    fn the_list_moves_with_the_arrows_opens_with_a_digit_or_enter_and_leaves_with_escape() {
+        let k = |c, sel| on_key(c, KeyModifiers::NONE, sel, 3);
+        assert_eq!(k(KeyCode::Down, 0), PickKey::Move(1));
+        assert_eq!(
+            k(KeyCode::Down, 2),
+            PickKey::Move(0),
+            "past the end it goes round"
+        );
+        assert_eq!(k(KeyCode::Up, 0), PickKey::Move(2));
+        assert_eq!(k(KeyCode::Char('j'), 0), PickKey::Move(1));
+        assert_eq!(k(KeyCode::Char('2'), 0), PickKey::Open(1));
+        assert_eq!(
+            k(KeyCode::Char('4'), 0),
+            PickKey::Nothing,
+            "there is no fourth line"
+        );
+        assert_eq!(k(KeyCode::Char('0'), 0), PickKey::Nothing);
+        assert_eq!(k(KeyCode::Enter, 2), PickKey::Open(2));
+        assert_eq!(k(KeyCode::Esc, 1), PickKey::Cancel);
+        assert_eq!(
+            on_key(KeyCode::Char('c'), KeyModifiers::CONTROL, 0, 3),
+            PickKey::Cancel
+        );
+        assert_eq!(k(KeyCode::Char('x'), 0), PickKey::Nothing);
     }
 }
 
 const GUIDE_START: &str = "<!-- claudecord:start -->";
 const GUIDE_END: &str = "<!-- claudecord:end -->";
 
-/// `claudecord init`: the guide for agents goes into AGENTS.md here, and CLAUDE.md here points at it. Only the part between the markers is ever
-/// replaced; anything else in either file is left as it is.
+/// `claudecord init`: the guide for agents goes into AGENTS.md here (and, with `--claude`, CLAUDE.md here points at it). Only the part between the
+/// markers is ever replaced; anything else in either file is left as it is.
 pub async fn init(claude: bool) -> Result<(), String> {
     let dir = std::env::current_dir().map_err(|e| e.to_string())?;
     for line in install_guide(&dir, claude)? {
@@ -669,44 +1085,53 @@ pub async fn init(claude: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Writes the guide and returns what was done, one line each.
+/// The files an agent reads to learn about the project, in the order they are looked for.
+const INSTRUCTION_FILES: [&str; 4] = [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "GEMINI.md",
+    ".github/copilot-instructions.md",
+];
+
+/// Puts the guide into every instruction file that is already in the folder (appended after what is there; only the part between the markers is ever
+/// replaced), or makes AGENTS.md if there is none. `claude` also makes sure CLAUDE.md has it, even if that file was not there. Returns what was done,
+/// one line each.
 fn install_guide(dir: &std::path::Path, claude: bool) -> Result<Vec<String>, String> {
     let block = format!(
         "{GUIDE_START}\n{}{GUIDE_END}\n",
         crate::agents::AGENTS_GUIDE
     );
+    let mut targets: Vec<&str> = INSTRUCTION_FILES
+        .iter()
+        .copied()
+        .filter(|f| dir.join(f).is_file())
+        .collect();
+    if claude && !targets.contains(&"CLAUDE.md") {
+        targets.push("CLAUDE.md");
+    }
+    if targets.is_empty() {
+        targets.push("AGENTS.md");
+    }
     let mut done = Vec::new();
-    let agents = dir.join("AGENTS.md");
-    let old = std::fs::read_to_string(&agents).unwrap_or_default();
-    let new = match (old.find(GUIDE_START), old.find(GUIDE_END)) {
-        (Some(a), Some(b)) if a < b => {
-            format!(
+    for f in targets {
+        let path = dir.join(f);
+        let old = std::fs::read_to_string(&path).unwrap_or_default();
+        let new = match (old.find(GUIDE_START), old.find(GUIDE_END)) {
+            (Some(a), Some(b)) if a < b => format!(
                 "{}{}{}",
                 &old[..a],
                 block,
                 old[b + GUIDE_END.len()..].trim_start_matches('\n')
-            )
-        }
-        _ if old.is_empty() => block.clone(),
-        _ => format!("{}\n\n{block}", old.trim_end()),
-    };
-    if new != old {
-        std::fs::write(&agents, new).map_err(|e| e.to_string())?;
-        done.push("wrote the team guide to AGENTS.md".to_string());
-    } else {
-        done.push("AGENTS.md already has the current guide".to_string());
-    }
-    // Claude reads CLAUDE.md, not AGENTS.md, and already gets the rules from claudecord, so it is only pulled in when asked.
-    let claude_md = dir.join("CLAUDE.md");
-    let c = std::fs::read_to_string(&claude_md).unwrap_or_default();
-    if claude && !c.contains("@AGENTS.md") {
-        let joined = if c.is_empty() {
-            "@AGENTS.md\n".to_string()
-        } else {
-            format!("{}\n\n@AGENTS.md\n", c.trim_end())
+            ),
+            _ if old.is_empty() => block.clone(),
+            _ => format!("{}\n\n{block}", old.trim_end()),
         };
-        std::fs::write(&claude_md, joined).map_err(|e| e.to_string())?;
-        done.push("CLAUDE.md now includes AGENTS.md".to_string());
+        if new != old {
+            std::fs::write(&path, new).map_err(|e| e.to_string())?;
+            done.push(format!("wrote the team guide to {f}"));
+        } else {
+            done.push(format!("{f} already has the current guide"));
+        }
     }
     Ok(done)
 }
@@ -715,36 +1140,60 @@ fn install_guide(dir: &std::path::Path, claude: bool) -> Result<Vec<String>, Str
 mod guide_tests {
     use super::*;
 
-    #[test]
-    fn the_guide_is_added_once_updated_in_place_and_never_overwrites_the_users_own_text() {
-        let d = std::env::temp_dir().join(format!("cc-guide-{}", std::process::id()));
+    fn dir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("cc-guide-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn the_guide_is_added_to_the_instruction_files_that_exist_updated_in_place_and_never_overwrites_the_users_own_text()
+     {
+        let d = dir("existing");
         std::fs::write(d.join("AGENTS.md"), "# My project\nuse tabs\n").unwrap();
-        install_guide(&d, false).unwrap();
+        std::fs::write(d.join("CLAUDE.md"), "Be terse.\n").unwrap();
+        let lines = install_guide(&d, false).unwrap();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        for f in ["AGENTS.md", "CLAUDE.md"] {
+            let t = std::fs::read_to_string(d.join(f)).unwrap();
+            assert_eq!(t.matches(GUIDE_START).count(), 1, "{f}");
+        }
         let a = std::fs::read_to_string(d.join("AGENTS.md")).unwrap();
         assert!(
             a.starts_with("# My project\nuse tabs"),
             "their text stays first"
         );
-        assert_eq!(a.matches(GUIDE_START).count(), 1);
         assert!(
-            !d.join("CLAUDE.md").exists(),
-            "CLAUDE.md is only touched when asked"
+            std::fs::read_to_string(d.join("CLAUDE.md"))
+                .unwrap()
+                .starts_with("Be terse.")
         );
-        install_guide(&d, true).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(d.join("CLAUDE.md")).unwrap(),
-            "@AGENTS.md\n"
+        assert!(
+            !d.join("GEMINI.md").exists(),
+            "a file that was not there is not made"
         );
         // Again: nothing changes. After an edit inside the markers: put back; text outside them is kept.
-        install_guide(&d, true).unwrap();
+        install_guide(&d, false).unwrap();
         assert_eq!(std::fs::read_to_string(d.join("AGENTS.md")).unwrap(), a);
         let edited = a.replace("claudecord team", "claudecord XXXX") + "\nafter\n";
         std::fs::write(d.join("AGENTS.md"), &edited).unwrap();
-        install_guide(&d, true).unwrap();
+        install_guide(&d, false).unwrap();
         let b = std::fs::read_to_string(d.join("AGENTS.md")).unwrap();
-        assert!(b.contains("claudecord team") && !b.contains("XXXX") && b.ends_with("after\n"));
+        assert!(b.contains("claudecord guide") && !b.contains("XXXX") && b.ends_with("after\n"));
         assert_eq!(b.matches(GUIDE_START).count(), 1);
+    }
+
+    #[test]
+    fn with_no_instruction_file_agents_md_is_made_and_claude_md_only_when_asked() {
+        let d = dir("none");
+        install_guide(&d, false).unwrap();
+        assert!(d.join("AGENTS.md").exists() && !d.join("CLAUDE.md").exists());
+        install_guide(&d, true).unwrap();
+        assert!(
+            std::fs::read_to_string(d.join("CLAUDE.md"))
+                .unwrap()
+                .contains(GUIDE_START)
+        );
     }
 }
 
@@ -755,4 +1204,78 @@ fn me() -> String {
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "claudecord".into())
+}
+
+/// Whether the daemon still has this agent.
+async fn still_running(agent: &str) -> bool {
+    ipc::call(&home_dir(), &Req::List)
+        .await
+        .ok()
+        .and_then(|r| r.data)
+        .and_then(|d| d.as_array().cloned())
+        .is_some_and(|l| l.iter().any(|a| a["agent"].as_str() == Some(agent)))
+}
+
+/// `claudecord settings`: shows the settings, or changes one.
+pub async fn settings(name: Option<String>, value: Option<String>) -> Result<(), String> {
+    let dir = home_dir();
+    match (name.as_deref(), value.as_deref()) {
+        (None, _) => {}
+        (Some("keep-running"), Some(v)) => {
+            let on = match v {
+                "on" | "yes" | "true" => true,
+                "off" | "no" | "false" => false,
+                _ => return Err("keep-running is on or off".into()),
+            };
+            crate::device::config::set_keep_running(&dir, on).map_err(|e| e.to_string())?;
+        }
+        (Some("keep-running"), None) => {}
+        (Some(other), _) => {
+            return Err(format!("no setting called {other}. There is: keep-running"));
+        }
+    }
+    let on = crate::device::config::keep_running(&dir);
+    println!(
+        "keep-running: {}",
+        if on {
+            "on (this machine stays connected to the hub even when no agent is running)"
+        } else {
+            "off (this machine disconnects 20 seconds after the last agent ends, and reconnects when you start one)"
+        }
+    );
+    println!("change it with: {} settings keep-running on|off", me());
+    Ok(())
+}
+
+/// Lists `rows` and asks whether to stop them all. Anything but y is no; with no terminal to ask on it is yes (a script said `stop`).
+fn confirm(rows: &[serde_json::Value]) -> bool {
+    use std::io::{BufRead, IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        return true;
+    }
+    println!("Running here:");
+    for a in rows {
+        println!(
+            "  {:28} {}",
+            a["agent"].as_str().unwrap_or(""),
+            a["cwd"].as_str().unwrap_or("")
+        );
+    }
+    print!(
+        "Stop {} agent(s) and disconnect this machine? [y/N] ",
+        rows.len()
+    );
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line).is_ok() && line.trim().eq_ignore_ascii_case("y")
+}
+
+/// Asks one question on the terminal. An empty answer is None.
+fn ask_line(question: &str) -> Option<String> {
+    use std::io::{BufRead, Write};
+    print!("{question}");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line).ok()?;
+    Some(line.trim().to_string()).filter(|l| !l.is_empty())
 }

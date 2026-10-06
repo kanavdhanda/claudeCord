@@ -50,7 +50,6 @@ pub struct LaunchCtx<'a> {
     pub name: &'a str,
     pub model: Option<&'a str>,
     pub policy: Policy,
-    pub rules: &'a str,
     /// An MCP config that exposes the claudecord tools, if the adapter uses one.
     pub mcp_config: Option<&'a str>,
 }
@@ -65,8 +64,90 @@ pub fn tail(screen: &str, n: usize) -> String {
     lines[from..].join("\n")
 }
 
-/// Parses a numbered menu such as "1. Yes", "> 2. No", with an optional cursor marker on one option.
+/// Parses a menu on the screen: numbered ("1. Yes", "> 2. No") or, as Claude Code's start-up questions are shown, plain lines with a cursor
+/// marker ("❯ No, exit" above "  Yes, I trust this folder", ending in a line like "Enter to confirm").
 pub fn parse_menu(screen: &str) -> Option<PromptInfo> {
+    parse_numbered_menu(screen).or_else(|| parse_plain_menu(screen))
+}
+
+/// A menu whose options carry no numbers: the option lines end right above a footer such as "Enter to confirm · Esc to cancel", exactly one is
+/// marked with the cursor, and the question is the text above them.
+fn parse_plain_menu(screen: &str) -> Option<PromptInfo> {
+    static FOOTER: LazyLock<Regex> =
+        LazyLock::new(|| re(r"(?i)enter to (confirm|select)|esc to cancel"));
+    static CURSOR: LazyLock<Regex> = LazyLock::new(|| re(r"^\s*[❯>›]\s+(\S.*?)\s*$"));
+    static DECOR: LazyLock<Regex> = LazyLock::new(|| re(r"[│╭╮╰╯─]"));
+    let text = tail(screen, 30);
+    let lines: Vec<&str> = text.split('\n').collect();
+    let footer = lines.iter().rposition(|l| FOOTER.is_match(l))?;
+    // The cursor line is the last one above the footer that carries the marker. Its text starts at some column; the other options are the
+    // unbroken run of lines around it that are indented at least that far (the question above sits further left).
+    let cur = lines[..footer].iter().rposition(|l| CURSOR.is_match(l))?;
+    let col = {
+        let l = lines[cur];
+        let text_at = CURSOR.captures(l)?.get(1)?.start();
+        l[..text_at].chars().count()
+    };
+    let indented = |l: &str| {
+        !l.trim().is_empty()
+            && !DECOR.is_match(l)
+            && !CURSOR.is_match(l)
+            && l.chars().take_while(|c| *c == ' ').count() >= col
+    };
+    let mut first = cur;
+    while first > 0 && indented(lines[first - 1]) {
+        first -= 1;
+    }
+    let mut end = cur + 1;
+    while end < footer && indented(lines[end]) {
+        end += 1;
+    }
+    // Between the last option and the footer there may be blank lines, and nothing else: anything else means this is not a menu.
+    let mut gap = end;
+    while gap < footer && lines[gap].trim().is_empty() {
+        gap += 1;
+    }
+    if gap != footer {
+        return None;
+    }
+    let options: Vec<String> = lines[first..end]
+        .iter()
+        .map(|l| match CURSOR.captures(l) {
+            Some(c) => c[1].to_string(),
+            None => l.trim().to_string(),
+        })
+        .collect();
+    let cursor = cur - first;
+    if options.len() < 2 {
+        return None;
+    }
+    // The question: the text above the options, back to the line that rules off the dialog (or at most twelve lines), as one line.
+    let above: Vec<String> = lines[..first]
+        .iter()
+        .rev()
+        .take_while(|l| l.trim().is_empty() || !l.trim().chars().all(|c| "─━-═".contains(c)))
+        .map(|l| DECOR.replace_all(l, "").trim().to_string())
+        .filter(|l| !l.is_empty())
+        .take(12)
+        .collect();
+    let question: String = above
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(600)
+        .collect();
+    Some(PromptInfo {
+        signature: format!("{question}|{}", options.join("|")),
+        cursor,
+        question,
+        options,
+    })
+}
+
+/// Parses a numbered menu such as "1. Yes", "> 2. No", with an optional cursor marker on one option.
+fn parse_numbered_menu(screen: &str) -> Option<PromptInfo> {
     static LINE: LazyLock<Regex> =
         LazyLock::new(|| re(r"^\s*([❯>›]\s*)?([0-9]{1,2})[.)]\s+([^\r\u{2028}\u{2029}]+?)\s*$"));
     static DECOR: LazyLock<Regex> = LazyLock::new(|| re(r"[│╭╮╰╯─]"));
@@ -168,12 +249,7 @@ fn any_limit(screen: &str) -> Option<LimitInfo> {
 }
 
 impl AdapterId {
-    /// How the team rules reach the agent: a command line flag, or as the first message once it is ready.
-    pub fn rules_via_flag(self) -> bool {
-        self == Self::Claude
-    }
-
-    /// The command line that starts this agent, including the flags that carry its rules and model.
+    /// The command line that starts this agent, including its model and policy flags.
     pub fn argv(self, c: &LaunchCtx) -> Vec<String> {
         let mut a = vec![self.as_str().to_string()];
         let mut push = |xs: &[&str]| a.extend(xs.iter().map(|s| s.to_string()));
@@ -200,12 +276,7 @@ impl AdapterId {
                         a.push(format!("mcp__claudecord__{t}"));
                     }
                 }
-                a.extend([
-                    "--append-system-prompt".into(),
-                    c.rules.into(),
-                    "-n".into(),
-                    c.name.into(),
-                ]);
+                a.extend(["-n".into(), c.name.into()]);
             }
             Self::Agy => {
                 if let Some(m) = c.model {

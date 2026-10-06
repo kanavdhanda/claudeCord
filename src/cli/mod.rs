@@ -19,7 +19,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "claudecord", version, about)]
 pub struct Cli {
-    /// With no command: on a new machine, open the browser to sign in and approve it; afterwards, say how to start an agent.
+    /// With no command: on a new machine, open the browser to sign in and approve it; afterwards, open the agent running here, or start one.
     #[command(subcommand)]
     pub command: Option<Cmd>,
 }
@@ -50,11 +50,16 @@ pub enum Cmd {
     Daemon,
     /// Save which hub this machine talks to.
     Login(machine::LoginArgs),
-    /// Put the team-chat guide for agents into this folder's AGENTS.md. Never overwrites your own text; run it again to update. Claude already gets the
-    /// rules from claudecord itself; --claude also makes its CLAUDE.md include the guide.
+    /// Put the team-chat guide for agents into this folder's AGENTS.md. Adds it to every instruction file already there (AGENTS.md, CLAUDE.md, GEMINI.md, Copilot's),
+    /// or makes AGENTS.md; never overwrites your own text, run it again to update. --claude also makes CLAUDE.md.
     Init {
         #[arg(long)]
         claude: bool,
+    },
+    /// Show or change settings. `settings keep-running on|off`: stay connected to the hub even when no agent is running (off by default).
+    Settings {
+        name: Option<String>,
+        value: Option<String>,
     },
     /// Start an agent in the current folder and open its terminal (starting the daemon if needed, and saying so).
     Start(machine::StartArgs),
@@ -78,8 +83,15 @@ pub enum Cmd {
     Ls,
     /// Open an agent's terminal. With no name, pick from the agents running here.
     Attach { agent: Option<String> },
-    /// Stop one agent.
-    Stop { agent: String },
+    /// Stop one agent, or with no name stop everything here: every agent, and the connection to the hub.
+    Stop {
+        agent: Option<String>,
+        /// Do not ask before stopping everything.
+        #[arg(short, long)]
+        yes: bool,
+    },
+    /// Start an agent's program again (every agent here when no name is given). It keeps its name and its place in the team.
+    Restart { agent: Option<String> },
     /// Stop the daemon and every agent on this machine.
     Down,
     /// Check whether this machine can reach the hub, and where it stops.
@@ -92,7 +104,8 @@ pub enum Cmd {
     },
     /// Post a message to the team (plain say is information; @name someone to need a reply).
     Say {
-        text: String,
+        /// The message. `-` (or nothing, when something is piped in) reads it from standard input, which keeps real line breaks for multi-line text.
+        text: Option<String>,
         #[arg(long)]
         thread: Option<String>,
     },
@@ -112,6 +125,8 @@ pub enum Cmd {
     Pickup,
     /// Ask who else is in this project, what they do and whether they can be reached. The answer arrives as your next input.
     Team,
+    /// Print the short rules for using the team chat (what to run, and when).
+    Guide,
     /// Send a file to the chat, or to a peer with --to.
     Send {
         path: String,
@@ -148,9 +163,11 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         } => machine::logs(&agent, lines, terminal).await,
         Cmd::Handoff { agent, out } => machine::handoff(&agent, out).await,
         Cmd::Init { claude } => machine::init(claude).await,
+        Cmd::Settings { name, value } => machine::settings(name, value).await,
         Cmd::Ls => machine::ls().await,
         Cmd::Attach { agent } => machine::attach_or_pick(agent).await,
-        Cmd::Stop { agent } => machine::stop(&agent).await,
+        Cmd::Stop { agent, yes } => machine::stop(agent, yes).await,
+        Cmd::Restart { agent } => machine::restart(agent).await,
         Cmd::Down => machine::down().await,
         Cmd::Doctor => machine::doctor().await,
         Cmd::Selftest { json } => selftest(json).await,
@@ -163,6 +180,10 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         Cmd::Dump { text } => verbs::dump(text).await,
         Cmd::Pickup => verbs::pickup().await,
         Cmd::Team => verbs::team().await,
+        Cmd::Guide => {
+            println!("{}", crate::device::daemon::RULES);
+            Ok(())
+        }
         Cmd::Send { path, to, caption } => verbs::send_file(path, to, caption).await,
     }
 }

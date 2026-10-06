@@ -72,7 +72,7 @@
    "agentId": "p/a",
    "text": {
     "$repeat": "x",
-    "$n": 8000
+    "$n": 200000
    }
   },
   "valid": true
@@ -83,7 +83,7 @@
    "agentId": "p/a",
    "text": {
     "$repeat": "x",
-    "$n": 8001
+    "$n": 200001
    }
   },
   "valid": false

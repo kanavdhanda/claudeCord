@@ -62,13 +62,15 @@ pub enum Chat {
         agent_name: String,
     },
     RefreshStatus(String),
+    /// A fresh chat for the project: its channel's messages are deleted (the pinned status board stays) and it is said that a new chat has started.
+    Clear(String),
 }
 
 impl Chat {
     /// The project this is about. Every kind of chat effect belongs to one.
     pub fn project(&self) -> &str {
         match self {
-            Chat::EnsureProject(p) | Chat::RefreshStatus(p) => p,
+            Chat::EnsureProject(p) | Chat::RefreshStatus(p) | Chat::Clear(p) => p,
             Chat::Post { project, .. }
             | Chat::Ask { project, .. }
             | Chat::Permission { project, .. }

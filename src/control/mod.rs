@@ -130,6 +130,7 @@ impl Control {
              CREATE TABLE IF NOT EXISTS bots (
                  id TEXT PRIMARY KEY, tenant TEXT NOT NULL, app_id TEXT NOT NULL, name TEXT NOT NULL,
                  sealed TEXT NOT NULL, created INTEGER NOT NULL, UNIQUE (tenant, app_id));
+             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS project_targets (
                  tenant TEXT NOT NULL, project TEXT NOT NULL, bot TEXT NOT NULL, guild TEXT NOT NULL, channel TEXT NOT NULL,
                  guild_name TEXT NOT NULL DEFAULT '', channel_name TEXT NOT NULL DEFAULT '',
@@ -472,6 +473,27 @@ impl Control {
     }
 
     // ----- where each project posts -----
+
+    /// This service's own identity, made once and kept. It is written into the Discord channels this service uses, so that a second service (a
+    /// test copy, say) using the same bot can tell a channel is taken, and leaves it alone.
+    pub fn hub_id(&self) -> rusqlite::Result<String> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        if let Ok(v) = conn.query_row("SELECT value FROM meta WHERE key = 'hub_id'", [], |r| {
+            r.get::<_, String>(0)
+        }) {
+            return Ok(v);
+        }
+        let mut b = [0u8; 4];
+        let _ = getrandom::fill(&mut b);
+        let id: String = b.iter().map(|x| format!("{x:02x}")).collect();
+        conn.execute(
+            "INSERT OR IGNORE INTO meta (key, value) VALUES ('hub_id', ?1)",
+            params![id],
+        )?;
+        conn.query_row("SELECT value FROM meta WHERE key = 'hub_id'", [], |r| {
+            r.get(0)
+        })
+    }
 
     /// Sets where a project lives in Discord: which bot, server and channel (and their names, for showing).
     pub fn set_target(&self, tenant: &str, p: &Placement) -> rusqlite::Result<()> {

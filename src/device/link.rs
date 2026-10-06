@@ -17,8 +17,9 @@ use tokio::net::TcpStream;
 use tokio::sync::{Notify, mpsc};
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 
-/// What the link tells its owner.
+/// What the link tells its owner. (One variant is a whole frame, which is much larger than the others; these are made one at a time, so that is fine.)
 #[derive(Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum LinkEvent {
     /// Connected and welcomed. Register agents now.
     Up,

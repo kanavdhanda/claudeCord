@@ -507,6 +507,22 @@ impl HubCore {
 
     // Registering and forgetting agents
 
+    /// An agent is gone for good: forgotten everywhere, its questions closed, and the lead handed on if it was the lead.
+    fn drop_agent(&mut self, agent_id: &str, fx: &mut Vec<Effect>) {
+        let Some(a) = self.agents.get(agent_id).cloned() else {
+            return;
+        };
+        self.forget_agent(agent_id);
+        if a.is_lead {
+            self.hand_over_lead(&a.project, fx);
+        }
+        fx.push(Effect::Persist(Persist::RemoveAgent(agent_id.into())));
+        self.status.remove(agent_id);
+        self.metrics.forget(agent_id);
+        self.cancel_asks_of(&a.project, agent_id);
+        Self::refresh(&a.project, fx);
+    }
+
     /// Removes an agent from every index. Its queued messages go with it.
     pub(super) fn forget_agent(&mut self, id: &str) {
         if let Some(a) = self.agents.remove(id)
@@ -571,8 +587,12 @@ impl HubCore {
         }
         fx.push(Effect::Chat(Chat::EnsureProject(spec.project.clone())));
         let known = self.agents.get(&spec.agent_id).cloned();
-        let first = self.agents_of_project(&spec.project).is_empty();
-        let is_lead = known.as_ref().map_or(first, |k| k.is_lead);
+        // A project with no lead (its lead went without being replaced) gives the lead to whoever joins next.
+        let no_lead = !self
+            .agents_of_project(&spec.project)
+            .iter()
+            .any(|a| a.is_lead && a.agent_id != spec.agent_id);
+        let is_lead = known.as_ref().map_or(no_lead, |k| k.is_lead || no_lead);
         let row = AgentRow {
             agent_id: spec.agent_id.clone(),
             name: spec.name.clone(),
@@ -598,6 +618,12 @@ impl HubCore {
                 self.roster_dirty.insert(id);
             }
             self.metrics.inc("agent_joined", 1.0, now);
+            Self::notice(
+                &row.project,
+                format!("{} started on {}.", row.name, row.node_name),
+                false,
+                fx,
+            );
         }
         self.agents.insert(row.agent_id.clone(), row.clone());
         fx.push(Effect::Persist(Persist::UpsertAgent(row.clone())));
@@ -621,6 +647,7 @@ impl HubCore {
             | NodeFrame::AgentReport { agent_id, .. }
             | NodeFrame::AgentLimit { agent_id, .. }
             | NodeFrame::AgentGone { agent_id }
+            | NodeFrame::AgentScreen { agent_id, .. }
             | NodeFrame::AgentAccepted { agent_id, .. }
             | NodeFrame::AgentAssign { agent_id, .. }
             | NodeFrame::AgentTaskDone { agent_id, .. }
@@ -634,6 +661,8 @@ impl HubCore {
             | NodeFrame::FileChunk { agent_id, .. } => Some(agent_id.as_str()),
             NodeFrame::Hello { .. }
             | NodeFrame::AgentRegister { .. }
+            | NodeFrame::AgentsHere { .. }
+            | NodeFrame::SpawnFailed { .. }
             | NodeFrame::NodeInfo { .. } => None,
         };
         if claimed
@@ -766,6 +795,16 @@ impl HubCore {
             }
             NodeFrame::AgentPickup { agent_id } => self.on_pickup(&agent_id, now, &mut fx),
             NodeFrame::AgentTeam { agent_id } => self.on_team(&agent_id, now, &mut fx),
+            NodeFrame::SpawnFailed {
+                project,
+                name,
+                reason,
+            } => Self::notice(
+                &project,
+                format!("Could not start {name} on {node}: {reason}"),
+                false,
+                &mut fx,
+            ),
             NodeFrame::AgentAnswer {
                 agent_id,
                 ask,
@@ -802,6 +841,7 @@ impl HubCore {
                 seq,
                 last,
                 data,
+                sha256,
                 to,
                 caption,
                 thread,
@@ -812,22 +852,41 @@ impl HubCore {
                 seq,
                 last,
                 &data,
+                sha256,
                 to,
                 caption,
                 thread,
                 now,
                 &mut fx,
             ),
-            NodeFrame::AgentGone { agent_id } => {
-                let Some(a) = self.agents.get(&agent_id).cloned() else {
-                    return fx;
-                };
-                self.forget_agent(&agent_id);
-                fx.push(Effect::Persist(Persist::RemoveAgent(agent_id.clone())));
-                self.status.remove(&agent_id);
-                self.metrics.forget(&agent_id);
-                self.cancel_asks_of(&a.project, &agent_id);
-                Self::refresh(&a.project, &mut fx);
+            NodeFrame::AgentGone { agent_id } => self.drop_agent(&agent_id, &mut fx),
+            NodeFrame::AgentScreen {
+                agent_id,
+                why,
+                text,
+            } => {
+                if let Some(a) = self.agents.get(&agent_id) {
+                    // Drawn as a code block, so the terminal keeps its columns.
+                    let text = text.replace("```", "'''");
+                    Self::notice(
+                        &a.project.clone(),
+                        format!("**{}**: {why}\n```\n{text}\n```", a.name),
+                        false,
+                        &mut fx,
+                    );
+                }
+            }
+            // The machine's own account of what it runs: what it lists is the truth, so any other agent of it that the hub still has is gone.
+            NodeFrame::AgentsHere { agent_ids } => {
+                let stale: Vec<String> = self
+                    .agents
+                    .values()
+                    .filter(|a| a.node_name == node && !agent_ids.contains(&a.agent_id))
+                    .map(|a| a.agent_id.clone())
+                    .collect();
+                for id in stale {
+                    self.drop_agent(&id, &mut fx);
+                }
             }
         }
         fx
@@ -845,6 +904,10 @@ impl HubCore {
         let Some(a) = self.agents.get(agent_id).cloned() else {
             return;
         };
+        // A machine says "restarted" when it started the agent's program again (a crash, or `restart`): a new session does not remember asking.
+        if detail.as_deref() == Some("restarted") {
+            self.cancel_asks_of(&a.project, agent_id);
+        }
         self.status.insert(agent_id.to_string(), (status, detail));
         self.metrics
             .status(agent_id, super::routing::status_name(status), now);
@@ -875,7 +938,28 @@ impl HubCore {
         };
         self.metrics.inc("msg_agent", 1.0, now);
         let thread = thread.or_else(|| self.open_task_thread(agent_id, &a.project));
-        let clean = self.scrub(&a, text, now, fx);
+        let text = strip_mention(text, &a.name);
+        // Agents talking to each other (and not to a person) do it in a thread of their own, named after the pair, so the main channel stays for
+        // the people and the results. Nothing is asked of the agents: it is where the hub puts the message.
+        let thread = match thread {
+            Some(t) => Some(t),
+            None if !self.addresses_human(&a.project, &text) => {
+                let mut names: Vec<String> = self
+                    .mentioned(&a.project, &text, Some(agent_id))
+                    .into_iter()
+                    .map(|p| p.name)
+                    .collect();
+                if names.is_empty() {
+                    None
+                } else {
+                    names.push(a.name.clone());
+                    names.sort();
+                    Some(names.join(" & ").chars().take(90).collect())
+                }
+            }
+            None => None,
+        };
+        let clean = self.scrub(&a, &text, now, fx);
         fx.push(Effect::Persist(Persist::History {
             project: a.project.clone(),
             thread: thread.clone(),
@@ -923,15 +1007,51 @@ impl HubCore {
     }
 }
 
-/// Whether `text` contains `@name` as a whole word, ignoring case. A word character is a letter, digit or underscore
-/// (ASCII, as agent names are), so `@otter` matches in "hi @otter!" but not in "@otters" or "me@otter".
+/// `text` without any `@name` of this exact name (and the space after it): an agent that tags itself, as when it copies how it was addressed, is not
+/// tagging anyone. The same whole-name rule as `mentions_name`.
+pub(super) fn strip_mention(text: &str, name: &str) -> String {
+    let hay = text.to_ascii_lowercase();
+    let needle = format!("@{}", name.to_ascii_lowercase());
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut out = String::with_capacity(text.len());
+    let mut from = 0;
+    for (i, m) in hay.match_indices(&needle) {
+        let before = hay[..i].chars().next_back();
+        let mut rest = hay[i + m.len()..].chars();
+        let goes_on = match rest.next() {
+            Some(c) if word(c) => true,
+            Some('-' | '.') => rest.next().is_some_and(word),
+            _ => false,
+        };
+        if i < from || before.is_some_and(word) || goes_on {
+            continue;
+        }
+        out.push_str(&text[from..i]);
+        from = i + m.len();
+        if text[from..].starts_with(' ') {
+            from += 1;
+        }
+    }
+    out.push_str(&text[from..]);
+    out
+}
+
+/// Whether `text` contains `@name` as a whole name, ignoring case. A name may hold letters, digits, underscores, dashes and dots, so `@otter`
+/// matches in "hi @otter!" and "@otter." but not in "@otters", "@otter-2" or "me@otter", and `@macbook` does not match inside `@macbook-eeg-main`
+/// (which would send a message meant for one agent to another).
 pub(super) fn mentions_name(text: &str, name: &str) -> bool {
     let hay = text.to_ascii_lowercase();
     let needle = format!("@{}", name.to_ascii_lowercase());
     let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
     hay.match_indices(&needle).any(|(i, m)| {
         let before = hay[..i].chars().next_back();
-        let after = hay[i + m.len()..].chars().next();
-        !before.is_some_and(word) && !after.is_some_and(word)
+        let mut rest = hay[i + m.len()..].chars();
+        // The name goes on if a dash or dot is followed by a name character; a dash or dot ending a sentence does not continue it.
+        let goes_on = match rest.next() {
+            Some(c) if word(c) => true,
+            Some('-' | '.') => rest.next().is_some_and(word),
+            _ => false,
+        };
+        !before.is_some_and(word) && !goes_on
     })
 }

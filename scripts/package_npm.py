@@ -50,6 +50,10 @@ def build(binaries, out):
         os.chmod(d / exe, 0o755)
         made.append(f"{plat}-{cpu}")
     shutil.copy(ROOT / "README.md", main / "README.md")
+    # The license, and the notices for what is built in (the fonts), travel with the package.
+    for f in ("LICENSE", "THIRD-PARTY-NOTICES.md"):
+        shutil.copy(ROOT / f, main / f)
+    shutil.copy(ROOT / "assets" / "fonts" / "LICENSE-DejaVu", main / "LICENSE-DejaVu")
     pkg = json.loads((main / "package.json").read_text())
     pkg["version"] = version
     (main / "package.json").write_text(json.dumps(pkg, indent=2) + "\n")

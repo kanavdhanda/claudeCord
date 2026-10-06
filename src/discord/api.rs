@@ -117,6 +117,60 @@ impl Rest {
             .unwrap_or_default())
     }
 
+    /// One channel, as Discord describes it (its topic, among other things).
+    pub async fn channel(&self, id: &str) -> Result<Value> {
+        self.call(Method::GET, &format!("/channels/{id}"), None)
+            .await
+    }
+
+    /// Changes a channel's topic.
+    pub async fn set_channel_topic(&self, id: &str, topic: &str) -> Result<()> {
+        self.call(
+            Method::PATCH,
+            &format!("/channels/{id}"),
+            Some(json!({"topic": topic})),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// The roles of a server.
+    pub async fn guild_roles(&self, guild: &str) -> Result<Vec<Value>> {
+        Ok(self
+            .call(Method::GET, &format!("/guilds/{guild}/roles"), None)
+            .await?
+            .as_array()
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    /// Makes a role anyone can mention, with no permissions of its own, and returns its id. (Discord only offers members, roles and channels
+    /// when someone types `@`, and agents post as webhooks, so a role named after each agent is how `@name` shows up in that list.)
+    pub async fn create_role(&self, guild: &str, name: &str) -> Result<String> {
+        let v = self
+            .call(
+                Method::POST,
+                &format!("/guilds/{guild}/roles"),
+                Some(json!({"name": name, "mentionable": true, "permissions": "0"})),
+            )
+            .await?;
+        v["id"]
+            .as_str()
+            .map(String::from)
+            .ok_or_else(|| ApiError("no role id in the answer".into()))
+    }
+
+    /// Deletes a role.
+    pub async fn delete_role(&self, guild: &str, role: &str) -> Result<()> {
+        self.call(
+            Method::DELETE,
+            &format!("/guilds/{guild}/roles/{role}"),
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
+
     /// Makes a text channel and returns its id.
     pub async fn create_channel(&self, guild: &str, name: &str, topic: &str) -> Result<String> {
         let v = self
@@ -157,17 +211,32 @@ impl Rest {
         content: &str,
         thread: Option<&str>,
     ) -> Result<String> {
+        self.webhook_send_to(id, token, username, content, thread, &[])
+            .await
+    }
+
+    /// Like `webhook_send`, and the people named by `notify` (Discord user ids that appear as `<@id>` in the text) really are notified. Nobody else is.
+    pub async fn webhook_send_to(
+        &self,
+        id: &str,
+        token: &str,
+        username: &str,
+        content: &str,
+        thread: Option<&str>,
+        notify: &[String],
+    ) -> Result<String> {
+        let allowed = json!({"parse": [], "users": notify});
         let mut path = format!("/webhooks/{id}/{token}?wait=true");
         if let Some(t) = thread {
             path.push_str(&format!("&thread_id={t}"));
         }
         let (short, long) = split_for_discord(content);
         let v = match long {
-            None => self.call(Method::POST, &path, Some(json!({"username": username, "content": short, "allowed_mentions": {"parse": []}}))).await?,
+            None => self.call(Method::POST, &path, Some(json!({"username": username, "content": short, "allowed_mentions": allowed}))).await?,
             Some(full) => {
                 let form = multipart::Form::new()
-                    .text("payload_json", json!({"username": username, "content": short, "allowed_mentions": {"parse": []}}).to_string())
-                    .part("files[0]", multipart::Part::bytes(full.into_bytes()).file_name("message.txt"));
+                    .text("payload_json", json!({"username": username, "content": short, "allowed_mentions": allowed}).to_string())
+                    .part("files[0]", multipart::Part::bytes(full.clone().into_bytes()).file_name(if looks_like_markdown(&full) { "message.md" } else { "message.txt" }));
                 self.multipart(&path, form).await?
             }
         };
@@ -276,6 +345,18 @@ impl Rest {
     }
 
     /// Adds a reaction to a message. `emoji` is the character itself.
+    /// Takes the bot's own reaction off a message again.
+    pub async fn unreact(&self, channel: &str, message: &str, emoji: &str) -> Result<()> {
+        let enc: String = emoji.bytes().map(|b| format!("%{b:02X}")).collect();
+        self.call(
+            Method::DELETE,
+            &format!("/channels/{channel}/messages/{message}/reactions/{enc}/@me"),
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
+
     pub async fn react(&self, channel: &str, message: &str, emoji: &str) -> Result<()> {
         let enc: String = emoji.bytes().map(|b| format!("%{b:02X}")).collect();
         self.call(
@@ -297,6 +378,22 @@ impl Rest {
     ) -> Result<()> {
         let flags = if ephemeral { 64 } else { 0 };
         self.call(Method::POST, &format!("/interactions/{interaction}/{token}/callback"), Some(json!({"type": 4, "data": {"content": content.chars().take(1990).collect::<String>(), "flags": flags, "allowed_mentions": {"parse": []}}}))).await.map(|_| ())
+    }
+
+    /// Answers a person who is typing an option with the choices to list (Discord shows at most 25).
+    pub async fn choices(&self, interaction: &str, token: &str, names: &[String]) -> Result<()> {
+        let list: Vec<Value> = names
+            .iter()
+            .take(25)
+            .map(|n| json!({"name": n, "value": n}))
+            .collect();
+        self.call(
+            Method::POST,
+            &format!("/interactions/{interaction}/{token}/callback"),
+            Some(json!({"type": 8, "data": {"choices": list}})),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Acknowledges a button press without posting anything (the message is edited separately).
@@ -338,6 +435,40 @@ impl Rest {
         Ok(v.as_array().cloned().unwrap_or_default())
     }
 
+    /// The newest messages of a channel (up to 100).
+    pub async fn recent_messages(&self, channel: &str) -> Result<Vec<Value>> {
+        let v = self
+            .call(
+                Method::GET,
+                &format!("/channels/{channel}/messages?limit=100"),
+                None,
+            )
+            .await?;
+        Ok(v.as_array().cloned().unwrap_or_default())
+    }
+
+    /// Deletes several messages at once (2 to 100, none older than two weeks: Discord's rule).
+    pub async fn bulk_delete(&self, channel: &str, ids: &[String]) -> Result<()> {
+        self.call(
+            Method::POST,
+            &format!("/channels/{channel}/messages/bulk-delete"),
+            Some(json!({"messages": ids})),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Deletes one message.
+    pub async fn delete_message(&self, channel: &str, id: &str) -> Result<()> {
+        self.call(
+            Method::DELETE,
+            &format!("/channels/{channel}/messages/{id}"),
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
+
     /// Downloads a file (an attachment's address).
     pub async fn download(&self, url: &str) -> Result<Vec<u8>> {
         let resp = self
@@ -356,10 +487,23 @@ impl Rest {
     }
 }
 
-/// Discord allows 2000 characters in a message. Longer text is cut with a note, and the full text is returned to be
-/// attached as a file. Returns (text to show, full text if it was cut).
+/// Whether text uses markdown (headings, lists, code blocks, bold, links), so that the attached file is named for it.
+fn looks_like_markdown(t: &str) -> bool {
+    t.lines().any(|l| {
+        let l = l.trim_start();
+        l.starts_with('#')
+            || l.starts_with("- ")
+            || l.starts_with("* ")
+            || l.starts_with("```")
+            || l.starts_with("> ")
+    }) || t.contains("**")
+        || t.contains("](")
+}
+
+/// Discord allows 2000 characters in a message, and that is the only limit: text up to it is posted as it is. Only longer text is cut (with a note)
+/// and returned to be attached as a file (`.md` when it uses markdown, else `.txt`). Returns (text to show, full text if it was cut).
 pub fn split_for_discord(content: &str) -> (String, Option<String>) {
-    const LIMIT: usize = 1900;
+    const LIMIT: usize = 2000;
     if content.chars().count() <= LIMIT {
         return (content.to_string(), None);
     }
@@ -368,4 +512,40 @@ pub fn split_for_discord(content: &str) -> (String, Option<String>) {
         format!("{head}\n(too long for Discord: the full text is attached)"),
         Some(content.to_string()),
     )
+}
+
+/// What an agent wrote, made to read well in Discord: a shell leaves a literal `\n` where the agent meant a line break (when there is no real line
+/// break at all, those are turned into real ones), and Discord does not draw markdown tables, so a table is put in a code block, where its columns line up.
+pub fn tidy_for_discord(text: &str) -> String {
+    let text = if !text.contains('\n') && text.contains("\\n") {
+        text.replace("\\n", "\n")
+    } else {
+        text.to_string()
+    };
+    let is_row = |l: &str| {
+        let t = l.trim();
+        t.len() > 2 && t.starts_with('|') && t.ends_with('|')
+    };
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 2);
+    let mut i = 0;
+    while i < lines.len() {
+        if is_row(lines[i]) {
+            let mut j = i;
+            while j < lines.len() && is_row(lines[j]) {
+                j += 1;
+            }
+            // Two or more rows in a row: a table.
+            if j - i >= 2 {
+                out.push("```".into());
+                out.extend(lines[i..j].iter().map(|l| l.to_string()));
+                out.push("```".into());
+                i = j;
+                continue;
+            }
+        }
+        out.push(lines[i].to_string());
+        i += 1;
+    }
+    out.join("\n")
 }

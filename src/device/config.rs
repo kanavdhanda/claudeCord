@@ -2,6 +2,7 @@
 //! user's own folder, readable by that user only, because the token lets anyone who has it act as this machine.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -53,4 +54,61 @@ impl Config {
             crate::protocol::NODE_CONNECT_PATH
         )
     }
+}
+
+/// Whether this machine stays connected to the hub with no agent running. Off by default: the daemon (which holds the connection) exits a short
+/// while after the last agent ends, so nothing runs in the background without a window open. The person turns it on with
+/// `claudecord settings keep-running on` (saved in `settings.json`); `CLAUDECORD_KEEP_RUNNING=1` or `0` overrides it for one run.
+pub fn keep_running(dir: &Path) -> bool {
+    if let Ok(v) = std::env::var("CLAUDECORD_KEEP_RUNNING") {
+        return matches!(v.as_str(), "1" | "true" | "on" | "yes");
+    }
+    std::fs::read_to_string(dir.join("settings.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v["keep_running"].as_bool())
+        .unwrap_or(false)
+}
+
+/// Saves the keep-running setting.
+pub fn set_keep_running(dir: &Path, on: bool) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(
+        dir.join("settings.json"),
+        serde_json::json!({ "keep_running": on }).to_string(),
+    )
+}
+
+/// The folders this machine has started agents in, by project, most recently used first. Older saves held one folder per project; those are read too.
+pub fn read_projects(dir: &Path) -> BTreeMap<String, Vec<PathBuf>> {
+    let Some(v) = std::fs::read_to_string(dir.join("projects.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+    else {
+        return BTreeMap::new();
+    };
+    let Some(map) = v.as_object() else {
+        return BTreeMap::new();
+    };
+    map.iter()
+        .map(|(k, v)| {
+            let list = match v {
+                serde_json::Value::String(s) => vec![PathBuf::from(s)],
+                serde_json::Value::Array(a) => a
+                    .iter()
+                    .filter_map(|x| x.as_str().map(PathBuf::from))
+                    .collect(),
+                _ => vec![],
+            };
+            (k.clone(), list)
+        })
+        .collect()
+}
+
+/// The project a folder was last started for on this machine, if any.
+pub fn project_of_folder(dir: &Path, folder: &Path) -> Option<String> {
+    read_projects(dir)
+        .into_iter()
+        .find(|(_, folders)| folders.iter().any(|f| f == folder))
+        .map(|(p, _)| p)
 }

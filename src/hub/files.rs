@@ -29,6 +29,11 @@ pub(super) struct Upload {
     chunks: Vec<Vec<u8>>,
     bytes: usize,
     at: i64,
+    /// The chunk number expected next: a missing or repeated one means the file is damaged, and it is dropped rather than posted.
+    next: u64,
+    project: String,
+    from: String,
+    name: String,
 }
 
 impl HubCore {
@@ -43,6 +48,7 @@ impl HubCore {
         seq: u64,
         last: bool,
         data: &str,
+        sha256: Option<String>,
         to: Option<String>,
         caption: Option<String>,
         thread: Option<String>,
@@ -75,6 +81,7 @@ impl HubCore {
                 seq,
                 last,
                 data: data.into(),
+                sha256,
                 caption: caption.clone(),
                 thread: thread.clone(),
             };
@@ -95,7 +102,26 @@ impl HubCore {
             }
             return;
         }
-        self.uploads.retain(|_, u| now - u.at <= UPLOAD_TTL_MS);
+        // A transfer that stopped part way (the machine lost its connection, say) is dropped, and the chat is told.
+        let stale: Vec<String> = self
+            .uploads
+            .iter()
+            .filter(|(_, u)| now - u.at > UPLOAD_TTL_MS)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in stale {
+            if let Some(u) = self.uploads.remove(&k) {
+                Self::notice(
+                    &u.project,
+                    format!(
+                        "{} did not finish sending {}: it stopped part way, so nothing was posted.",
+                        u.from, u.name
+                    ),
+                    false,
+                    fx,
+                );
+            }
+        }
         if !self.uploads.contains_key(transfer_id) {
             if seq != 0 {
                 return;
@@ -119,11 +145,41 @@ impl HubCore {
                     chunks: Vec::new(),
                     bytes: 0,
                     at: now,
+                    next: 0,
+                    project: a.project.clone(),
+                    from: a.name.clone(),
+                    name: name.into(),
                 },
             );
         }
-        let buf = B64.decode(data.trim_end_matches('=')).unwrap_or_default();
+        let Ok(buf) = B64.decode(data.trim_end_matches('=')) else {
+            self.uploads.remove(transfer_id);
+            Self::notice(
+                &a.project,
+                format!(
+                    "{} sent {name} damaged (it could not be decoded), so nothing was posted.",
+                    a.name
+                ),
+                false,
+                fx,
+            );
+            return;
+        };
         let u = self.uploads.get_mut(transfer_id).expect("inserted above");
+        if seq != u.next {
+            self.uploads.remove(transfer_id);
+            Self::notice(
+                &a.project,
+                format!(
+                    "{name} from {} arrived with a piece missing or repeated, so nothing was posted. Send it again.",
+                    a.name
+                ),
+                false,
+                fx,
+            );
+            return;
+        }
+        u.next += 1;
         u.at = now;
         u.bytes += buf.len();
         if u.bytes > MAX_FILE_BYTES {
@@ -149,6 +205,21 @@ impl HubCore {
             .remove(transfer_id)
             .map(|u| u.chunks.concat())
             .unwrap_or_default();
+        // Put together, it must be what the sender had.
+        if let Some(want) = &sha256
+            && crate::agents::text::sha256_hex(&bytes) != *want
+        {
+            Self::notice(
+                &a.project,
+                format!(
+                    "{name} from {} arrived damaged (its checksum did not match), so nothing was posted. Send it again.",
+                    a.name
+                ),
+                false,
+                fx,
+            );
+            return;
+        }
         let secrets = find_secrets_in_file(&bytes);
         if !secrets.is_empty() {
             self.metrics.inc("secret_blocks", 1.0, now);
@@ -194,6 +265,7 @@ impl HubCore {
         let targets = self.pick_targets(project, text);
         let from = self.label(project, by);
         let total = data.len().div_ceil(FILE_CHUNK_BYTES).max(1);
+        let sum = crate::agents::text::sha256_hex(data);
         for t in &targets {
             for seq in 0..total {
                 let slice = &data[(seq * FILE_CHUNK_BYTES).min(data.len())
@@ -206,6 +278,7 @@ impl HubCore {
                     seq: seq as u64,
                     last: seq == total - 1,
                     data: base64::engine::general_purpose::STANDARD.encode(slice),
+                    sha256: (seq == total - 1).then(|| sum.clone()),
                     caption: (!text.is_empty()).then(|| text.to_string()),
                     thread: thread.clone(),
                 };

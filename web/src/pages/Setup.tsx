@@ -18,7 +18,11 @@ export function Setup() {
   const [bot, setBot] = useState<Bot | null>(null)
   const [guild, setGuild] = useState<Guild | null>(null)
   const [channel, setChannel] = useState<Channel | null>(null)
-  const [project, setProject] = useState('')
+  // `claudecord start` opens this page with ?project=NAME for a project that has no Discord channel yet.
+  const [project, setProject] = useState(() => {
+    const p = new URLSearchParams(window.location.search).get('project') ?? ''
+    return /^[A-Za-z0-9._-]{1,64}$/.test(p) ? p : ''
+  })
   const [agent, setAgent] = useState('')
   const [program, setProgram] = useState('claude')
 
@@ -58,10 +62,22 @@ export function Setup() {
           program={program}
           setProgram={setProgram}
           back={() => setStep('where')}
-          next={() => setStep('done')}
+          next={async () => {
+            // Reached from a waiting `claudecord start`: the project is chosen now that its bot and channel exist, which lets that terminal carry on.
+            const code = new URLSearchParams(window.location.search).get('code')
+            if (code) {
+              try {
+                await api.choose(code, project)
+              } catch (e) {
+                // The terminal gave up waiting (or the hub restarted): the project is set up anyway, so say how to carry on.
+                alert(`The project is set up, but the terminal is no longer waiting for it (${e instanceof Error ? e.message : e}). Run claudecord start again and pick ${project}.`)
+              }
+            }
+            setStep('done')
+          }}
         />
       )}
-      {step === 'done' && <DoneStep project={project} agent={agent} program={program} />}
+      {step === 'done' && <DoneStep project={project} agent={agent} program={program} fromTerminal={new URLSearchParams(window.location.search).get('from') === 'pick'} />}
     </div>
   )
 }
@@ -143,9 +159,20 @@ function WhereStep({ bot, back, pick }: { bot: Bot; back: () => void; pick: (g: 
         Discord server
         <select value={guildId} onChange={(e) => setGuildId(e.target.value)}>
           <option value="">Choose a server…</option>
-          {guilds.data?.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+          {guilds.data?.map((g) => (
+            <option key={g.id} value={g.id} disabled={g.ok === false}>
+              {g.name}{g.ok === false ? ' (the bot needs more permissions here)' : ''}
+            </option>
+          ))}
         </select>
       </label>
+      {guilds.data?.filter((g) => g.ok === false).map((g) => (
+        <p key={g.id} className="warn small">
+          In <b>{g.name}</b> the bot is missing: {g.missing?.join(', ')}. <a href={bot.invite_url} target="_blank" rel="noreferrer">Invite it again with this link</a>
+          {' '}(if Discord keeps the old permissions, remove the bot from the server first and add it back), then{' '}
+          <button className="link" onClick={guilds.reload}>check again</button>.
+        </p>
+      ))}
       <p className="small muted">
         Not listed? <a href={bot.invite_url} target="_blank" rel="noreferrer">Add the bot to another server</a>, then{' '}
         <button className="link" onClick={guilds.reload}>refresh</button>.
@@ -248,12 +275,23 @@ function NameStep(p: {
   )
 }
 
-function DoneStep({ project, agent, program }: { project: string; agent: string; program: string }) {
+function DoneStep({ project, agent, program, fromTerminal }: { project: string; agent: string; program: string; fromTerminal: boolean }) {
   const machines = useLoad(api.machines)
   const [node, setNode] = useState('')
   const spawn = useAction()
   const [started, setStarted] = useState<string | null>(null)
   const cmd = `cd ~/code/${project}\nclaudecord start --project ${project}${agent ? ` --name ${agent}` : ''}${program !== 'claude' ? ` --adapter ${program}` : ''}`
+  // Reached from `claudecord start`: that terminal is already carrying on, so there is nothing to type anywhere.
+  if (fromTerminal)
+    return (
+      <div className="card narrow stack">
+        <h2>All set</h2>
+        <p>
+          <b>{project}</b> now has its place in Discord. Go back to your terminal: your agent is already starting there.
+        </p>
+        <Link className="btn primary" to="/">Go to the dashboard</Link>
+      </div>
+    )
   return (
     <div className="card stack">
       <h2>Start the first agent</h2>

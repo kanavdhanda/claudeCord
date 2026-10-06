@@ -23,6 +23,10 @@ use tokio::sync::broadcast;
 pub struct Log {
     pub next: u64,
     pub channels: Vec<Value>,
+    /// Roles made in the servers: {id, name, guild, mentionable}.
+    pub roles: Vec<Value>,
+    /// Ids of the roles that were deleted.
+    pub deleted_roles: Vec<String>,
     /// The servers the bot is in, as `/users/@me/guilds` returns them.
     pub guilds: Vec<Value>,
     pub webhooks: HashMap<String, String>, // webhook id -> channel id
@@ -30,6 +34,8 @@ pub struct Log {
     pub messages: Vec<Value>, // bot messages: {channel, content, components, id}
     pub edits: Vec<Value>,
     pub reactions: Vec<Value>,
+    /// Message ids deleted in bulk.
+    pub deleted: Vec<String>,
     pub responses: Vec<Value>,
     pub commands: Option<Value>,
     /// What people said in each channel, as the "read the messages after" call returns it (a test fills this to stand in for messages sent
@@ -125,13 +131,70 @@ pub async fn start_fake() -> (Fake, String) {
                 .collect(),
         ))
     }
+    async fn roles(State(f): State<Fake>, Path(g): Path<String>) -> Json<Value> {
+        let all = f.log.lock().unwrap().roles.clone();
+        Json(Value::Array(
+            all.into_iter()
+                .filter(|r| r["guild"] == g.as_str())
+                .collect(),
+        ))
+    }
+    async fn mk_role(
+        State(f): State<Fake>,
+        Path(g): Path<String>,
+        Json(b): Json<Value>,
+    ) -> Json<Value> {
+        let id = f.id();
+        let r = json!({"id": id, "name": b["name"], "guild": g, "mentionable": b["mentionable"]});
+        f.log.lock().unwrap().roles.push(r.clone());
+        Json(r)
+    }
+    async fn del_role(
+        State(f): State<Fake>,
+        Path((_g, id)): Path<(String, String)>,
+    ) -> Json<Value> {
+        let mut l = f.log.lock().unwrap();
+        l.roles.retain(|r| r["id"] != id.as_str());
+        l.deleted_roles.push(id);
+        Json(json!({}))
+    }
+    async fn get_channel(
+        State(f): State<Fake>,
+        Path(id): Path<String>,
+    ) -> Result<Json<Value>, axum::http::StatusCode> {
+        f.log
+            .lock()
+            .unwrap()
+            .channels
+            .iter()
+            .find(|c| c["id"] == id.as_str())
+            .cloned()
+            .map(Json)
+            .ok_or(axum::http::StatusCode::NOT_FOUND)
+    }
+    async fn patch_channel(
+        State(f): State<Fake>,
+        Path(id): Path<String>,
+        Json(b): Json<Value>,
+    ) -> Result<Json<Value>, axum::http::StatusCode> {
+        let mut l = f.log.lock().unwrap();
+        let c = l
+            .channels
+            .iter_mut()
+            .find(|c| c["id"] == id.as_str())
+            .ok_or(axum::http::StatusCode::NOT_FOUND)?;
+        if let Some(t) = b.get("topic") {
+            c["topic"] = t.clone();
+        }
+        Ok(Json(c.clone()))
+    }
     async fn mk_channel(
         State(f): State<Fake>,
         Path(g): Path<String>,
         Json(b): Json<Value>,
     ) -> Json<Value> {
         let id = f.id();
-        let c = json!({"id": id, "name": b["name"], "type": 0, "guild": g});
+        let c = json!({"id": id, "name": b["name"], "type": 0, "guild": g, "topic": b["topic"]});
         f.log.lock().unwrap().channels.push(c.clone());
         Json(c)
     }
@@ -153,6 +216,10 @@ pub async fn start_fake() -> (Fake, String) {
             .and_then(|v| v.to_str().ok())
             .is_some_and(|c| c.starts_with("multipart"));
         let text = String::from_utf8_lossy(&body).to_string();
+        let notify = serde_json::from_slice::<Value>(&body)
+            .ok()
+            .map(|v| v["allowed_mentions"]["users"].clone())
+            .unwrap_or(Value::Null);
         let (username, content, file) = if multipart {
             let payload = text
                 .split("name=\"payload_json\"")
@@ -182,7 +249,7 @@ pub async fn start_fake() -> (Fake, String) {
         };
         let mut l = f.log.lock().unwrap();
         let channel = l.webhooks.get(&id).cloned().unwrap_or_default();
-        l.posts.push(json!({"username": username, "content": content, "thread_id": q.get("thread_id"), "channel": channel, "file": file, "id": mid}));
+        l.posts.push(json!({"username": username, "content": content, "thread_id": q.get("thread_id"), "channel": channel, "file": file, "id": mid, "notify": notify}));
         Json(json!({"id": mid}))
     }
     async fn mk_thread(State(f): State<Fake>, Json(b): Json<Value>) -> Json<Value> {
@@ -218,6 +285,33 @@ pub async fn start_fake() -> (Fake, String) {
             .push(json!({"channel": ch, "message": m, "emoji": e}));
         Json(json!({}))
     }
+    async fn unreact(
+        State(f): State<Fake>,
+        Path((ch, m, e)): Path<(String, String, String)>,
+    ) -> Json<Value> {
+        f.log.lock().unwrap().reactions.retain(|x| {
+            !(x["channel"] == ch.as_str() && x["message"] == m.as_str() && x["emoji"] == e.as_str())
+        });
+        Json(json!({}))
+    }
+    async fn bulk_delete(
+        State(f): State<Fake>,
+        Path(ch): Path<String>,
+        Json(b): Json<Value>,
+    ) -> Json<Value> {
+        let ids: Vec<String> = b["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|i| i.as_str().map(String::from))
+            .collect();
+        let mut l = f.log.lock().unwrap();
+        if let Some(h) = l.history.get_mut(&ch) {
+            h.retain(|m| !ids.iter().any(|i| m["id"] == i.as_str()));
+        }
+        l.deleted.extend(ids);
+        Json(json!({}))
+    }
     async fn respond(
         State(f): State<Fake>,
         Path((id, _t)): Path<(String, String)>,
@@ -227,7 +321,7 @@ pub async fn start_fake() -> (Fake, String) {
             .lock()
             .unwrap()
             .responses
-            .push(json!({"interaction": id, "content": b["data"]["content"], "type": b["type"]}));
+            .push(json!({"interaction": id, "content": b["data"]["content"], "choices": b["data"]["choices"], "type": b["type"]}));
         Json(json!({}))
     }
     async fn cmds(State(f): State<Fake>, Json(b): Json<Value>) -> Json<Value> {
@@ -318,14 +412,21 @@ pub async fn start_fake() -> (Fake, String) {
         .route("/api/users/@me", get(user_me))
         .route("/api/users/@me/guilds", get(my_guilds))
         .route("/api/guilds/{g}/channels", get(list).post(mk_channel))
+        .route("/api/guilds/{g}/roles", get(roles).post(mk_role))
+        .route(
+            "/api/guilds/{g}/roles/{id}",
+            axum::routing::delete(del_role),
+        )
+        .route("/api/channels/{id}", get(get_channel).patch(patch_channel))
         .route("/api/channels/{id}/webhooks", post(mk_hook))
         .route("/api/webhooks/{id}/{tok}", post(hook_post))
         .route("/api/channels/{id}/threads", post(mk_thread))
         .route("/api/channels/{id}/messages", post(send).get(list_messages))
+        .route("/api/channels/{id}/messages/bulk-delete", post(bulk_delete))
         .route("/api/channels/{c}/messages/{m}", any(edit))
         .route(
             "/api/channels/{c}/messages/{m}/reactions/{e}/@me",
-            put(react),
+            put(react).delete(unreact),
         )
         .route("/api/interactions/{id}/{t}/callback", post(respond))
         .route("/api/applications/{a}/guilds/{g}/commands", put(cmds))

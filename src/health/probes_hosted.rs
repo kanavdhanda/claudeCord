@@ -100,6 +100,7 @@ fn gateway_probe() -> Probe {
                 discord: Default::default(),
                 dev: false,
                 bucket: None,
+                extra_owners: vec![],
             },
             dir,
             control.clone(),

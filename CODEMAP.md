@@ -47,6 +47,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | `src/device/logs.rs` | What a machine writes down about each agent, so that a person (or a fresh session) can pick the work up later. |
 | `src/device/mod.rs` | Everything that runs on a machine with agents: remembering who the machine is, keeping a connection to the hub, and (later in this folder) owning the agents' terminals. |
 | `src/device/pty.rs` | One agent's terminal. |
+| `src/device/shot.rs` | Draws a terminal screen as a PNG. |
 | `src/device/terminal.rs` | The one thing the daemon needs from an agent's terminal, whichever way it is provided: start it, type into it, paste a message safely, look at its screen, notice when it ends, stop it, and let a person get in front of it. |
 | `src/device/tmux.rs` | The tmux backend: each agent runs in its own tmux session on a private tmux server (its own socket), so a person can attach with plain `tmux attach`, scroll, and detach as they always do, and the agent keeps running when they leave. |
 

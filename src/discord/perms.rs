@@ -8,7 +8,7 @@ use base64::{
 };
 
 /// Permission name, its bit, and what to tell the user it is for.
-pub const REQUIRED: [(&str, u32, &str); 10] = [
+pub const REQUIRED: [(&str, u32, &str); 11] = [
     ("ViewChannel", 10, "View Channels"),
     ("ManageChannels", 4, "Manage Channels"),
     ("ManageWebhooks", 29, "Manage Webhooks"),
@@ -23,7 +23,24 @@ pub const REQUIRED: [(&str, u32, &str); 10] = [
         13,
         "Manage Messages (to pin the status board)",
     ),
+    (
+        "ManageRoles",
+        28,
+        "Manage Roles (so each agent can be @mentioned by name)",
+    ),
 ];
+
+/// What the bot is missing, by name, given the permissions Discord says it has in a server. Administrator covers everything.
+pub fn missing_permissions(granted: u64) -> Vec<&'static str> {
+    if granted & (1 << 3) != 0 {
+        return Vec::new();
+    }
+    REQUIRED
+        .iter()
+        .filter(|(_, bit, _)| granted & (1u64 << bit) == 0)
+        .map(|(_, _, what)| *what)
+        .collect()
+}
 
 /// The permissions as the number Discord puts in an invite link.
 pub fn permissions_integer() -> u64 {

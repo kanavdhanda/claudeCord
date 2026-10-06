@@ -7,6 +7,7 @@ use crate::control::seal;
 use crate::discord::api::Rest;
 use crate::hub::{Chat, Effect, Human};
 use crate::protocol::{AdapterId, AgentSpec, is_slug};
+use crate::sync::Lock;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -33,6 +34,138 @@ pub(crate) fn routes() -> Router<Gateway> {
         .route("/api/v1/projects", get(projects))
         .route("/api/v1/projects/{project}/target", put(set_target))
         .route("/api/v1/spawn", post(spawn))
+}
+
+/// What Discord says the bot's permissions are in one server (a number, as text), or None if it does not say.
+fn granted(g: &serde_json::Value) -> Option<u64> {
+    match &g["permissions"] {
+        serde_json::Value::String(s) => s.parse().ok(),
+        serde_json::Value::Number(n) => n.as_u64(),
+        _ => None,
+    }
+}
+
+/// What is missing for the bot to do its job in a server, in words, or None if it can (or Discord does not say, as the stand-in does not).
+fn guild_problem(guilds: &[serde_json::Value], guild: &str) -> Option<String> {
+    let Some(g) = guilds.iter().find(|g| g["id"] == guild) else {
+        return Some("The bot is not in that Discord server (it may have been removed). Add it again with the invite link on the Discord bots page.".into());
+    };
+    let missing = granted(g)
+        .map(crate::discord::perms::missing_permissions)
+        .unwrap_or_default();
+    (!missing.is_empty()).then(|| {
+        format!(
+            "In \"{}\" the bot is missing: {}. Invite it again with the link on the Discord bots page. If Discord keeps the old permissions, remove the bot from the server first and add it back.",
+            g["name"].as_str().unwrap_or("that server"),
+            missing.join(", ")
+        )
+    })
+}
+
+/// The servers a bot is in, as Discord said within the last 20 seconds (asked again after that). None if Discord cannot be asked.
+pub(crate) async fn bot_guilds_cached(
+    gw: &Gateway,
+    tenant: &str,
+    bot: &str,
+) -> Option<Vec<serde_json::Value>> {
+    let key = format!("{tenant}/{bot}");
+    let now = crate::now_ms();
+    if let Some((at, g)) = gw.guild_cache.locked().get(&key)
+        && now - at < 20_000
+    {
+        return Some(g.clone());
+    }
+    let (rest, _) = rest_for(gw, tenant, bot).ok()?;
+    let g = rest.my_guilds().await.ok()?;
+    gw.guild_cache.locked().insert(key, (now, g.clone()));
+    Some(g)
+}
+
+/// Why a placed project cannot work right now (its bot was removed from the server, or lacks a permission), or None if it can or that cannot be
+/// told. This is what the dashboard shows, and what `claudecord start` waits on.
+pub(crate) async fn project_problem(
+    gw: &Gateway,
+    tenant: &str,
+    p: &crate::control::Placement,
+) -> Option<String> {
+    let guilds = bot_guilds_cached(gw, tenant, &p.bot).await?;
+    guild_problem(&guilds, &p.guild)
+}
+
+/// Whether the account has at least one bot in a server with every permission it needs. Err says what to do.
+pub(crate) async fn account_ready(gw: &Gateway, tenant: &str) -> Result<(), String> {
+    let bots = gw.control.bots(tenant).unwrap_or_default();
+    if bots.is_empty() {
+        return Err(
+            "add a Discord bot first (the Discord bots page): its token is checked with Discord"
+                .into(),
+        );
+    }
+    let mut why = String::new();
+    for (id, _, name) in &bots {
+        let Ok((rest, _)) = rest_for(gw, tenant, id) else {
+            continue;
+        };
+        let Ok(guilds) = rest.my_guilds().await else {
+            continue;
+        };
+        if guilds.is_empty() {
+            why = format!(
+                "{name} is not in any Discord server yet. Invite it with the link on the Discord bots page."
+            );
+            continue;
+        }
+        let works_somewhere = guilds
+            .iter()
+            .filter_map(|g| g["id"].as_str())
+            .any(|i| guild_problem(&guilds, i).is_none());
+        if works_somewhere {
+            return Ok(());
+        }
+        why = guild_problem(&guilds, guilds[0]["id"].as_str().unwrap_or("")).unwrap_or(why);
+    }
+    Err(if why.is_empty() {
+        "none of your bots could be checked with Discord just now; try again in a moment".into()
+    } else {
+        why
+    })
+}
+
+/// Marks a channel as this service's, in its topic, or says it is already another service's. Without this, two copies of claudeCord (a real one
+/// and a test one) given the same bot and the same channel would each answer every message.
+async fn claim_channel(rest: &Rest, hub: &str, channel: &str) -> Result<(), Box<Response>> {
+    static MARK: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\[claudeCord:([0-9a-f]+)\]").expect("mark")
+    });
+    let info = rest.channel(channel).await.map_err(|_| {
+        Box::new(err(
+            StatusCode::BAD_GATEWAY,
+            "Discord did not answer about that channel (can the bot see it?)",
+        ))
+    })?;
+    let topic = info["topic"].as_str().unwrap_or("").to_string();
+    match MARK.captures(&topic) {
+        Some(c) if &c[1] == hub => Ok(()),
+        Some(c) => Err(Box::new(err(
+            StatusCode::CONFLICT,
+            &format!(
+                "That channel is already used by another claudeCord service ({}), probably your other or test copy. Choose a different channel, or use a separate bot for testing. (To release it, remove the [claudeCord:{}] text from the channel's topic.)",
+                &c[1], &c[1]
+            ),
+        ))),
+        None => {
+            let marked: String = format!("[claudeCord:{hub}] {topic}")
+                .chars()
+                .take(1000)
+                .collect();
+            rest.set_channel_topic(channel, &marked).await.map_err(|_| {
+                Box::new(err(
+                    StatusCode::BAD_GATEWAY,
+                    "Discord would not let the bot mark that channel (does it have Manage Channels?)",
+                ))
+            })
+        }
+    }
 }
 
 /// Discord ids are digits only; anything else is refused before it goes into a URL.
@@ -177,7 +310,12 @@ async fn guilds(
             StatusCode::OK,
             json!(
                 g.iter()
-                    .map(|x| json!({"id": x["id"], "name": x["name"]}))
+                    .map(|x| {
+                        let missing = granted(x)
+                            .map(crate::discord::perms::missing_permissions)
+                            .unwrap_or_default();
+                        json!({"id": x["id"], "name": x["name"], "missing": missing, "ok": missing.is_empty()})
+                    })
                     .collect::<Vec<_>>()
             ),
         ),
@@ -246,8 +384,21 @@ async fn make_channel(
         Ok(r) => r,
         Err(e) => return *e,
     };
+    match rest.my_guilds().await {
+        Ok(g) => {
+            if let Some(why) = guild_problem(&g, &guild) {
+                return err(StatusCode::CONFLICT, &why);
+            }
+        }
+        Err(_) => return err(StatusCode::BAD_GATEWAY, "Discord did not answer"),
+    }
+    let hub = gw.control.hub_id().unwrap_or_default();
     match rest
-        .create_channel(&guild, &b.name.to_lowercase(), "claudeCord project")
+        .create_channel(
+            &guild,
+            &b.name.to_lowercase(),
+            &format!("claudeCord project [claudeCord:{hub}]"),
+        )
         .await
     {
         Ok(id) => json_reply(
@@ -283,6 +434,13 @@ async fn projects(State(gw): State<Gateway>, headers: HeaderMap) -> Response {
         }
     }
     all.sort();
+    // Anything that stops a placed project working right now (the bot was removed from the server, or lacks a permission), to show.
+    let mut problems: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for p in &placed {
+        if let Some(why) = project_problem(&gw, &a.id, p).await {
+            problems.insert(p.project.clone(), why);
+        }
+    }
     let rows: Vec<_> = all
         .iter()
         .map(|p| {
@@ -295,6 +453,7 @@ async fn projects(State(gw): State<Gateway>, headers: HeaderMap) -> Response {
                 "channel": t.map(|t| t.channel.clone()),
                 "guild_name": t.map(|t| t.guild_name.clone()),
                 "channel_name": t.map(|t| t.channel_name.clone()),
+                "problem": problems.get(p),
             })
         })
         .collect();
@@ -332,6 +491,12 @@ async fn set_target(
         Ok(r) => r,
         Err(e) => return *e,
     };
+    let Ok(my_guilds) = rest.my_guilds().await else {
+        return err(StatusCode::BAD_GATEWAY, "Discord did not answer");
+    };
+    if let Some(why) = guild_problem(&my_guilds, &b.guild) {
+        return err(StatusCode::CONFLICT, &why);
+    }
     let Ok(list) = rest.guild_channels(&b.guild).await else {
         return err(
             StatusCode::BAD_GATEWAY,
@@ -345,11 +510,12 @@ async fn set_target(
         return err(StatusCode::NOT_FOUND, "that channel is not in that server");
     };
     let channel_name = chan["name"].as_str().unwrap_or("").to_string();
+    let hub = gw.control.hub_id().unwrap_or_default();
+    if let Err(r) = claim_channel(&rest, &hub, &b.channel).await {
+        return *r;
+    }
     // The server's name is only for showing; if Discord will not say, the id stands in.
-    let guild_name = rest
-        .my_guilds()
-        .await
-        .unwrap_or_default()
+    let guild_name = my_guilds
         .iter()
         .find(|g| g["id"] == b.guild.as_str())
         .and_then(|g| g["name"].as_str().map(String::from))
@@ -412,12 +578,19 @@ async fn spawn(State(gw): State<Gateway>, headers: HeaderMap, Json(b): Json<Spaw
     let Some(a) = account_of(&gw, &headers) else {
         return err(StatusCode::UNAUTHORIZED, "sign in first");
     };
-    if !is_slug(&b.project) || !is_slug(&b.name) {
+    if !is_slug(&b.project) {
         return err(
             StatusCode::BAD_REQUEST,
             "names use letters, digits, dots, dashes and underscores",
         );
     }
+    if let Some(why) = crate::protocol::agent_name_problem(&b.name) {
+        return err(StatusCode::BAD_REQUEST, why);
+    }
+    let b = SpawnAsk {
+        name: b.name.to_ascii_lowercase(),
+        ..b
+    };
     let adapter = match b.adapter.as_deref().unwrap_or("claude") {
         "claude" => AdapterId::Claude,
         "codex" => AdapterId::Codex,

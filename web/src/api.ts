@@ -24,7 +24,7 @@ const post = <T,>(p: string, b: unknown) => call<T>('POST', p, b)
 
 export type Me = { id: string; name: string }
 export type Bot = { id: string; app_id: string; name: string; invite_url: string }
-export type Guild = { id: string; name: string }
+export type Guild = { id: string; name: string; ok?: boolean; missing?: string[] }
 export type Channel = { id: string; name: string }
 export type Machine = { node: string; since: number }
 export type Project = {
@@ -35,6 +35,7 @@ export type Project = {
   channel: string | null
   guild_name: string | null
   channel_name: string | null
+  problem?: string | null
 }
 export type Device = { node: string; connected: boolean; agents: number; max: number | null; labels: string[]; lastSeen: number | null }
 export type Agent = { name: string; lead: boolean; node: string; status: string }
@@ -65,6 +66,9 @@ export const api = {
   projects: () => get<Project[]>('/api/v1/projects'),
   place: (project: string, bot: string, guild: string, channel: string) =>
     call<{ ok: boolean }>('PUT', `/api/v1/projects/${encodeURIComponent(project)}/target`, { bot, guild, channel }),
+  pick: (code: string) => get<{ folder: string; node: string }>(`/api/v1/pick/${encodeURIComponent(code)}`),
+  choose: (code: string, project: string, agent?: string, adapter?: string) =>
+    post<{ ok: boolean }>(`/api/v1/pick/${encodeURIComponent(code)}`, { project, agent: agent || undefined, adapter }),
   spawn: (project: string, name: string, adapter: string, node?: string) =>
     post<{ node: string }>('/api/v1/spawn', { project, name, adapter, node }),
 }

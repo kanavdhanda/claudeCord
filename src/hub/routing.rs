@@ -3,7 +3,7 @@
 //! agent one turn, not one per message. Nothing is ever broadcast: a message goes to who it names, else to the lead.
 
 use super::briefs;
-use super::core::{HubCore, Pending, Queued};
+use super::core::{HubCore, Pending, Queued, mentions_name};
 use super::effects::{Effect, Persist};
 use super::model::*;
 use crate::agents::text::strip_control;
@@ -37,7 +37,7 @@ pub(super) fn status_name(s: AgentStatus) -> &'static str {
 }
 
 /// Where on the device an attached file is placed, relative to the project folder.
-pub const INBOX_DIR: &str = ".claudecord/inbox";
+pub const INBOX_DIR: &str = ".claudecord/files";
 
 /// One short line telling an agent a file arrived: its kind, name, size and where to find it. The content is never
 /// put in the agent's context, so an image or a PDF costs tokens only if and when the agent opens it.
@@ -255,7 +255,14 @@ impl HubCore {
         for id in self.by_project.get(project).cloned().unwrap_or_default() {
             self.streak.remove(&id);
         }
-        if let Some(ask) = opts.answers_ask {
+        // A reply to the question's own message answers it; so does naming the agent that asked, or, with exactly one question open, any message that
+        // names no agent. Either way the answer goes to the agent that asked and to nobody else.
+        let implied = if opts.answers_ask.is_none() {
+            self.implied_ask(project, text)
+        } else {
+            None
+        };
+        if let Some(ask) = opts.answers_ask.or(implied.as_deref()) {
             let asker = self.answer_ask(&Answerer::Human(by.clone()), project, ask, text, now)?;
             let name = self
                 .agents
@@ -401,7 +408,7 @@ impl HubCore {
     }
 
     /// Whether an agent's text speaks to a person, which ends agent-to-agent forwarding for that message.
-    fn addresses_human(&mut self, project: &str, text: &str) -> bool {
+    pub(super) fn addresses_human(&mut self, project: &str, text: &str) -> bool {
         if HUMAN_MENTION.is_match(text) {
             return true;
         }
@@ -410,10 +417,38 @@ impl HubCore {
             .get(project)
             .map(|m| m.values().map(|x| x.name.clone()).collect())
             .unwrap_or_default();
-        names.iter().any(|n| {
-            text.to_lowercase()
-                .contains(&format!("@{}", n.to_lowercase()))
-        })
+        // A whole name, like a mention of an agent: a person called `k` is not addressed by `@kitchen`, nor an agent's `@name` taken for a person's.
+        names
+            .iter()
+            .any(|n| !n.trim().is_empty() && mentions_name(text, n))
+    }
+
+    /// The open question a person's message answers without being a reply to it: the one asked by the single agent it names, or, when it names no
+    /// agent at all and exactly one question is open, that one.
+    fn implied_ask(&mut self, project: &str, text: &str) -> Option<String> {
+        let open: Vec<(String, String)> = self
+            .asks_of(project)
+            .iter()
+            .filter(|a| a.state == AskState::Open)
+            .map(|a| (a.id.clone(), a.agent_id.clone()))
+            .collect();
+        if open.is_empty() {
+            return None;
+        }
+        let named: Vec<String> = self
+            .mentioned(project, text, None)
+            .into_iter()
+            .map(|a| a.agent_id)
+            .collect();
+        match named.as_slice() {
+            [] if open.len() == 1 => Some(open[0].0.clone()),
+            [one] => open
+                .iter()
+                .rev()
+                .find(|(_, agent)| agent == one)
+                .map(|(id, _)| id.clone()),
+            _ => None,
+        }
     }
 
     /// Passes one agent message on to its peers. Mentioned peers get it. If none are mentioned it goes to the lead,
@@ -453,15 +488,10 @@ impl HubCore {
         if n >= self.streak_limit || to_human {
             return;
         }
-        // Naming someone says a reply is wanted. A plain say is information and rides along with the next real turn.
+        // Only naming someone sends a message to an agent. A plain say is for the chat, and nobody else's turn is spent on it.
         let wake = !mentioned.is_empty();
-        let targets: Vec<AgentRow> = if wake {
-            mentioned
-        } else if from.is_lead {
-            vec![]
-        } else {
-            peers.into_iter().filter(|p| p.is_lead).collect()
-        };
+        let targets: Vec<AgentRow> = mentioned;
+        let _ = peers;
         for t in targets {
             self.enqueue(
                 &t.agent_id,

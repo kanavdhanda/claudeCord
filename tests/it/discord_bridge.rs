@@ -300,11 +300,31 @@ async fn a_message_from_a_listed_person_reaches_the_agent_and_acceptance_gets_a_
         .await;
     let reaction = r
         .until("check mark", |l| {
-            l.reactions.iter().find(|x| x["message"] == "m1").cloned()
+            l.reactions
+                .iter()
+                .find(|x| x["message"] == "m1" && x["emoji"] == "\u{2705}")
+                .cloned()
         })
         .await;
     assert_eq!(reaction["channel"], ch.as_str());
     assert_eq!(reaction["emoji"], "\u{2705}", "{reaction}");
+    // The eyes that said "received" are taken off once the check mark is there.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let left: Vec<String> = r
+        .fake
+        .log
+        .lock()
+        .unwrap()
+        .reactions
+        .iter()
+        .filter(|x| x["message"] == "m1")
+        .map(|x| x["emoji"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        left,
+        vec!["\u{2705}".to_string()],
+        "only the check mark stays"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -820,4 +840,463 @@ async fn what_was_said_while_the_bridge_was_not_connected_is_read_back_once_and_
             .await,
         "read-back took messages a second time"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_agent_gets_a_mentionable_role_and_picking_it_from_the_list_reaches_that_agent() {
+    let mut r = rig("roles").await;
+    register(&r, "otter").await;
+    register(&r, "macbook-eeg-main").await;
+    let ch = channel(&r).await;
+    // A role named after the agent, anyone can mention it, so typing @macbook-eeg-main offers it in Discord.
+    let role = r
+        .until("a role for the hyphenated agent", |l| {
+            l.roles
+                .iter()
+                .find(|x| x["name"] == "macbook-eeg-main (agent)")
+                .cloned()
+        })
+        .await;
+    assert_eq!(role["mentionable"], true);
+    let id = role["id"].as_str().unwrap().to_string();
+    // Picking it sends `<@&id>`; the agent receives the plain @name, and only that agent is addressed.
+    r.event(
+        "MESSAGE_CREATE",
+        message(&ch, "m9", "1", &format!("<@&{id}> run the tests")),
+    );
+    r.frame("the mention as a plain @name", |f| {
+        deliver_text(f, "@macbook-eeg-main run the tests")
+    })
+    .await;
+    // A mention of some other role is left alone, and registering the same agents again makes no second role.
+    register(&r, "otter").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let roles = r.fake.log.lock().unwrap().roles.clone();
+    assert_eq!(
+        roles
+            .iter()
+            .filter(|x| x["name"] == "otter (agent)")
+            .count(),
+        1,
+        "{roles:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_is_acknowledged_at_once_and_when_nobody_is_there_to_get_it_that_is_said() {
+    let r = rig("ack").await;
+    register(&r, "otter").await;
+    let ch = channel(&r).await;
+    // Seen by the hub and queued for the agent: an eyes reaction straight away (the check mark waits for the agent to take it up).
+    r.event("MESSAGE_CREATE", message(&ch, "m1", "1", "are you there"));
+    let seen = r
+        .until("the eyes", |l| {
+            l.reactions.iter().find(|x| x["message"] == "m1").cloned()
+        })
+        .await;
+    assert_eq!(seen["emoji"], "\u{1F440}", "{seen}");
+    // The agent leaves; the next message has nobody to go to, and the channel is told so in words.
+    r.link
+        .send(NodeFrame::AgentGone {
+            agent_id: "demo/otter".into(),
+        })
+        .await;
+    for _ in 0..100 {
+        if !r
+            .hub
+            .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    r.event("MESSAGE_CREATE", message(&ch, "m2", "1", "anyone"));
+    let said = r
+        .until("the explanation", |l| {
+            l.messages
+                .iter()
+                .find(|m| {
+                    m["content"]
+                        .as_str()
+                        .is_some_and(|c| c.contains("Nobody is running"))
+                })
+                .cloned()
+        })
+        .await;
+    assert_eq!(said["channel"], ch.as_str());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_agent_can_really_tag_a_person_and_a_reply_to_an_agents_message_goes_to_that_agent() {
+    let mut r = rig("tags").await;
+    register(&r, "otter").await;
+    register(&r, "heron").await;
+    let ch = channel(&r).await;
+    // The person speaks once, so the bridge learns what to call them.
+    r.event("MESSAGE_CREATE", message(&ch, "m1", "1", "hello"));
+    r.frame("hello", |f| deliver_text(f, "hello")).await;
+    // An agent addresses them by name: a real tag, and only that person is allowed to be notified.
+    r.link
+        .send(NodeFrame::AgentSay {
+            agent_id: "demo/heron".into(),
+            text: "@user1 the build is done".into(),
+            thread: None,
+        })
+        .await;
+    let post = r
+        .until("the tagged post", |l| {
+            l.posts
+                .iter()
+                .find(|p| {
+                    p["username"] == "heron"
+                        && p["content"]
+                            .as_str()
+                            .is_some_and(|c| c.contains("build is done"))
+                })
+                .cloned()
+        })
+        .await;
+    assert_eq!(post["content"], "<@1> the build is done", "{post}");
+    assert_eq!(post["notify"], json!(["1"]), "{post}");
+    // Replying to that message, with no name in the reply, goes to heron and not to the lead (otter).
+    let mut reply = message(&ch, "m2", "1", "thanks, ship it");
+    reply["message_reference"] = json!({"message_id": post["id"]});
+    r.event("MESSAGE_CREATE", reply);
+    r.frame("the reply", |f| {
+        matches!(f, HubFrame::Deliver { agent_id, text, .. } if agent_id == "demo/heron" && text == "@heron thanks, ship it")
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clear_deletes_the_chat_keeps_the_pinned_ones_and_starts_every_agent_over() {
+    let mut r = rig("clear").await;
+    register(&r, "otter").await;
+    let ch = channel(&r).await;
+    // Some messages are in the channel, one of them pinned (and so kept).
+    let base = ((claudecord::now_ms() - 1_420_070_400_000) as u64) << 22;
+    let id = |n: u64| base + n;
+    let msgs: Vec<serde_json::Value> = (1..=4)
+        .map(|n| {
+            let mut m = message(&ch, &id(n).to_string(), "1", &format!("old {n}"));
+            if n == 2 {
+                m["pinned"] = json!(true);
+            }
+            m
+        })
+        .collect();
+    r.fake.log.lock().unwrap().history.insert(ch.clone(), msgs);
+    r.event(
+        "INTERACTION_CREATE",
+        interaction(
+            2,
+            &ch,
+            "1",
+            json!({"name": "clear", "options": [{"name": "chat", "type": 1, "options": []}]}),
+        ),
+    );
+    // The agent is told to start again from its base.
+    r.frame(
+        "restart",
+        |f| matches!(f, HubFrame::Restart { agent_id } if agent_id == "demo/otter"),
+    )
+    .await;
+    // The channel's messages are deleted, the pinned one is not, and the new chat is announced.
+    let said = r
+        .until("the new chat", |l| {
+            l.messages
+                .iter()
+                .find(|m| {
+                    m["content"]
+                        .as_str()
+                        .is_some_and(|c| c.contains("New chat"))
+                })
+                .cloned()
+        })
+        .await;
+    assert_eq!(said["channel"], ch.as_str());
+    let mut deleted = r.fake.log.lock().unwrap().deleted.clone();
+    deleted.sort();
+    let want: Vec<String> = [1, 3, 4].iter().map(|n| id(*n).to_string()).collect();
+    assert_eq!(deleted, want, "everything but the pinned message");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clear_with_an_agent_named_starts_only_that_one_over_and_leaves_the_channel_alone() {
+    let mut r = rig("clearone").await;
+    register(&r, "otter").await;
+    register(&r, "heron").await;
+    let ch = channel(&r).await;
+    let base = ((claudecord::now_ms() - 1_420_070_400_000) as u64) << 22;
+    r.fake.log.lock().unwrap().history.insert(
+        ch.clone(),
+        vec![message(&ch, &(base + 1).to_string(), "1", "keep me")],
+    );
+    r.event(
+        "INTERACTION_CREATE",
+        interaction(
+            2,
+            &ch,
+            "1",
+            json!({"name": "clear", "options": [{"name": "agent", "type": 1, "options": [{"name": "agent", "value": "heron"}]}]}),
+        ),
+    );
+    r.frame(
+        "heron restarts",
+        |f| matches!(f, HubFrame::Restart { agent_id } if agent_id == "demo/heron"),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let log = r.fake.log.lock().unwrap();
+    assert!(
+        log.deleted.is_empty(),
+        "the channel is left alone: {:?}",
+        log.deleted
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plain_clear_starts_the_lead_over_and_nothing_else() {
+    let mut r = rig("clearlead").await;
+    register(&r, "otter").await;
+    register(&r, "heron").await;
+    let ch = channel(&r).await;
+    r.event(
+        "INTERACTION_CREATE",
+        interaction(
+            2,
+            &ch,
+            "1",
+            json!({"name": "clear", "options": [{"name": "agent", "type": 1, "options": []}]}),
+        ),
+    );
+    // otter registered first, so it leads: it restarts, the channel is left alone.
+    r.frame(
+        "the lead restarts",
+        |f| matches!(f, HubFrame::Restart { agent_id } if agent_id == "demo/otter"),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(r.fake.log.lock().unwrap().deleted.is_empty());
+}
+
+#[test]
+fn every_slash_command_fits_discords_limits_or_discord_refuses_the_whole_list() {
+    // One command over a limit makes Discord reject ALL of them, so no command shows up. Names: 1-32 lower-case; descriptions: 1-100.
+    let defs = claudecord::discord::commands::definitions();
+    let mut bad = Vec::new();
+    for c in defs.as_array().unwrap() {
+        let name = c["name"].as_str().unwrap();
+        let desc = c["description"].as_str().unwrap();
+        if !(1..=32).contains(&name.len()) || name != name.to_lowercase() {
+            bad.push(format!("command name {name:?}"));
+        }
+        if !(1..=100).contains(&desc.chars().count()) {
+            bad.push(format!(
+                "/{name} description is {} characters",
+                desc.chars().count()
+            ));
+        }
+        for o in c["options"].as_array().into_iter().flatten() {
+            let (on, od) = (
+                o["name"].as_str().unwrap(),
+                o["description"].as_str().unwrap(),
+            );
+            if !(1..=32).contains(&on.len()) || on != on.to_lowercase() {
+                bad.push(format!("/{name} option name {on:?}"));
+            }
+            if !(1..=100).contains(&od.chars().count()) {
+                bad.push(format!(
+                    "/{name} {on}: description is {} characters",
+                    od.chars().count()
+                ));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "{bad:#?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lead_chooses_who_leads_and_the_bridge_says_so() {
+    let r = rig("lead").await;
+    register(&r, "otter").await;
+    register(&r, "heron").await;
+    let ch = channel(&r).await;
+    r.event(
+        "INTERACTION_CREATE",
+        interaction(
+            2,
+            &ch,
+            "1",
+            json!({"name": "lead", "options": [{"name": "agent", "value": "heron"}]}),
+        ),
+    );
+    r.until("the announcement", |l| {
+        l.messages
+            .iter()
+            .find(|m| {
+                m["content"]
+                    .as_str()
+                    .is_some_and(|c| c.contains("heron now leads"))
+            })
+            .cloned()
+    })
+    .await;
+    assert!(
+        r.hub
+            .call(|c, _| (c.agent("demo/heron").unwrap().is_lead, vec![]))
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn typing_an_agent_option_lists_the_agents_here_that_match() {
+    let r = rig("typing").await;
+    register(&r, "otter").await;
+    register(&r, "heron").await;
+    let ch = channel(&r).await;
+    r.event(
+        "INTERACTION_CREATE",
+        interaction(
+            4,
+            &ch,
+            "1",
+            json!({"name": "raw", "options": [{"name": "agent", "type": 3, "value": "he", "focused": true}]}),
+        ),
+    );
+    let got = r
+        .until("the list", |l| {
+            l.responses.iter().find(|x| x["type"] == 8).cloned()
+        })
+        .await;
+    let names: Vec<&str> = got["choices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["heron"]);
+    // Every command option that names an agent asks for this list.
+    let defs = claudecord::discord::commands::definitions().to_string();
+    assert!(defs.contains("\"autocomplete\":true"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_roles_of_agents_that_are_gone_are_deleted_by_themselves() {
+    let r = rig("prune").await;
+    register(&r, "otter").await;
+    let role = r
+        .until("otter's role", |l| {
+            l.roles
+                .iter()
+                .find(|x| x["name"] == "otter (agent)")
+                .cloned()
+        })
+        .await;
+    // A role left behind by an agent that no longer exists (an earlier run, or one that was removed), and one that is not ours.
+    {
+        let mut l = r.fake.log.lock().unwrap();
+        l.roles.push(json!({"id": "900", "name": "ghost (agent)", "guild": role["guild"], "mentionable": true}));
+        l.roles.push(
+            json!({"id": "901", "name": "Moderators", "guild": role["guild"], "mentionable": true}),
+        );
+    }
+    register(&r, "heron").await;
+    r.until("the ghost role to go", |l| {
+        l.deleted_roles
+            .iter()
+            .find(|x| *x == "900")
+            .map(|x| json!(x))
+    })
+    .await;
+    let l = r.fake.log.lock().unwrap();
+    assert!(
+        !l.deleted_roles
+            .iter()
+            .any(|x| *x == "901" || *x == role["id"].as_str().unwrap()),
+        "{:?}",
+        l.deleted_roles
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn commands_post_nothing_extra_in_the_channel_around_them() {
+    let r = rig("audit").await;
+    for n in ["otter", "heron", "ibis"] {
+        register(&r, n).await;
+    }
+    let ch = channel(&r).await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let before = r.fake.log.lock().unwrap().messages.len();
+    let run = |name: &str, opts: Value| {
+        r.event(
+            "INTERACTION_CREATE",
+            interaction(2, &ch, "1", json!({"name": name, "options": opts})),
+        );
+    };
+    for (n, o) in [
+        ("pause", json!([])),
+        ("resume", json!([])),
+        ("stop", json!([{"name": "agent", "value": "heron"}])),
+        ("btw", json!([{"name": "text", "value": "hi"}])),
+        ("dump", json!([])),
+        ("lead", json!([{"name": "agent", "value": "ibis"}])),
+        ("killall", json!([])),
+    ] {
+        run(n, o);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    for n in ["otter", "heron", "ibis"] {
+        r.link
+            .send(NodeFrame::AgentGone {
+                agent_id: format!("demo/{n}"),
+            })
+            .await;
+    }
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let l = r.fake.log.lock().unwrap();
+    let posted: Vec<String> = l
+        .messages
+        .iter()
+        .skip(before)
+        .map(|m| m["content"].to_string())
+        .collect();
+    // Commands answer the person who ran them (privately) and post nothing else; only /lead says so to everyone, because it changes who the agents report to.
+    assert_eq!(
+        posted,
+        vec!["\"ibis now leads demo.\""],
+        "extra posts around the commands: {posted:#?}"
+    );
+    assert!(
+        l.posts.is_empty(),
+        "no agent posted anything: {:?}",
+        l.posts
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_attachment_that_cannot_be_fetched_is_said_so_and_the_message_still_goes_through() {
+    let mut r = rig("nofile").await;
+    register(&r, "otter").await;
+    let ch = channel(&r).await;
+    let mut m = message(&ch, "m6", "1", "see this");
+    // Nothing listens on port 1.
+    m["attachments"] = json!([{"id": "att2", "filename": "plan.txt", "size": 16, "url": "http://127.0.0.1:1/files/plan.txt"}]);
+    r.event("MESSAGE_CREATE", m);
+    r.until("the notice", |l| {
+        l.messages
+            .iter()
+            .find(|x| {
+                x["content"]
+                    .as_str()
+                    .is_some_and(|c| c.contains("Could not fetch plan.txt"))
+            })
+            .cloned()
+    })
+    .await;
+    r.frame("the text itself", |f| deliver_text(f, "see this"))
+        .await;
 }

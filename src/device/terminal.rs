@@ -92,6 +92,7 @@ impl Terminal {
                 Ok(Terminal::Tmux(Arc::new(TmuxTerminal::spawn(
                     &socket,
                     &session,
+                    s.name,
                     s.argv,
                     &s.cwd,
                     s.remove_env,
@@ -110,6 +111,24 @@ impl Terminal {
                 s.cols,
                 guard,
             )?))),
+        }
+    }
+
+    /// A picture (PNG) of what the terminal shows now, with its colours. Only tmux terminals can give one.
+    pub fn picture(&self) -> Option<Vec<u8>> {
+        match self {
+            Terminal::Tmux(t) => {
+                let (ansi, rows, cols) = t.capture_colour()?;
+                super::shot::render(&ansi, rows, cols)
+            }
+            Terminal::Pty(_) => None,
+        }
+    }
+
+    /// Asks for a look at the next tick (a quiet session is otherwise looked at only every few seconds).
+    pub fn hurry(&self) {
+        if let Terminal::Tmux(t) = self {
+            t.hurry();
         }
     }
 

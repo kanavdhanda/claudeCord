@@ -146,7 +146,7 @@ pub fn features() -> Vec<Feature> {
             probe: tasks,
         },
         Feature {
-            name: "queues, coalescing and ride-along",
+            name: "queues and coalescing",
             covers: &[
                 "hub/routing",
                 "hub/briefs",
@@ -214,7 +214,7 @@ fn wire() -> Probe {
         );
         let big = format!(
             r#"{{"t":"agent.say","agentId":"p/a","text":"{}"}}"#,
-            "x".repeat(9000)
+            "x".repeat(200_001)
         );
         ensure!(
             NodeFrame::parse(&big).is_none(),
@@ -317,7 +317,6 @@ fn agents() -> Probe {
             name: "a",
             model: None,
             policy: crate::adapters::Policy::Ask,
-            rules: "r",
             mcp_config: None,
         });
         ensure!(argv[0] == "claude", "the launch command is wrong");
@@ -328,7 +327,7 @@ fn agents() -> Probe {
 fn discord() -> Probe {
     boxed(async {
         ensure!(
-            crate::perms::permissions_integer() == 309_774_625_872,
+            crate::perms::permissions_integer() == 310_043_061_328,
             "the permission integer changed"
         );
         ensure!(
@@ -523,8 +522,8 @@ fn queues() -> Probe {
         );
         let fx = msg(&mut c, &kd, "go on", 12);
         ensure!(
-            texts(&fx) == vec!["FYI".to_string(), "go on".to_string()],
-            "an informing message did not ride along: {:?}",
+            texts(&fx) == vec!["go on".to_string()],
+            "a plain say from a worker reached an agent: {:?}",
             texts(&fx)
         );
         c.hold(&kd, true, "p", Some("otter"), 13)
@@ -645,6 +644,7 @@ fn files() -> Probe {
                 seq: 0,
                 last: true,
                 data: key,
+                sha256: None,
                 to: None,
                 caption: None,
                 thread: None,

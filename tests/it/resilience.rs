@@ -357,3 +357,33 @@ async fn the_hub_lists_which_machines_are_active_and_when_they_were_last_heard()
     );
     hub.shutdown().await;
 }
+
+#[tokio::test]
+async fn aborting_a_supervised_task_ends_the_task_it_runs() {
+    // Two Discord bridges for one bot (an old one left running after a restart) post every message twice.
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    };
+    let beats = Arc::new(AtomicU32::new(0));
+    let b = beats.clone();
+    let h = claudecord::task::supervised("test", move || {
+        let b = b.clone();
+        async move {
+            loop {
+                b.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    h.abort();
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    let after_abort = beats.load(Ordering::SeqCst);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(
+        beats.load(Ordering::SeqCst),
+        after_abort,
+        "the task kept running after its supervisor was aborted"
+    );
+}

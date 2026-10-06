@@ -3,6 +3,7 @@ import { Navigate, NavLink, Route, Routes, useLocation } from 'react-router-dom'
 import { api, ApiError, type Me } from './api'
 import { useLoad } from './hooks'
 import { Activate } from './pages/Activate'
+import { Pick } from './pages/Pick'
 import { Bots } from './pages/Bots'
 import { Insights } from './pages/Insights'
 import { Login } from './pages/Login'
@@ -59,6 +60,7 @@ export function App() {
             <Route path="/bots" element={<Bots />} />
             <Route path="/machines" element={<Machines />} />
             <Route path="/activate" element={<Activate />} />
+            <Route path="/pick" element={<Pick />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </main>

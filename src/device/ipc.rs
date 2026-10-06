@@ -56,6 +56,10 @@ pub enum Req {
     Stop {
         agent: String,
     },
+    /// Start an agent's program again (every agent here when no name is given), keeping its place in the team.
+    Restart {
+        agent: Option<String>,
+    },
     Say {
         agent: String,
         text: String,

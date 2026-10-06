@@ -5,7 +5,7 @@
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/kanavdhanda/claudeCord.git" },
   "bin": { "claudecord": "bin/claudecord.js" },
-  "files": ["bin", "README.md"],
+  "files": ["bin", "README.md", "LICENSE", "THIRD-PARTY-NOTICES.md", "LICENSE-DejaVu"],
   "engines": { "node": ">=16" },
   "keywords": ["claude", "codex", "agents", "discord", "tmux", "orchestrator"]
 }

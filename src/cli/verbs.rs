@@ -14,7 +14,9 @@ fn me() -> Result<String, String> {
 
 /// Sends a request and prints the answer, failing if it was refused.
 async fn send(req: Req) -> Result<(), String> {
-    let r = ipc::call(&home_dir(), &req)
+    // The daemon only believes an agent that shows its own secret key, which it put in the agent's environment when it started it.
+    let key = std::env::var("CLAUDECORD_AGENT_KEY").ok();
+    let r = ipc::call_as(&home_dir(), key.as_deref(), &req)
         .await
         .map_err(|_| "the claudecord daemon is not running".to_string())?;
     if r.ok {
@@ -26,7 +28,27 @@ async fn send(req: Req) -> Result<(), String> {
 }
 
 /// `claudecord say`: a message to the team.
-pub async fn say(text: String, thread: Option<String>) -> Result<(), String> {
+pub async fn say(text: Option<String>, thread: Option<String>) -> Result<(), String> {
+    use std::io::{IsTerminal, Read};
+    let text = match text.as_deref() {
+        Some(t) if t != "-" => t.to_string(),
+        Some(_) => read_stdin()?,
+        None if !std::io::stdin().is_terminal() => read_stdin()?,
+        None => return Err("say what? `say \"text\"`, or `say -` with the text piped in".into()),
+    };
+    fn read_stdin() -> Result<String, String> {
+        let mut t = String::new();
+        std::io::stdin()
+            .take(100_000)
+            .read_to_string(&mut t)
+            .map_err(|e| e.to_string())?;
+        let t = t.trim_end().to_string();
+        if t.is_empty() {
+            Err("nothing to say: the input was empty".into())
+        } else {
+            Ok(t)
+        }
+    }
     send(Req::Say {
         agent: me()?,
         text,

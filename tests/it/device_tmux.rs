@@ -16,6 +16,7 @@ fn start(name: &str, argv: &[&str]) -> Option<(TmuxTerminal, String)> {
     let t = TmuxTerminal::spawn(
         &socket,
         "s",
+        "demo/otter",
         &argv.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
         Path::new("/tmp"),
         &["HOME".to_string()],

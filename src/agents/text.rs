@@ -21,6 +21,15 @@ pub fn strip_control(text: &str) -> String {
 
 /// Quotes every line after the first, so a message can never contain a line that looks like another sender's
 /// header such as `[engineer] ...`. Only the first line carries the real header, added by the hub.
+/// The SHA-256 of some bytes, as lower-case hex.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 pub fn quote_body(text: &str) -> String {
     let clean = strip_control(text);
     let mut lines = clean.split('\n');

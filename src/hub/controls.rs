@@ -4,7 +4,7 @@
 
 use super::briefs;
 use super::core::HubCore;
-use super::effects::{Effect, Persist};
+use super::effects::{Chat, Effect, Persist};
 use super::model::*;
 use crate::protocol::{AgentSpec, AgentStatus, HubFrame};
 
@@ -33,6 +33,119 @@ impl HubCore {
         let who = self.label(project, by);
         Self::audit(project, &who, format!("stop {}", a.name), now, &mut fx);
         Ok((ok, fx))
+    }
+
+    /// The project's lead has left: the agent that has been in the project longest takes over, everyone is told with their next delivery, and the
+    /// chat says so. Without this a project with no lead sends plain messages to nobody.
+    pub(super) fn hand_over_lead(&mut self, project: &str, fx: &mut Vec<Effect>) {
+        let Some(next) = self
+            .by_project
+            .get(project)
+            .and_then(|v| v.first())
+            .cloned()
+        else {
+            return;
+        };
+        for id in self.by_project.get(project).cloned().unwrap_or_default() {
+            if let Some(m) = self.agents.get_mut(&id) {
+                m.is_lead = id == next;
+            }
+            self.briefed.remove(&id);
+        }
+        fx.push(Effect::Persist(Persist::SetLead {
+            project: project.into(),
+            agent_id: next.clone(),
+        }));
+    }
+
+    /// Starts one agent over from its base: what was waiting for it is dropped, it gets its brief again, and its device starts its program afresh
+    /// (a new session, same name and folder).
+    fn reset_agent(&mut self, id: &str, fx: &mut Vec<Effect>) {
+        self.queues.remove(id);
+        self.briefed.remove(id);
+        let gone: Vec<String> = self
+            .pending
+            .iter()
+            .filter(|(_, p)| p.agent_id == id)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in gone {
+            self.pending.remove(&k);
+        }
+        if let Some(a) = self.agents.get(id).cloned() {
+            // It will not remember asking, so its open questions are closed rather than left to be answered for nobody.
+            self.cancel_asks_of(&a.project, id);
+            self.send_to(
+                &a,
+                HubFrame::Restart {
+                    agent_id: a.agent_id.clone(),
+                },
+                fx,
+            );
+        }
+    }
+
+    /// `/clear` with no agent named: a fresh chat for a project. Every agent starts over (see `reset_agent`) and the chat channel is cleared. Owner only.
+    /// Returns how many agents start over.
+    pub fn clear_chat(
+        &mut self,
+        by: &Human,
+        project: &str,
+        now: i64,
+    ) -> Result<(usize, Vec<Effect>), Denied> {
+        self.require(project, &by.id, Role::Owner)?;
+        let mut fx = Vec::new();
+        let ids = self.by_project.get(project).cloned().unwrap_or_default();
+        for id in &ids {
+            self.reset_agent(id, &mut fx);
+        }
+        fx.push(Effect::Chat(Chat::Clear(project.into())));
+        Self::audit(project, &by.name, "clear".into(), now, &mut fx);
+        Ok((ids.len(), fx))
+    }
+
+    /// `/clear agent:NAME`: that one agent starts over, with a clean memory. The channel and the other agents are left alone. An operator may do it.
+    pub fn clear_agent(
+        &mut self,
+        by: &Human,
+        project: &str,
+        name: &str,
+        now: i64,
+    ) -> Result<Vec<Effect>, Denied> {
+        self.require(project, &by.id, Role::Operator)?;
+        let a = self
+            .find_by_name(project, name)
+            .cloned()
+            .ok_or(Denied::NotFound)?;
+        let mut fx = Vec::new();
+        self.reset_agent(&a.agent_id, &mut fx);
+        let who = self.label(project, by);
+        Self::notice(
+            project,
+            format!("{} started over, at {who}'s request.", a.name),
+            false,
+            &mut fx,
+        );
+        Self::audit(project, &who, format!("clear {}", a.name), now, &mut fx);
+        Ok(fx)
+    }
+
+    /// `/screen`: asks an agent's machine for what its terminal shows, which is then posted in the chat. Operator.
+    pub fn screen(&mut self, by: &Human, project: &str, name: &str) -> Result<Vec<Effect>, Denied> {
+        self.require(project, &by.id, Role::Operator)?;
+        let a = self
+            .find_by_name(project, name)
+            .cloned()
+            .ok_or(Denied::NotFound)?;
+        let mut fx = Vec::new();
+        self.send_to(
+            &a,
+            HubFrame::Screen {
+                agent_id: a.agent_id.clone(),
+            },
+            &mut fx,
+        );
+        Ok(fx)
     }
 
     /// `/killall`: asks every device with agents (in one project, or in all) to quit them. Owner only.
@@ -236,6 +349,12 @@ impl HubCore {
         }
         let lead = self.agents.get(agent_id).cloned().ok_or(Denied::NotFound)?;
         let _ = briefs::roster;
+        Self::notice(
+            project,
+            format!("{} now leads {project}.", lead.name),
+            false,
+            &mut fx,
+        );
         Self::refresh(project, &mut fx);
         Ok((lead, fx))
     }
