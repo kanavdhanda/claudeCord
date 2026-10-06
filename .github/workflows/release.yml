@@ -83,8 +83,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, extra: "" }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, extra: "" }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, extra: "", manylinux: "2014" }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, extra: "", manylinux: "2014" }
           - { os: macos-latest, target: aarch64-apple-darwin, extra: "" }
           - { os: macos-15-intel, target: x86_64-apple-darwin, extra: "" }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, extra: "" }
@@ -94,6 +94,8 @@ jobs:
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
+          # An old glibc target (2014 = glibc 2.17) so the wheel installs on Ubuntu 22.04, Debian 12 and the like, not only the newest systems.
+          manylinux: ${{ matrix.manylinux || 'auto' }}
           args: --release --out dist ${{ matrix.extra }}
       - uses: actions/upload-artifact@v4
         with:
@@ -129,7 +131,6 @@ jobs:
           merge-multiple: true
       # Trusted publishing: PyPI is told once that this repository and workflow may publish, so there is no password to leak.
       - uses: pypa/gh-action-pypi-publish@release/v1
-        continue-on-error: true
 
   publish-npm:
     needs: [build, verify-packaging]
