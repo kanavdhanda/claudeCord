@@ -271,3 +271,6 @@ and macOS.
   built-in ConPTY terminal, and the stand-in-agent tests skip themselves there.
 - tmux cannot see a half-typed line, only that someone was recently active, so messages wait for quiet instead.
 - Only the generic terminal driver exists. Structured drivers for Claude Code hooks, ACP and the Codex app server are not built.
+
+
+<!-- Security scan triggered at 2026-10-07 14:38:35 -->
