@@ -1781,6 +1781,44 @@ async fn files_sent_to_an_agent_land_in_the_inbox_of_its_project_only() {
 }
 
 #[tokio::test]
+async fn a_file_sent_again_under_the_same_name_replaces_the_old_one() {
+    let r = rig("resend").await;
+    up(&r, "otter").await;
+    eventually("registered", async || {
+        r.hub
+            .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    let path = r.project.join(".claudecord/files/demo/plan.md");
+    for (id, body) in [("t1", &b"first"[..]), ("t2", &b"second"[..])] {
+        r.hub
+            .call(move |c, _| {
+                let (_, fx) = c
+                    .send_file(&kd(), "demo", "x", "plan.md", body, None, id)
+                    .unwrap();
+                ((), fx)
+            })
+            .await;
+        eventually("saved", async || {
+            std::fs::read(&path).is_ok_and(|b| b == body)
+        })
+        .await;
+    }
+    let left: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        left,
+        vec!["plan.md"],
+        "one canonical file, no copies or leftovers"
+    );
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_moved_agent_is_filed_under_its_new_project_and_still_speaks_with_its_old_environment() {
     use claudecord::hub::effects::Chat;
     let r = rig("moveagent").await;
