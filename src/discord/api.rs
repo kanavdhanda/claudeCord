@@ -209,6 +209,32 @@ impl Rest {
             .ok_or_else(|| ApiError("no channel id in the answer".into()))
     }
 
+    /// The ids of a channel's threads: the open ones (listed per server) and the archived public ones.
+    pub async fn threads_of(&self, guild: &str, channel: &str) -> Result<Vec<String>> {
+        let open = self
+            .call(
+                Method::GET,
+                &format!("/guilds/{guild}/threads/active"),
+                None,
+            )
+            .await?;
+        let archived = self
+            .call(
+                Method::GET,
+                &format!("/channels/{channel}/threads/archived/public?limit=100"),
+                None,
+            )
+            .await?;
+        Ok(open["threads"]
+            .as_array()
+            .into_iter()
+            .chain(archived["threads"].as_array())
+            .flatten()
+            .filter(|t| t["parent_id"] == channel)
+            .filter_map(|t| t["id"].as_str().map(String::from))
+            .collect())
+    }
+
     /// Deletes a channel, with its messages and threads.
     pub async fn delete_channel(&self, id: &str) -> Result<()> {
         self.call(Method::DELETE, &format!("/channels/{id}"), None)

@@ -652,9 +652,17 @@ impl Bridge {
         Ok(new)
     }
 
-    /// The fallback when the channel cannot be remade (the bot may not manage channels): deletes its recent messages (not the pinned ones, nor
+    /// The fallback when the channel cannot be remade (the bot may not manage channels): deletes its threads and recent messages (not the pinned ones, nor
     /// the status board, and Discord will not delete anything older than two weeks in bulk).
     async fn delete_recent(&mut self, project: &str, ch: &str) -> Result<(), String> {
+        // The channel's threads go too (open and archived), each on its own: one the bot may not delete does not stop the rest.
+        if let Some(guild) = self.guild_of(project) {
+            for t in self.rest.threads_of(&guild, ch).await.unwrap_or_default() {
+                if let Err(e) = self.rest.delete_channel(&t).await {
+                    crate::warn!("discord", "{project}: could not delete thread {t}: {e}");
+                }
+            }
+        }
         let keep = self
             .get(&format!("status:{project}"))
             .and_then(|v| v.split_once(':').map(|(_, m)| m.to_string()));
