@@ -330,6 +330,9 @@ pub enum NodeFrame {
     /// An agent asking who else is in its project and whether they can be reached now (the `team` verb).
     #[serde(rename = "agent.team", rename_all = "camelCase")]
     AgentTeam { agent_id: String },
+    /// An agent asking which threads it can post in (the `threads` verb). The answer comes back at once as a `say.receipt` of state `info`.
+    #[serde(rename = "agent.threads", rename_all = "camelCase")]
+    AgentThreads { agent_id: String, say_id: String },
     /// A machine could not start an agent the hub asked it to, so the people who asked can be told why.
     #[serde(rename = "spawn.failed", rename_all = "camelCase")]
     SpawnFailed {
@@ -458,6 +461,7 @@ impl NodeFrame {
             AgentHandoff { text, .. } => within(text, 8000),
             AgentAnswer { ask, text, .. } => within(ask, 300) && within(text, 4000),
             AgentPickup { .. } | AgentTeam { .. } => true,
+            AgentThreads { say_id, .. } => within(say_id, 40),
             AgentScreen { why, text, .. } => within(why, 200) && within(text, 4000),
             AgentsHere { agent_ids } => {
                 agent_ids.len() <= 1000 && agent_ids.iter().all(|i| within(i, 200))

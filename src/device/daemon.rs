@@ -70,6 +70,7 @@ fn say_answer(
     match got {
         Ok(Ok((state, detail))) => match state.as_str() {
             "delivered" => Resp::ok("delivered: they have it"),
+            "info" => Resp::ok(detail.unwrap_or_default()),
             "failed" => Resp::err(format!(
                 "NOT delivered: {}",
                 detail.unwrap_or_else(|| "the hub could not send it".into())
@@ -129,7 +130,7 @@ fn intro(spec: &AgentSpec) -> Option<Delivery> {
     })
 }
 
-pub const RULES: &str = "Team chat is the shell command claudecord: say <text>, ask <question>, assign <agent> <task>, done <id> <summary>, dump (save state), team (who else is here), send <file> (to the chat) or send <file> --to <agent> (to another agent's .claudecord inbox). Answer team messages with say, not also in the terminal; answer a person typing at your terminal there. For several lines pipe them in: say - <<'EOF'. Put @theirname before a person's name only when you need their attention; never @ yourself. @agentname addresses ANOTHER agent, in a thread of its own, so keep it short and only when you need them. Ask a person only what you cannot decide, once. A say naming an agent prints delivered, or NOT delivered and why (then it was not sent). Your say on a task goes to its thread; ask, done and report go to the main chat.";
+pub const RULES: &str = "Team chat is the shell command claudecord: say <text>, ask <question>, assign <agent> <task>, done <id> <summary>, dump (save state), team (who else is here), threads (where you can post), send <file> (to the chat) or send <file> --to <agent> (to another agent's .claudecord inbox). Answer team messages with say, not also in the terminal; answer a person typing at your terminal there. For several lines pipe them in: say - <<'EOF'. Put @theirname before a person's name only when you need their attention; never @ yourself. @agentname addresses ANOTHER agent, in a thread of its own, so keep it short and only when you need them. Ask a person only what you cannot decide, once. A say naming an agent prints delivered, or NOT delivered and why (then it was not sent). Your say on a task goes to its thread; ask, done and report go to the main chat.";
 
 /// Choices that tests change.
 #[derive(Clone)]
@@ -1708,10 +1709,7 @@ impl State {
                 text,
                 thread,
             } => {
-                self.say_seq += 1;
-                let say_id = format!("s{}-{:x}", self.say_seq, fingerprint(&text));
-                let (tx, rx) = oneshot::channel();
-                self.says.insert(say_id.clone(), tx);
+                let (say_id, rx) = self.expect_reply(&text);
                 let resp = self
                     .verb(&agent, |id| NodeFrame::AgentSay {
                         agent_id: id,
@@ -1782,6 +1780,21 @@ impl State {
             Req::Pickup { agent } => {
                 self.verb(&agent, |id| NodeFrame::AgentPickup { agent_id: id })
                     .await
+            }
+            Req::Threads { agent } => {
+                let (say_id, rx) = self.expect_reply("threads");
+                let resp = self
+                    .verb(&agent, |id| NodeFrame::AgentThreads {
+                        agent_id: id,
+                        say_id: say_id.clone(),
+                    })
+                    .await;
+                if resp.ok {
+                    self.defer = Some(rx);
+                } else {
+                    self.says.remove(&say_id);
+                }
+                resp
             }
             Req::Team { agent } => {
                 self.verb(&agent, |id| NodeFrame::AgentTeam { agent_id: id })
@@ -1875,6 +1888,18 @@ impl State {
         }
         self.link.send(make(agent.to_string())).await;
         Resp::ok("sent")
+    }
+
+    /// Makes room for one answer from the hub to a request that is answered at once (`say`, `threads`): its id, and where the answer arrives.
+    fn expect_reply(
+        &mut self,
+        what: &str,
+    ) -> (String, oneshot::Receiver<(String, Option<String>)>) {
+        self.say_seq += 1;
+        let id = format!("s{}-{:x}", self.say_seq, fingerprint(what));
+        let (tx, rx) = oneshot::channel();
+        self.says.insert(id.clone(), tx);
+        (id, rx)
     }
 
     /// Reads a file from disk and sends it in chunks. Over the size limit is refused here, before anything is sent.
@@ -2313,6 +2338,7 @@ fn describe(req: &Req) -> Option<(&str, &'static str, String)> {
         Req::Dump { agent, text } => (agent, "dump", text.clone()),
         Req::Pickup { agent } => (agent, "pickup", "asked for a handoff".into()),
         Req::Team { agent } => (agent, "team", "asked who is in the project".into()),
+        Req::Threads { agent } => (agent, "threads", "asked where it can post".into()),
         Req::Answer { agent, ask, text } => (agent, "answer", format!("{ask}: {text}")),
         Req::Usage { agent, kind, pct } => (agent, "usage", format!("{kind} {pct}%")),
         Req::Permission {

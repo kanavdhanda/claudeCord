@@ -132,6 +132,10 @@ pub enum Req {
     Team {
         agent: String,
     },
+    /// Ask which threads the agent can post in.
+    Threads {
+        agent: String,
+    },
     Usage {
         agent: String,
         kind: String,

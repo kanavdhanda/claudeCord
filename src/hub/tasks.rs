@@ -280,7 +280,73 @@ pub(super) fn task_thread(t: &TaskRow) -> String {
         .to_string()
 }
 
+/// A thread as an agent should see it in a header: a task thread (`T2 summarise the results`) is just `T2`, which `--thread T2` understands, so
+/// every message does not carry the task's words again.
+pub(super) fn short_thread(thread: &str) -> String {
+    let first = thread.split_whitespace().next().unwrap_or(thread);
+    let task_id = first
+        .strip_prefix('T')
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    if task_id {
+        first.to_string()
+    } else {
+        thread.to_string()
+    }
+}
+
 impl HubCore {
+    /// A thread as an agent wrote it: a task id such as `T2` becomes that task's thread name, anything else is kept as written.
+    pub(super) fn resolve_thread(&self, project: &str, thread: String) -> String {
+        self.tasks
+            .get(project)
+            .and_then(|ts| ts.iter().find(|t| t.id.eq_ignore_ascii_case(thread.trim())))
+            .map_or(thread, task_thread)
+    }
+
+    /// `claudecord threads`: where the agent can post, as a few short lines (it costs the agent tokens each time, so nothing else is said).
+    pub(super) fn on_threads(&mut self, agent_id: &str, say_id: &str, fx: &mut Vec<Effect>) {
+        let Some(a) = self.agents.get(agent_id).cloned() else {
+            return;
+        };
+        let mut out = String::from(
+            "main channel: where people read. A say to a person goes there; a say to a peer goes in your thread with them, by itself.",
+        );
+        let name = |id: &str| {
+            self.agents
+                .get(id)
+                .map_or_else(|| id.to_string(), |x| x.name.clone())
+        };
+        let open: Vec<&TaskRow> = self
+            .tasks
+            .get(&a.project)
+            .map(|ts| {
+                ts.iter()
+                    .filter(|t| {
+                        t.state != TaskState::Done
+                            && (t.to_agent == agent_id || t.from_agent == agent_id)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if open.is_empty() {
+            out.push_str("\nno open tasks, so no task threads.");
+        } else {
+            out.push_str("\nopen tasks (post in one with `claudecord say --thread ID \"...\"`; a say without --thread to a non-person goes to your newest):");
+            for t in open {
+                let text: String = t.text.split_whitespace().collect::<Vec<_>>().join(" ");
+                out.push_str(&format!(
+                    "\n{} {}>{} [{:?}] {}",
+                    t.id,
+                    name(&t.from_agent),
+                    name(&t.to_agent),
+                    t.state,
+                    text.chars().take(40).collect::<String>()
+                ));
+            }
+        }
+        self.say_receipt(&a, Some(say_id), "info", Some(&out), fx);
+    }
+
     /// The thread of the newest task still open for an agent, so what it says while working goes there with no flag to remember.
     pub(super) fn open_task_thread(&self, agent_id: &str, project: &str) -> Option<String> {
         self.tasks

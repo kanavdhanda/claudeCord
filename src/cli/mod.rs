@@ -108,6 +108,8 @@ pub enum Cmd {
     Pickup,
     /// Ask who else is in this project, what they do and whether they can be reached. The answer arrives as your next input.
     Team,
+    /// List where you can post: the main channel and your open tasks, each with the id to use in `say --thread`. Answered at once.
+    Threads,
     /// Print the short rules for using the team chat (what to run, and when).
     Guide,
     /// Send a file to the chat, or to a peer with --to.
@@ -156,6 +158,7 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         Cmd::Dump { text } => verbs::dump(text).await,
         Cmd::Pickup => verbs::pickup().await,
         Cmd::Team => verbs::team().await,
+        Cmd::Threads => verbs::threads().await,
         Cmd::Guide => {
             println!("{}", crate::device::daemon::RULES);
             Ok(())

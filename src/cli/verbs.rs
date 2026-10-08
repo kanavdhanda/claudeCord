@@ -122,6 +122,11 @@ pub async fn team() -> Result<(), String> {
     send(Req::Team { agent: me()? }).await
 }
 
+/// `claudecord threads`: where this agent can post: the main channel and its open tasks. The answer is printed at once.
+pub async fn threads() -> Result<(), String> {
+    send(Req::Threads { agent: me()? }).await
+}
+
 /// `claudecord pickup`: ask what to carry on from.
 pub async fn pickup() -> Result<(), String> {
     send(Req::Pickup { agent: me()? }).await

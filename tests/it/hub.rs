@@ -3168,3 +3168,60 @@ fn a_device_that_could_not_paste_a_message_in_time_tells_the_sender_it_failed() 
             .is_empty()
     );
 }
+
+#[test]
+fn threads_lists_the_open_tasks_with_ids_and_a_task_id_stands_for_its_thread() {
+    let mut w = World::new();
+    w.join("mac", 1, "otter");
+    w.join("gpu", 2, "heron");
+    let threads = |w: &mut World| {
+        let fx = w.core.on_node_frame(
+            "gpu",
+            NodeFrame::AgentThreads {
+                agent_id: "p/heron".into(),
+                say_id: "q1".into(),
+            },
+            T0 + 5,
+        );
+        receipts(&fx)
+    };
+    let none = threads(&mut w);
+    assert_eq!(none.len(), 1);
+    assert_eq!(none[0].2, "info");
+    assert!(none[0].3.as_deref().unwrap().contains("no open tasks"));
+    w.core.on_node_frame(
+        "mac",
+        NodeFrame::AgentAssign {
+            agent_id: "p/otter".into(),
+            to: "heron".into(),
+            task: "write the benchmark report".into(),
+            thread: None,
+        },
+        T0 + 1,
+    );
+    let listed = threads(&mut w);
+    let text = listed[0].3.clone().unwrap();
+    assert!(
+        text.contains("T1 otter>heron") && text.contains("write the benchmark report"),
+        "{text}"
+    );
+    assert!(
+        text.lines().count() <= 4,
+        "short enough to be cheap to read: {text}"
+    );
+    // `--thread T1` is the task's thread, whatever it is called in full.
+    let fx = w.core.on_node_frame(
+        "gpu",
+        NodeFrame::AgentSay {
+            agent_id: "p/heron".into(),
+            text: "progress".into(),
+            thread: Some("T1".into()),
+            say_id: None,
+        },
+        T0 + 6,
+    );
+    assert!(fx.iter().any(|e| matches!(
+        e,
+        Effect::Chat(Chat::Post { thread: Some(t), .. }) if t == "T1 write the benchmark report"
+    )));
+}

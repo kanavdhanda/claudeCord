@@ -2517,3 +2517,29 @@ async fn a_file_over_the_limit_is_refused_by_its_size_before_it_is_read() {
     assert!(started.elapsed() < Duration::from_secs(2));
     r.hub.shutdown().await;
 }
+
+#[tokio::test]
+async fn threads_answers_in_the_same_call_with_where_the_agent_can_post() {
+    let r = rig("threadlist").await;
+    let key = up(&r, "otter").await;
+    eventually("registered", async || {
+        r.hub
+            .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    let started = std::time::Instant::now();
+    let resp = ipc::call_as(
+        &r.dir,
+        Some(&key),
+        &Req::Threads {
+            agent: "demo/otter".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(resp.ok && resp.msg.contains("main channel"), "{}", resp.msg);
+    assert!(started.elapsed() < Duration::from_secs(3));
+    r.hub.shutdown().await;
+}

@@ -692,6 +692,7 @@ impl HubCore {
             | NodeFrame::AgentHandoff { agent_id, .. }
             | NodeFrame::AgentPickup { agent_id }
             | NodeFrame::AgentTeam { agent_id }
+            | NodeFrame::AgentThreads { agent_id, .. }
             | NodeFrame::AgentAnswer { agent_id, .. }
             | NodeFrame::FileChunk { agent_id, .. } => Some(agent_id.as_str()),
             NodeFrame::Hello { .. }
@@ -851,6 +852,9 @@ impl HubCore {
             }
             NodeFrame::AgentPickup { agent_id } => self.on_pickup(&agent_id, now, &mut fx),
             NodeFrame::AgentTeam { agent_id } => self.on_team(&agent_id, now, &mut fx),
+            NodeFrame::AgentThreads { agent_id, say_id } => {
+                self.on_threads(&agent_id, &say_id, &mut fx)
+            }
             NodeFrame::SpawnFailed {
                 project,
                 name,
@@ -994,6 +998,8 @@ impl HubCore {
             return;
         };
         self.metrics.inc("msg_agent", 1.0, now);
+        // `--thread T2` is enough: the id of a task of this project stands for its thread's whole name.
+        let thread = thread.map(|t| self.resolve_thread(&a.project, t));
         let text = strip_mention(text, &a.name);
         // What is said to a person stays in the channel they are in; the task thread is only the default for work talk.
         let thread = match thread {
@@ -1037,7 +1043,14 @@ impl HubCore {
             text: clean.clone(),
             thread: thread.clone(),
         }));
-        self.route_agent_message(&a, &clean, thread, say_id, now, fx);
+        self.route_agent_message(
+            &a,
+            &clean,
+            thread.as_deref().map(super::tasks::short_thread),
+            say_id,
+            now,
+            fx,
+        );
     }
 
     /// Whether any word in an action looks like a path the project must never expose.
