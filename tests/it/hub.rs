@@ -1237,7 +1237,7 @@ fn a_session_at_97_percent_asks_every_agent_once_and_a_context_reading_asks_only
         vec![1, 2],
         "the allowance is shared, so every window is told"
     );
-    assert!(urgent(&fx)[0].1.contains("context_dump"));
+    assert!(urgent(&fx)[0].1.contains("claudecord dump"));
     assert!(
         urgent(&usage(&mut w, "gpu", "heron", Session, 98, T0 + 60_000)).is_empty(),
         "not asked again within half an hour"

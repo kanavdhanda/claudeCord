@@ -399,13 +399,13 @@ async fn a_file_sent_from_chat_lands_in_the_agents_inbox_and_the_agent_is_told_w
         })
         .await;
     eventually("file saved", async || {
-        std::fs::read(r.project.join(".claudecord/files/demo/t1-plan.txt"))
+        std::fs::read(r.project.join(".claudecord/files/demo/plan.txt"))
             .is_ok_and(|b| b == b"the plan")
     })
     .await;
     eventually("agent told", async || {
         std::fs::read_to_string(r.project.join("fake.log"))
-            .is_ok_and(|s| s.contains(".claudecord/files/demo/t1-plan.txt"))
+            .is_ok_and(|s| s.contains(".claudecord/files/demo/plan.txt"))
     })
     .await;
     r.hub.shutdown().await;
@@ -1772,11 +1772,11 @@ async fn files_sent_to_an_agent_land_in_the_inbox_of_its_project_only() {
         })
         .await;
     eventually("saved in the project's own inbox", async || {
-        std::fs::read(r.project.join(".claudecord/files/demo/t9-a.txt")).is_ok_and(|b| b == b"mine")
+        std::fs::read(r.project.join(".claudecord/files/demo/a.txt")).is_ok_and(|b| b == b"mine")
     })
     .await;
     // Nothing is put loose in the shared folder, where another project's agent would find it.
-    assert!(!r.project.join(".claudecord/files/t9-a.txt").exists());
+    assert!(!r.project.join(".claudecord/files/a.txt").exists());
     r.hub.shutdown().await;
 }
 
@@ -1820,7 +1820,7 @@ async fn a_moved_agent_is_filed_under_its_new_project_and_still_speaks_with_its_
         })
         .await;
     eventually("file in the new project's inbox", async || {
-        std::fs::read(r.project.join(".claudecord/files/other/t7-n.txt"))
+        std::fs::read(r.project.join(".claudecord/files/other/n.txt"))
             .is_ok_and(|b| b == b"new home")
     })
     .await;

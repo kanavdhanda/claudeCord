@@ -27,28 +27,36 @@ async fn send(req: Req) -> Result<(), String> {
     }
 }
 
+/// Reads piped input (at most 100k), so a long text can come in as `-` with a heredoc.
+fn read_stdin() -> Result<String, String> {
+    use std::io::Read;
+    let mut t = String::new();
+    std::io::stdin()
+        .take(100_000)
+        .read_to_string(&mut t)
+        .map_err(|e| e.to_string())?;
+    let t = t.trim_end().to_string();
+    if t.is_empty() {
+        Err("nothing to say: the input was empty".into())
+    } else {
+        Ok(t)
+    }
+}
+
+/// A text argument; `-` means read it from stdin instead of taking a literal dash.
+fn text_arg(t: String) -> Result<String, String> {
+    if t == "-" { read_stdin() } else { Ok(t) }
+}
+
 /// `claudecord say`: a message to the team.
 pub async fn say(text: Option<String>, thread: Option<String>) -> Result<(), String> {
-    use std::io::{IsTerminal, Read};
+    use std::io::IsTerminal;
     let text = match text.as_deref() {
         Some(t) if t != "-" => t.to_string(),
         Some(_) => read_stdin()?,
         None if !std::io::stdin().is_terminal() => read_stdin()?,
         None => return Err("say what? `say \"text\"`, or `say -` with the text piped in".into()),
     };
-    fn read_stdin() -> Result<String, String> {
-        let mut t = String::new();
-        std::io::stdin()
-            .take(100_000)
-            .read_to_string(&mut t)
-            .map_err(|e| e.to_string())?;
-        let t = t.trim_end().to_string();
-        if t.is_empty() {
-            Err("nothing to say: the input was empty".into())
-        } else {
-            Ok(t)
-        }
-    }
     send(Req::Say {
         agent: me()?,
         text,
@@ -61,7 +69,7 @@ pub async fn say(text: Option<String>, thread: Option<String>) -> Result<(), Str
 pub async fn ask(question: String) -> Result<(), String> {
     send(Req::Ask {
         agent: me()?,
-        question,
+        question: text_arg(question)?,
         options: None,
         thread: None,
     })
@@ -73,7 +81,7 @@ pub async fn assign(to: String, task: String) -> Result<(), String> {
     send(Req::Assign {
         agent: me()?,
         to,
-        task,
+        task: text_arg(task)?,
         thread: None,
     })
     .await
@@ -84,7 +92,7 @@ pub async fn done(task: String, summary: String) -> Result<(), String> {
     send(Req::Done {
         agent: me()?,
         task,
-        summary,
+        summary: text_arg(summary)?,
     })
     .await
 }
@@ -94,7 +102,7 @@ pub async fn report(title: String, summary: String) -> Result<(), String> {
     send(Req::Report {
         agent: me()?,
         title,
-        summary,
+        summary: text_arg(summary)?,
         artifacts: None,
     })
     .await
@@ -102,7 +110,11 @@ pub async fn report(title: String, summary: String) -> Result<(), String> {
 
 /// `claudecord dump`: save this session's state for a fresh one.
 pub async fn dump(text: String) -> Result<(), String> {
-    send(Req::Dump { agent: me()?, text }).await
+    send(Req::Dump {
+        agent: me()?,
+        text: text_arg(text)?,
+    })
+    .await
 }
 
 /// `claudecord team`: who else is in this project, what they do and whether they can be reached. The answer arrives as your next input.
@@ -135,7 +147,7 @@ pub async fn answer(ask: String, text: String) -> Result<(), String> {
     send(Req::Answer {
         agent: me()?,
         ask,
-        text,
+        text: text_arg(text)?,
     })
     .await
 }

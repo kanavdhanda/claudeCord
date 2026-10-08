@@ -1,6 +1,6 @@
 //! Handoff: how work survives a session running out. Sessions end (the account's session allowance, a full context,
 //! a crash), and a fresh session must carry on without replaying the old conversation, which would cost as much as
-//! the one that just ran out. So agents save a short structured summary (`context_dump`), and a fresh session asks for
+//! the one that just ran out. So agents save a short structured summary (`claudecord dump`), and a fresh session asks for
 //! it (`pickup`). The hub keeps the latest one per agent and gives it out until a session actually accepts it.
 //!
 //! Edge cases this file settles:
@@ -82,7 +82,7 @@ impl HubCore {
                 continue;
             }
             let text = format!(
-                "URGENT: {reason} Run context_dump now: goal, done, pending, decisions, files, next step. Then stop."
+                "URGENT: {reason} Run `claudecord dump \"...\"` now with: goal, done, pending, decisions, files, next step. Then stop."
             );
             if self.send_to(
                 t,
@@ -145,7 +145,7 @@ impl HubCore {
             return;
         };
         if crate::jslen(text) > HANDOFF_MAX_CHARS {
-            self.tell(&a, format!("Handoff too long. Keep it under {HANDOFF_MAX_CHARS} characters and run context_dump again."), now, fx);
+            self.tell(&a, format!("Handoff too long. Keep it under {HANDOFF_MAX_CHARS} characters and run `claudecord dump` again."), now, fx);
             return;
         }
         let clean = self.scrub(&a, text, now, fx);

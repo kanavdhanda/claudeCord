@@ -476,7 +476,6 @@ impl HubCore {
         if peers.is_empty() {
             return;
         }
-        let to_human = self.addresses_human(&from.project, text);
         let mentioned = self.mentioned(&from.project, text, Some(&from.agent_id));
         let n = self.streak.get(&from.agent_id).copied().unwrap_or(0) + 1;
         self.streak.insert(from.agent_id.clone(), n);
@@ -491,7 +490,7 @@ impl HubCore {
                 fx,
             );
         }
-        if n >= self.streak_limit || to_human {
+        if n >= self.streak_limit {
             return;
         }
         // Only naming someone sends a message to an agent. A plain say is for the chat, and nobody else's turn is spent on it.

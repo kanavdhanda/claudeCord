@@ -309,7 +309,7 @@ impl AdapterId {
             Self::Claude => {
                 static MENU_HINT: LazyLock<Regex> = LazyLock::new(|| {
                     re(
-                        r"(?i)esc to cancel|enter to select|do you want|do you trust|bypass permissions|select",
+                        r"(?i)esc to cancel|enter to select|do you want|do you trust|bypass permissions",
                     )
                 });
                 static BUSY: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)esc to interrupt"));

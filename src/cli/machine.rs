@@ -302,8 +302,28 @@ pub async fn start(a: StartArgs) -> Result<(), String> {
         adapter: (a.adapter != "claude").then(|| a.adapter.clone()),
         role: a.role.clone(),
     };
-    let (code, url) = match request_pick(&cwd, &prefill).await {
+    let mut picked = request_pick(&cwd, &prefill).await;
+    if matches!(picked, Err(PickError::Unrecognised)) {
+        // The hub forgot this machine: sign in again in the browser and retry once, rather than telling the person to.
+        eprintln!("The hub does not recognise this machine's login. Signing in again...");
+        login(LoginArgs {
+            hub: None,
+            token: None,
+            name: None,
+        })
+        .await?;
+        picked = request_pick(&cwd, &prefill).await;
+    }
+    let (code, url) = match picked {
         Ok(p) => p,
+        Err(PickError::Unrecognised) => {
+            return Err(enroll::refusal(
+                &Config::load(&home_dir())
+                    .map(|c| c.hub_url)
+                    .unwrap_or_default(),
+                401,
+            ));
+        }
         Err(PickError::NoPage) if dev_spawn() => return start_local(a).await,
         Err(PickError::NoPage) => {
             return Err("this hub has no dashboard to start agents from. Agents are started by the hub: from Discord with /spawn, or on a hub that serves the dashboard".into());
@@ -474,6 +494,8 @@ struct Prefill {
 enum PickError {
     /// This hub has no such page (a single-team hub), or is too old to start agents when asked.
     NoPage,
+    /// The hub does not know this machine's login (removed on the dashboard, or made for another hub).
+    Unrecognised,
     Other(String),
 }
 
@@ -505,6 +527,9 @@ async fn request_pick(
         .map_err(|e| PickError::Other(format!("cannot reach {base}: {}", enroll::why(&e))))?;
     if matches!(asked.status().as_u16(), 404 | 405) {
         return Err(PickError::NoPage);
+    }
+    if asked.status().as_u16() == 401 {
+        return Err(PickError::Unrecognised);
     }
     if !asked.status().is_success() {
         return Err(PickError::Other(enroll::refusal(

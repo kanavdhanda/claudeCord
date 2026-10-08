@@ -983,8 +983,14 @@ impl HubCore {
             return;
         };
         self.metrics.inc("msg_agent", 1.0, now);
-        let thread = thread.or_else(|| self.open_task_thread(agent_id, &a.project));
         let text = strip_mention(text, &a.name);
+        // What is said to a person stays in the channel they are in; the task thread is only the default for work talk.
+        let thread = match thread {
+            None if !self.addresses_human(&a.project, &text) => {
+                self.open_task_thread(agent_id, &a.project)
+            }
+            t => t,
+        };
         // Agents talking to each other (and not to a person) do it in a thread of their own, named after the pair, so the main channel stays for
         // the people and the results. Nothing is asked of the agents: it is where the hub puts the message.
         let thread = match thread {
