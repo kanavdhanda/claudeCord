@@ -2609,3 +2609,79 @@ async fn a_steering_press_stops_the_agent_with_escape_before_the_message_goes_in
     );
     r.hub.shutdown().await;
 }
+
+/// Two agents run `script`; one says something to the other. Returns what `claudecord say` would print (and whether it counts as a success).
+async fn say_to_a_peer_running(name: &str, script: &str) -> claudecord::device::ipc::Resp {
+    let r = rig_with(name, script).await;
+    let key = up(&r, "otter").await;
+    let other = r.project.parent().unwrap().join("demo2");
+    std::fs::create_dir_all(&other).unwrap();
+    let resp = ipc::call(
+        &r.dir,
+        &Req::Up {
+            project: "demo".into(),
+            name: Some("heron".into()),
+            adapter: "claude".into(),
+            model: None,
+            role: None,
+            cwd: other.to_string_lossy().into(),
+            policy: "autonomous".into(),
+            rows: 24,
+            cols: 80,
+            opts: UpOpts::default(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(resp.ok, "{}", resp.msg);
+    eventually("both registered", async || {
+        r.hub
+            .call(|c, _| {
+                (
+                    c.agent("demo/otter").is_some() && c.agent("demo/heron").is_some(),
+                    vec![],
+                )
+            })
+            .await
+            .unwrap()
+    })
+    .await;
+    // Let the screens be read once, so the hub knows what state each is in.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let resp = ipc::call_as(
+        &r.dir,
+        Some(&key),
+        &Req::Say {
+            agent: "demo/otter".into(),
+            text: "@heron are you there".into(),
+            thread: None,
+        },
+    )
+    .await
+    .unwrap();
+    r.hub.shutdown().await;
+    resp
+}
+
+#[tokio::test]
+async fn a_say_to_an_agent_waiting_on_a_prompt_fails_and_says_so() {
+    let resp = say_to_a_peer_running("sayprompt", TRUST_DIALOG_PLAIN).await;
+    assert!(!resp.ok, "{}", resp.msg);
+    assert!(
+        resp.msg.starts_with("NOT delivered") && resp.msg.contains("prompt"),
+        "{}",
+        resp.msg
+    );
+}
+
+#[tokio::test]
+async fn a_say_to_an_agent_at_a_usage_limit_fails_and_says_so() {
+    let limit = "#!/bin/sh\nprintf \"? for shortcuts\\nYou've hit your session limit · resets 3pm\\n\"\nsleep 60\n";
+    let resp = say_to_a_peer_running("saylimit", limit).await;
+    assert!(!resp.ok, "{}", resp.msg);
+    assert!(
+        resp.msg.starts_with("NOT delivered") && resp.msg.contains("usage limit"),
+        "{}",
+        resp.msg
+    );
+}
