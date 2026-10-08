@@ -3225,3 +3225,35 @@ fn threads_lists_the_open_tasks_with_ids_and_a_task_id_stands_for_its_thread() {
         Effect::Chat(Chat::Post { thread: Some(t), .. }) if t == "T1 write the benchmark report"
     )));
 }
+
+#[test]
+fn a_say_to_an_agent_that_is_limited_paused_or_still_starting_fails_at_once_with_that_reason() {
+    for (status, reason) in [
+        (AgentStatus::Limited, "heron is at a usage limit"),
+        (AgentStatus::Paused, "heron is paused"),
+        (AgentStatus::Starting, "heron is still starting"),
+    ] {
+        let mut w = World::new();
+        w.join("mac", 1, "otter");
+        w.join("gpu", 2, "heron");
+        w.core.on_node_frame(
+            "gpu",
+            NodeFrame::AgentStatus {
+                agent_id: "p/heron".into(),
+                status,
+                detail: None,
+            },
+            T0,
+        );
+        let fx = say_from(&mut w, "mac", "otter", "@heron are you there", "s1");
+        assert_eq!(
+            receipts(&fx),
+            vec![(1, "s1".into(), "failed".into(), Some(reason.into()))],
+            "{status:?}"
+        );
+        assert!(
+            deliveries(&fx).iter().all(|d| d.0 != 2),
+            "nothing is sent to an agent that cannot take it ({status:?})"
+        );
+    }
+}

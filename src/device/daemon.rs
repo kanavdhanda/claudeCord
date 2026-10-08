@@ -6,7 +6,7 @@
 //! one at a time by `State`, so there is nothing to lock. The only other threads are the ones that read each terminal.
 
 use super::config::Config;
-use super::inject::{Urgency, key_bytes};
+use super::inject::{Urgency, Wait, key_bytes};
 use super::ipc::{Envelope, Req, Resp, UpOpts, socket_path};
 use super::link::{self, Link, LinkEvent, LinkOpts};
 use super::logs::AgentLog;
@@ -55,6 +55,33 @@ pub fn shot(screen: &str) -> String {
 const FILES_KEEP_MS: i64 = 3 * 24 * 3_600_000;
 /// How long a message from another agent is tried for before the device gives up and says it could not paste it.
 const SAY_WAIT: Duration = Duration::from_secs(5);
+
+/// Why a message from another agent could not be pasted in time, for the sender to read: what stopped it, in the order that matters (a pause or
+/// a usage limit or an open question comes before the state of the input box).
+fn direct_failure_reason(
+    held: bool,
+    limit: bool,
+    prompt: bool,
+    ready: bool,
+    wait: Option<Wait>,
+) -> &'static str {
+    if held {
+        "it is paused"
+    } else if limit {
+        "it is at a usage limit"
+    } else if prompt {
+        "it is waiting on a question or permission prompt"
+    } else if !ready {
+        "its terminal was not ready for input"
+    } else {
+        match wait {
+            Some(Wait::PersonTyping) => "someone is typing in its terminal",
+            Some(Wait::PartialLine) => "a half-typed line is in its input box",
+            Some(Wait::NotForeground) => "a program it started is using the terminal",
+            Some(Wait::AgentBusy) | None => "its terminal could not take it",
+        }
+    }
+}
 
 /// How long `claudecord say` waits for the hub's word: a little longer than the device tries, so a failure it reports arrives first.
 const SAY_REPLY_WAIT: Duration = Duration::from_secs(8);
@@ -324,6 +351,9 @@ struct Agent {
     /// A message from another agent that is not queued: its id and the time (ms) after which, if it still has not been pasted, it is dropped and
     /// the sender is told.
     direct: Option<(String, i64)>,
+    /// Why the terminal last refused a paste (a person typing, a half-typed line, another program in front), for the reason given when a message
+    /// from another agent is dropped. Cleared by a paste that goes in.
+    last_wait: Option<Wait>,
     /// When Escape was pressed for a steering message, so the paste follows after the agent has had a moment to stop.
     steered_at: Option<i64>,
     status: AgentStatus,
@@ -1489,7 +1519,21 @@ impl State {
                     a.steered_at = Some(now);
                 }
                 let settled = a.steered_at.is_none_or(|t| now - t >= STEER_SETTLE_MS);
-                if settled && a.proc.inject_as(&text, now, a.urgency).is_ok() {
+                let pasted = if settled {
+                    match a.proc.inject_as(&text, now, a.urgency) {
+                        Ok(()) => {
+                            a.last_wait = None;
+                            true
+                        }
+                        Err(w) => {
+                            a.last_wait = Some(w);
+                            false
+                        }
+                    }
+                } else {
+                    false
+                };
+                if pasted {
                     a.log.event(now, "delivered", &text);
                     let ids: Vec<String> = a.queue.drain(..n).filter_map(|d| d.msg_id).collect();
                     if a.direct.as_ref().is_some_and(|(d, _)| ids.contains(d)) {
@@ -1518,15 +1562,13 @@ impl State {
                         a.urgency = Urgency::Queue;
                         a.urgent_id = None;
                     }
-                    let reason = if state.limit.is_some() {
-                        "at a usage limit"
-                    } else if state.prompt.is_some() {
-                        "waiting on a question or permission prompt"
-                    } else if !state.ready {
-                        "its terminal was not ready for input"
-                    } else {
-                        "someone was typing in its terminal"
-                    };
+                    let reason = direct_failure_reason(
+                        a.held,
+                        state.limit.is_some(),
+                        state.prompt.is_some(),
+                        state.ready,
+                        a.last_wait,
+                    );
                     out.push(NodeFrame::AgentDeliveryFailed {
                         agent_id: id.to_string(),
                         msg_ids: vec![mid],
@@ -2295,6 +2337,7 @@ impl State {
                 urgency: Urgency::Queue,
                 urgent_id: None,
                 direct: None,
+                last_wait: None,
                 steered_at: None,
                 status: AgentStatus::Starting,
                 held: false,
@@ -2411,6 +2454,37 @@ fn fingerprint(s: &str) -> u32 {
 #[cfg(test)]
 mod intro_tests {
     use super::*;
+
+    #[test]
+    fn every_reason_a_message_between_agents_fails_is_named_and_the_most_important_comes_first() {
+        let r = direct_failure_reason;
+        assert_eq!(r(true, true, true, false, None), "it is paused");
+        assert_eq!(r(false, true, true, false, None), "it is at a usage limit");
+        assert_eq!(
+            r(false, false, true, false, None),
+            "it is waiting on a question or permission prompt"
+        );
+        assert_eq!(
+            r(false, false, false, false, None),
+            "its terminal was not ready for input"
+        );
+        assert_eq!(
+            r(false, false, false, true, Some(Wait::PersonTyping)),
+            "someone is typing in its terminal"
+        );
+        assert_eq!(
+            r(false, false, false, true, Some(Wait::PartialLine)),
+            "a half-typed line is in its input box"
+        );
+        assert_eq!(
+            r(false, false, false, true, Some(Wait::NotForeground)),
+            "a program it started is using the terminal"
+        );
+        assert_eq!(
+            r(false, false, false, true, None),
+            "its terminal could not take it"
+        );
+    }
 
     #[test]
     fn a_transfer_that_stopped_coming_is_removed_with_its_part_file_and_a_live_one_is_kept() {

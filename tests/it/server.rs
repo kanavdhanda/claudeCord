@@ -1192,7 +1192,9 @@ async fn a_quiet_device_costs_the_hub_kilobytes_not_hundreds() {
     .await;
     let per_device = (super::procs::rss_kb().saturating_sub(before)) / N;
     assert!(
-        per_device < 48,
+        // About 40 KB measured on its own. This reads the memory of the whole test process, and other tests run alongside it, so there is room for
+        // that; the buffers this guards against (128 KB each way by default) would show as over 200.
+        per_device < 64,
         "{per_device} KB of memory per quiet device (this program, hub and test ends together)"
     );
     drop(links);
