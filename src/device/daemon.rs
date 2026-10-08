@@ -72,9 +72,12 @@ fn tidy_files(dir: &std::path::Path, max_age_ms: i64, max_bytes: u64) {
     files.sort_by_key(|f| f.0);
     let mut total: u64 = files.iter().map(|f| f.1).sum();
     for (at, len, path) in files {
-        let old = now
-            .duration_since(at)
-            .is_ok_and(|d| d.as_millis() as i64 > max_age_ms);
+        let age = now.duration_since(at).map_or(0, |d| d.as_millis() as i64);
+        // A piece of a transfer still arriving is not tidied away.
+        if path.extension().is_some_and(|x| x == "part") && age < 15 * 60_000 {
+            continue;
+        }
+        let old = age > max_age_ms;
         if (old || total > max_bytes) && std::fs::remove_file(&path).is_ok() {
             total -= len;
         }
@@ -95,7 +98,7 @@ fn intro(spec: &AgentSpec) -> Option<Delivery> {
     })
 }
 
-pub const RULES: &str = "Team chat is the shell command claudecord: say <text>, ask <question>, assign <agent> <task>, done <id> <summary>, dump (save state), team (who else is here), send <file> (to the chat) or send <file> --to <agent> (to another agent: it lands in their .claudecord inbox and is shown in your thread with them). Answer people with say: just the words, even \"on it\". For several lines pipe them in: say - <<'EOF'. Put @theirname before a person's name only when you need their attention; never @ yourself. @agentname addresses ANOTHER agent, in a thread of its own, so keep it short and only when you need them. Ask a person only what you cannot decide yourself, and ask once. Your say on a task goes to its thread; ask, done and report go to the main chat.";
+pub const RULES: &str = "Team chat is the shell command claudecord: say <text>, ask <question>, assign <agent> <task>, done <id> <summary>, dump (save state), team (who else is here), send <file> (to the chat) or send <file> --to <agent> (to another agent's .claudecord inbox). Answer team messages with say, not also in the terminal; answer a person typing at your terminal there. For several lines pipe them in: say - <<'EOF'. Put @theirname before a person's name only when you need their attention; never @ yourself. @agentname addresses ANOTHER agent, in a thread of its own, so keep it short and only when you need them. Ask a person only what you cannot decide, once. Your say on a task goes to its thread; ask, done and report go to the main chat.";
 
 /// Choices that tests change.
 #[derive(Clone)]
@@ -254,6 +257,8 @@ struct Agent {
     held: bool,
     asks: u32,
     shown_prompt: Option<String>,
+    /// A prompt seen on the last tick but not yet reported: text scrolling past must stay on screen for two ticks to count.
+    candidate_prompt: Option<String>,
     /// When a message that wants an answer was handed over, until the agent answers with any command of its own.
     awaiting: Option<i64>,
     /// When a picture of this terminal was last sent by itself (not asked for): at most one every five minutes.
@@ -839,9 +844,16 @@ impl State {
             return;
         }
         // What is kept here is not for the project's history: git is told to ignore the whole `.claudecord` folder.
-        let _ = std::fs::write(a.cwd.join(".claudecord/.gitignore"), "*\n");
-        let done = dir.join(format!("{}-{}", safe_name(transfer_id), safe_name(name)));
-        let part = PathBuf::from(format!("{}.part", done.display()));
+        if seq == 0 {
+            let _ = std::fs::write(a.cwd.join(".claudecord/.gitignore"), "*\n");
+        }
+        // The file keeps its own name, so an agent finds the newest version where it expects it; the transfer id only tells the pieces apart.
+        let done = dir.join(safe_name(name));
+        let part = dir.join(format!(
+            "{}-{}.part",
+            safe_name(transfer_id),
+            safe_name(name)
+        ));
         let entry = a
             .files
             .entry(transfer_id.to_string())
@@ -910,7 +922,21 @@ impl State {
                 });
                 return;
             }
-            if std::fs::rename(&part, &done).is_err() {
+            if let Err(e) = std::fs::rename(&part, &done).or_else(|_| {
+                std::fs::copy(&part, &done).map(|_| {
+                    let _ = std::fs::remove_file(&part);
+                })
+            }) {
+                let _ = std::fs::remove_file(&part);
+                a.queue.push(Delivery {
+                    from: from.to_string(),
+                    text: format!(
+                        "[file {} could not be saved ({e}): ask for it again]",
+                        safe_name(name)
+                    ),
+                    thread: None,
+                    msg_id: None,
+                });
                 return;
             }
             let path = done;
@@ -1190,6 +1216,10 @@ impl State {
                             let _ = a.proc.type_input(&key_bytes(&k), now);
                         }
                     }
+                } else if a.shown_prompt.as_deref() != Some(&p.signature)
+                    && a.candidate_prompt.as_deref() != Some(&p.signature)
+                {
+                    a.candidate_prompt = Some(p.signature.clone());
                 } else if a.shown_prompt.as_deref() != Some(&p.signature) {
                     // Anything else is a question for a person. It becomes a permission request in the chat.
                     a.shown_prompt = Some(p.signature.clone());
@@ -1207,7 +1237,10 @@ impl State {
                         thread: None,
                     });
                 }
+            } else if a.shown_prompt.is_none() {
+                a.candidate_prompt = None;
             } else if let Some(shown) = a.shown_prompt.take() {
+                a.candidate_prompt = None;
                 // The prompt is gone. If a decision was still pending, it was answered here at the terminal.
                 if let Some(d) = a.deciding.take() {
                     out.push(NodeFrame::AgentPermissionDone {
@@ -2013,6 +2046,7 @@ impl State {
                 held: false,
                 asks: 0,
                 shown_prompt: None,
+                candidate_prompt: None,
                 awaiting: None,
                 shot_at: 0,
                 still: (0, 0, false),

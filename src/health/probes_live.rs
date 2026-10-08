@@ -600,7 +600,7 @@ fn daemon_flow() -> Probe {
         .await;
         ensure!(
             eventually(
-                async || std::fs::read(project.join(".claudecord/files/demo/t1-plan.txt"))
+                async || std::fs::read(project.join(".claudecord/files/demo/plan.txt"))
                     .is_ok_and(|b| b == b"the plan")
             )
             .await,

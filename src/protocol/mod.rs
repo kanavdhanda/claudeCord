@@ -300,7 +300,7 @@ pub enum NodeFrame {
         #[serde(deserialize_with = "uint")]
         pct: u64,
     },
-    /// The agent's saved state, written so a fresh session can carry on (the `context_dump` verb).
+    /// The agent's saved state, written so a fresh session can carry on (the `claudecord dump` verb).
     #[serde(rename = "agent.handoff", rename_all = "camelCase")]
     AgentHandoff { agent_id: String, text: String },
     /// An agent answers another agent's question (never a permission request).

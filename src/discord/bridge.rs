@@ -456,7 +456,7 @@ impl Bridge {
                     let (ch, th) = self.place(&project, thread.as_deref()).await.ok_or("no channel")?;
                     let (id, tok) = self.webhook(&ch).await.ok_or("no webhook")?;
                     // A person the agent addressed by name is really tagged (and notified); the message is remembered as this agent's, so a reply to it goes to it.
-                    let (text, notify) = self.tag_people(&super::api::tidy_for_discord(&text));
+                    let (text, notify) = self.tag_people(&project, &super::api::tidy_for_discord(&text));
                     let posted = self.rest.webhook_send_to(&id, &tok, &agent.name, &text, th.as_deref(), &notify).await.map_err(|e| e.to_string())?;
                     self.set(&format!("agentmsg:{posted}"), &agent.name);
                 }
@@ -464,7 +464,7 @@ impl Bridge {
                     let (ch, _) = self.place(&project, None).await.ok_or("no channel")?;
                     let (id, tok) = self.webhook(&ch).await.ok_or("no webhook")?;
                     let list = artifacts.map(|a| format!("\n{}", a.join("\n"))).unwrap_or_default();
-                    let (body, notify) = self.tag_people(&super::api::tidy_for_discord(&format!("**{title}**\n{summary}{list}")));
+                    let (body, notify) = self.tag_people(&project, &super::api::tidy_for_discord(&format!("**{title}**\n{summary}{list}")));
                     let posted = self.rest.webhook_send_to(&id, &tok, &agent.name, &body, None, &notify).await.map_err(|e| e.to_string())?;
                     self.set(&format!("agentmsg:{posted}"), &agent.name);
                 }
@@ -773,9 +773,10 @@ impl Bridge {
         }
     }
 
-    /// Turns `@name` of a person this bridge has seen into a real tag (`<@id>`), and says whom to notify. Anything else (an agent's name, an
+    /// Turns `@name` of a person this bridge has seen into a real tag (`<@id>`), and says whom to notify. An agent's name becomes its role tag. Anything else (an
     /// unknown name, an address like `me@name`) is left as written.
-    fn tag_people(&self, text: &str) -> (String, Vec<String>) {
+    fn tag_people(&self, project: &str, text: &str) -> (String, Vec<String>) {
+        let guild = self.guild_of(project);
         static AT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
             regex::Regex::new(r"(^|[^A-Za-z0-9_<@&])@([A-Za-z0-9_.-]{2,32})").expect("tag")
         });
@@ -790,7 +791,14 @@ impl Bridge {
                         }
                         format!("{}<@{id}>{}", &c[1], &c[2][name.len()..])
                     }
-                    None => c[0].to_string(),
+                    // An agent's name becomes its role mention (shown as a tag; roles are not in the notify list, so nobody is pinged).
+                    None => match guild
+                        .as_ref()
+                        .and_then(|g| self.get(&format!("role:{g}:{name}")))
+                    {
+                        Some(id) => format!("{}<@&{id}>{}", &c[1], &c[2][name.len()..]),
+                        None => c[0].to_string(),
+                    },
                 }
             })
             .into_owned();
