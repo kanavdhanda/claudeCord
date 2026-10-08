@@ -871,7 +871,7 @@ impl State {
         let Some(a) = self.agents.get_mut(agent_id) else {
             return;
         };
-        let dir = a.cwd.join(crate::hub::routing::inbox_dir(&a.spec.project));
+        let dir = a.cwd.join(crate::protocol::inbox_dir(&a.spec.project));
         if std::fs::create_dir_all(&dir).is_err() {
             return;
         }
@@ -1124,7 +1124,7 @@ impl State {
             let dirs: Vec<PathBuf> = self
                 .agents
                 .values()
-                .map(|a| a.cwd.join(crate::hub::routing::inbox_dir(&a.spec.project)))
+                .map(|a| a.cwd.join(crate::protocol::inbox_dir(&a.spec.project)))
                 .collect();
             let _ = tokio::task::spawn_blocking(move || {
                 for d in dirs {

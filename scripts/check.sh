@@ -28,6 +28,7 @@ echo "== code map";    python3 scripts/codemap.py --check
 # Health checks come last: they prove every feature is alive, in this process and in the shipped binary.
 echo "== features alive (selftest)"; cargo run -q --bin claudecord-hub -- selftest
 echo "== shipped binary (smoke)";     scripts/smoke.sh
+echo "== machine program has no hub";  scripts/check_machine_binary.sh
 
 if [ "$COST" = 1 ]; then
   echo "== cost (spends tokens)"

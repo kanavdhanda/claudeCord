@@ -711,3 +711,11 @@ pub fn auto_name(
     }
     format!("agent-{:04x}", rand(0x10000))
 }
+
+/// Where on the device attached files are placed, relative to the folder an agent works in.
+pub const INBOX_DIR: &str = ".claudecord/files";
+
+/// The inbox of one project inside a folder. A folder may serve several projects, and what one project's people sent never lands among another's.
+pub fn inbox_dir(project: &str) -> String {
+    format!("{INBOX_DIR}/{project}")
+}

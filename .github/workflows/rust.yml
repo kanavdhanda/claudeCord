@@ -40,6 +40,7 @@ jobs:
       # Health checks last: every feature alive, then the shipped binary used the way a person would.
       - run: cargo run -q --bin claudecord-hub -- selftest
       - run: scripts/smoke.sh
+      - run: scripts/check_machine_binary.sh
 
   # Windows is built and tested natively. The stand-in-agent tests need a Unix shell and skip themselves there; the lints run
   # on Linux and macOS, and the Windows-only code is compiled by the test build.

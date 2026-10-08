@@ -8,7 +8,7 @@ build-backend = "maturin"
 name = "claudecord"
 dynamic = ["version"]
 description = "Run Claude Code, agy and Codex agents on any machine as a Discord team"
-readme = "README.md"
+readme = "scripts/npm/README.md"
 license = { text = "MIT" }
 requires-python = ">=3.8"
 keywords = ["claude", "codex", "agents", "discord", "tmux", "orchestrator"]
@@ -25,3 +25,5 @@ Repository = "https://github.com/kanavdhanda/claudeCord"
 [tool.maturin]
 bindings = "bin"
 strip = true
+# Without the hub feature: the wheel holds the machine program only.
+no-default-features = true

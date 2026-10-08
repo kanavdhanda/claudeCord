@@ -24,6 +24,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 |---|---|
 | `src/cli/export.rs` | `claudecord-hub export`: writes the conversation history as an Obsidian vault. |
 | `src/cli/hub.rs` | The server commands: `claudecord-hub hub` runs the central hub, `claudecord-hub token` makes a token for a machine, and `claudecord-hub load-tokens` makes many at once into a private file for the k6 load test. |
+| `src/cli/hub_cli.rs` | The command line of `claudecord-hub`, the program the hub's Docker image runs. |
 | `src/cli/machine.rs` | Commands for a machine that runs agents: save the hub address, run the daemon, start an agent in the current folder, open an agent's terminal, list, stop, and check connectivity. |
 | `src/cli/mod.rs` | The command lines: what each command is, and where it is handled. |
 | `src/cli/storage.rs` | `claudecord-hub storage`: where old history files go. |
@@ -213,6 +214,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | File | What it is |
 |---|---|
 | `scripts/check.sh` | One command that says whether the Rust code is healthy. |
+| `scripts/check_machine_binary.sh` | The program people install must hold nothing of the hub: build it without the hub feature and look for what only the hub has. |
 | `scripts/cost/benchmark.py` | Spends real tokens (about 30 short Claude Code calls per model). |
 | `scripts/cost/coalescing.py` | Spends real tokens: runs Claude Code (tools off) about a dozen times. |
 | `scripts/cost/overhead.py` | Spends real tokens: runs Claude Code (haiku, tools off) a few dozen times. |

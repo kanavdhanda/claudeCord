@@ -2,7 +2,7 @@
 # Sets up a claudeCord hub on a fresh Linux machine that uses systemd (Ubuntu or Debian, such as an Oracle Cloud Always Free VM), in one go:
 # the program, a service that restarts it (and restarts a hung one), TLS from Let's Encrypt through Caddy, and the firewall openings.
 #
-#   sudo ./bootstrap.sh --domain claudecord.example.com --client-id DISCORD_APP_ID --secret-file secret.txt [--binary ./claudecord | --version v0.2.0]
+#   sudo ./bootstrap.sh --domain claudecord.example.com --client-id DISCORD_APP_ID --secret-file secret.txt --binary ./claudecord-hub
 #
 # This sets up the hosted service: people sign in with Discord, add their own bots on the dashboard, and join machines by a code. The
 # Discord application named by --client-id is only for signing people in (create it in the Discord developer portal and add
@@ -11,23 +11,22 @@
 #
 # Before running it: the domain's A record must already point at this machine (Caddy asks Let's Encrypt for a certificate as soon as it starts),
 # and ports 80 and 443 must be open in the provider's network settings (on Oracle: the VCN security list). It can be run again safely.
-# Without --binary it downloads the release file for this CPU from GitHub (so a release must exist); with --binary it uses the file you give.
+# The hub program is built from this repository (cargo build --release --bin claudecord-hub); there is no published download for it.
 #
 # NOTE: written carefully but not yet run on a real server. Run it on a throwaway machine first, or read it line by line.
 set -euo pipefail
 
-domain=""; client=""; secret=""; binary=""; version="latest"
+domain=""; client=""; secret=""; binary=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --domain) domain=${2:?}; shift 2 ;;
     --client-id) client=${2:?}; shift 2 ;;
     --secret-file) secret=${2:?}; shift 2 ;;
     --binary) binary=${2:?}; shift 2 ;;
-    --version) version=${2:?}; shift 2 ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
 done
-[ -n "$domain" ] && [ -n "$client" ] && [ -n "$secret" ] || { echo "usage: $0 --domain NAME --client-id DISCORD_APP_ID --secret-file FILE [--binary FILE | --version TAG]" >&2; exit 2; }
+[ -n "$domain" ] && [ -n "$client" ] && [ -n "$secret" ] || { echo "usage: $0 --domain NAME --client-id DISCORD_APP_ID --secret-file FILE --binary FILE" >&2; exit 2; }
 [ -f "$secret" ] || { echo "$secret is not a file" >&2; exit 2; }
 [ "$(id -u)" = 0 ] || { echo "run this as root (sudo)" >&2; exit 1; }
 command -v systemctl >/dev/null || { echo "this needs a machine that uses systemd" >&2; exit 1; }
@@ -36,18 +35,7 @@ case "$client" in *[!0-9]*|"") echo "--client-id is the Discord application id: 
 case "$domain" in *[!A-Za-z0-9.-]*|"") echo "--domain looks wrong: $domain" >&2; exit 2 ;; esac
 
 # 1. The program.
-if [ -z "$binary" ]; then
-  case "$(uname -m)" in
-    x86_64) arch=x64 ;;
-    aarch64|arm64) arch=arm64 ;;
-    *) echo "no build for $(uname -m)" >&2; exit 1 ;;
-  esac
-  url="https://github.com/kanavdhanda/claudeCord/releases/latest/download/claudecord-hub-linux-$arch"
-  [ "$version" = latest ] || url="https://github.com/kanavdhanda/claudeCord/releases/download/$version/claudecord-hub-linux-$arch"
-  echo "downloading $url"
-  curl -fsSL -o /tmp/claudecord-hub.new "$url" || { echo "could not download it: is there a published release? Use --binary FILE instead." >&2; exit 1; }
-  binary=/tmp/claudecord-hub.new
-fi
+[ -n "$binary" ] || { echo "the hub program is not published as a download: build it (cargo build --release --bin claudecord-hub) and pass --binary FILE" >&2; exit 2; }
 [ -f "$binary" ] || { echo "$binary is not a file" >&2; exit 1; }
 [ -f /usr/local/bin/claudecord-hub ] && cp -f /usr/local/bin/claudecord-hub /usr/local/bin/claudecord-hub.previous
 install -m 755 "$binary" /usr/local/bin/claudecord-hub

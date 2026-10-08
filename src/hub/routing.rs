@@ -36,13 +36,7 @@ pub(super) fn status_name(s: AgentStatus) -> &'static str {
     }
 }
 
-/// Where on the device attached files are placed, relative to the folder an agent works in.
-pub const INBOX_DIR: &str = ".claudecord/files";
-
-/// The inbox of one project inside a folder. A folder may serve several projects, and what one project's people sent never lands among another's.
-pub fn inbox_dir(project: &str) -> String {
-    format!("{INBOX_DIR}/{project}")
-}
+pub use crate::protocol::{INBOX_DIR, inbox_dir};
 
 /// One short line telling an agent a file arrived: its kind, name, size and where to find it. The content is never
 /// put in the agent's context, so an image or a PDF costs tokens only if and when the agent opens it.

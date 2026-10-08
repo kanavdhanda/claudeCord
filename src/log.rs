@@ -127,7 +127,7 @@ pub fn emit(level: Level, target: &str, msg: std::fmt::Arguments) {
     let text = text.replace(['\n', '\r'], " ");
     let line = format!(
         "{} {} {target}: {text}\n",
-        crate::uptime::iso(crate::now_ms()),
+        iso(crate::now_ms()),
         level.name()
     );
     // `eprint!` rather than writing to stderr directly, so a test run keeps the lines of a passing test out of its output.
@@ -160,3 +160,25 @@ macro_rules! warn { ($t:expr, $($a:tt)*) => { $crate::log::emit($crate::log::Lev
 macro_rules! info { ($t:expr, $($a:tt)*) => { $crate::log::emit($crate::log::Level::Info, $t, format_args!($($a)*)) } }
 #[macro_export]
 macro_rules! debug { ($t:expr, $($a:tt)*) => { $crate::log::emit($crate::log::Level::Debug, $t, format_args!($($a)*)) } }
+
+/// A time in milliseconds since 1970 as `2026-10-04 14:05:09 UTC`, worked out by hand (no calendar library needed).
+pub fn iso(ms: i64) -> String {
+    let secs = ms.div_euclid(1000);
+    let (days, rest) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Days since 1970 to a calendar date (Howard Hinnant's civil_from_days).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02} UTC",
+        rest / 3600,
+        rest % 3600 / 60,
+        rest % 60
+    )
+}
