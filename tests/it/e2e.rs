@@ -2456,3 +2456,64 @@ async fn a_say_to_a_peer_whose_terminal_cannot_take_it_fails_with_the_reason_and
     );
     r.hub.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_large_file_in_many_pieces_arrives_byte_for_byte_and_leaves_no_part_file() {
+    let r = rig("bigfile").await;
+    up(&r, "otter").await;
+    eventually("registered", async || {
+        r.hub
+            .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    // Three megabytes of a pattern that shows if a piece is lost, doubled or out of place.
+    let body: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
+    let sent = body.clone();
+    r.hub
+        .call(move |c, _| {
+            let (_, fx) = c
+                .send_file(&kd(), "demo", "x", "model.bin", &sent, None, "t1")
+                .unwrap();
+            ((), fx)
+        })
+        .await;
+    let path = r.project.join(".claudecord/files/demo/model.bin");
+    eventually("the whole file", async || {
+        std::fs::read(&path).is_ok_and(|b| b == body)
+    })
+    .await;
+    let left: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, vec!["model.bin"], "no .part file is left behind");
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_file_over_the_limit_is_refused_by_its_size_before_it_is_read() {
+    let r = rig("toobig").await;
+    let key = up(&r, "otter").await;
+    let big = r.project.join("big.bin");
+    // A sparse file: the size is there, the bytes are not, so reading it would be slow and large.
+    let f = std::fs::File::create(&big).unwrap();
+    f.set_len(1_000_000_000).unwrap();
+    let started = std::time::Instant::now();
+    let resp = ipc::call_as(
+        &r.dir,
+        Some(&key),
+        &Req::Send {
+            agent: "demo/otter".into(),
+            path: "big.bin".into(),
+            to: None,
+            caption: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(!resp.ok && resp.msg.contains("limit"), "{}", resp.msg);
+    assert!(started.elapsed() < Duration::from_secs(2));
+    r.hub.shutdown().await;
+}

@@ -221,6 +221,14 @@ fn mem_mb() -> u64 {
         .map_or(0, |b| b / 1_048_576)
 }
 
+/// A file arriving in pieces: the open `.part` file and the checksum so far, so each piece is written once and nothing is read back.
+struct Incoming {
+    next: u64,
+    failed: bool,
+    file: Option<tokio::fs::File>,
+    hasher: sha2::Sha256,
+}
+
 /// A message pasted into a terminal that the hub has not yet been told was accepted.
 struct Inflight {
     ids: Vec<String>,
@@ -314,7 +322,7 @@ struct Agent {
     /// Internal errors in a row while looking at this agent (see `agent_faulted`).
     faults: u32,
     /// Files being received: where they are being written, and the chunk number expected next.
-    files: HashMap<String, (PathBuf, u64)>,
+    files: HashMap<String, Incoming>,
 }
 
 /// A request from the command line, with where to send the answer.
@@ -713,16 +721,19 @@ impl State {
                 data,
                 sha256,
                 ..
-            } => self.on_file(
-                &agent_id,
-                &transfer_id,
-                &from,
-                &name,
-                seq,
-                last,
-                &data,
-                sha256,
-            ),
+            } => {
+                self.on_file(
+                    &agent_id,
+                    &transfer_id,
+                    &from,
+                    &name,
+                    seq,
+                    last,
+                    &data,
+                    sha256,
+                )
+                .await
+            }
             HubFrame::Spawn {
                 agent,
                 command,
@@ -917,10 +928,10 @@ impl State {
         self.remember_agent(&name, (project.to_string(), adapter, model, role, cwd));
     }
 
-    /// A chunk of a file from the hub. It is saved into the agent's inbox folder, and when complete the agent is told
-    /// where it is in one short line.
+    /// A chunk of a file from the hub. It is written to the agent's inbox folder as it arrives (one open file, one running checksum, nothing read
+    /// back), and when complete the agent is told where it is in one short line.
     #[allow(clippy::too_many_arguments)]
-    fn on_file(
+    async fn on_file(
         &mut self,
         agent_id: &str,
         transfer_id: &str,
@@ -931,17 +942,12 @@ impl State {
         data: &str,
         sha256: Option<String>,
     ) {
+        use sha2::Digest;
+        use tokio::io::AsyncWriteExt;
         let Some(a) = self.agents.get_mut(agent_id) else {
             return;
         };
         let dir = a.cwd.join(crate::protocol::inbox_dir(&a.spec.project));
-        if std::fs::create_dir_all(&dir).is_err() {
-            return;
-        }
-        // What is kept here is not for the project's history: git is told to ignore the whole `.claudecord` folder.
-        if seq == 0 {
-            let _ = std::fs::write(a.cwd.join(".claudecord/.gitignore"), "*\n");
-        }
         // The file keeps its own name, so an agent finds the newest version where it expects it; the transfer id only tells the pieces apart.
         let done = dir.join(safe_name(name));
         let part = dir.join(format!(
@@ -949,12 +955,24 @@ impl State {
             safe_name(transfer_id),
             safe_name(name)
         ));
+        if seq == 0 {
+            if tokio::fs::create_dir_all(&dir).await.is_err() {
+                return;
+            }
+            // What is kept here is not for the project's history: git is told to ignore the whole `.claudecord` folder.
+            let _ = tokio::fs::write(a.cwd.join(".claudecord/.gitignore"), "*\n").await;
+        }
         let entry = a
             .files
             .entry(transfer_id.to_string())
-            .or_insert_with(|| (part.clone(), 0));
+            .or_insert_with(|| Incoming {
+                next: 0,
+                failed: false,
+                file: None,
+                hasher: sha2::Sha256::new(),
+            });
         // Already failed: the rest of its pieces are ignored (the agent was told once).
-        if entry.1 == u64::MAX {
+        if entry.failed {
             if last {
                 a.files.remove(transfer_id);
             }
@@ -963,25 +981,29 @@ impl State {
         // A piece out of order (one was lost when the connection dropped, or the start never came) ruins the file: what was written is removed,
         // and the agent is told, so it can say so instead of waiting for a file that will never be whole.
         let decoded = base64::engine::general_purpose::STANDARD.decode(data);
-        let in_order = seq == entry.1;
-        use std::io::Write;
-        let written = match (&decoded, in_order) {
+        let written = match (&decoded, seq == entry.next) {
             (Ok(bytes), true) => {
-                let opened = if seq == 0 {
-                    std::fs::File::create(&part)
-                } else {
-                    std::fs::OpenOptions::new().append(true).open(&part)
+                if seq == 0 {
+                    entry.file = tokio::fs::File::create(&part).await.ok();
+                }
+                let wrote = match entry.file.as_mut() {
+                    Some(f) => f.write_all(bytes).await.is_ok(),
+                    None => false,
                 };
-                opened.and_then(|mut f| f.write_all(bytes)).is_ok()
+                if wrote {
+                    entry.hasher.update(bytes);
+                }
+                wrote
             }
             _ => false,
         };
         if !written {
-            let _ = std::fs::remove_file(&part);
+            entry.file = None;
+            let _ = tokio::fs::remove_file(&part).await;
             if last {
                 a.files.remove(transfer_id);
-            } else {
-                a.files.insert(transfer_id.to_string(), (part, u64::MAX));
+            } else if let Some(e) = a.files.get_mut(transfer_id) {
+                e.failed = true;
             }
             a.queue.push(Delivery {
                 from: from.to_string(),
@@ -994,59 +1016,61 @@ impl State {
             });
             return;
         }
-        entry.1 += 1;
-        if last {
-            a.files.remove(transfer_id);
-            // The whole file is checked against the sender's SHA-256 before it is kept.
-            if let Some(want) = &sha256
-                && std::fs::read(&part)
-                    .map(|b| crate::agents::text::sha256_hex(&b))
-                    .ok()
-                    .as_ref()
-                    != Some(want)
-            {
-                let _ = std::fs::remove_file(&part);
-                a.queue.push(Delivery {
-                    from: from.to_string(),
-                    text: format!(
-                        "[file {} arrived damaged (its checksum did not match): ask for it again]",
-                        safe_name(name)
-                    ),
-                    thread: None,
-                    msg_id: None,
-                });
-                return;
+        entry.next += 1;
+        if !last {
+            return;
+        }
+        let Some(mut incoming) = a.files.remove(transfer_id) else {
+            return;
+        };
+        let flushed = match incoming.file.take() {
+            Some(mut f) => f.flush().await.is_ok(),
+            None => false,
+        };
+        // The whole file is checked against the sender's SHA-256 before it is kept (computed as the pieces came, so it is not read again).
+        let got: String = incoming
+            .hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let problem = if !flushed {
+            Some("could not be saved: the disk refused it".to_string())
+        } else if sha256.as_ref().is_some_and(|want| *want != got) {
+            Some("arrived damaged (its checksum did not match)".to_string())
+        } else {
+            match tokio::fs::rename(&part, &done).await {
+                Ok(()) => None,
+                Err(_) => match tokio::fs::copy(&part, &done).await {
+                    Ok(_) => {
+                        let _ = tokio::fs::remove_file(&part).await;
+                        None
+                    }
+                    Err(e) => Some(format!("could not be saved ({e})")),
+                },
             }
-            if let Err(e) = std::fs::rename(&part, &done).or_else(|_| {
-                std::fs::copy(&part, &done).map(|_| {
-                    let _ = std::fs::remove_file(&part);
-                })
-            }) {
-                let _ = std::fs::remove_file(&part);
-                a.queue.push(Delivery {
-                    from: from.to_string(),
-                    text: format!(
-                        "[file {} could not be saved ({e}): ask for it again]",
-                        safe_name(name)
-                    ),
-                    thread: None,
-                    msg_id: None,
-                });
-                return;
-            }
-            let path = done;
-            let rel = path
-                .strip_prefix(&a.cwd)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .into_owned();
+        };
+        if let Some(why) = problem {
+            let _ = tokio::fs::remove_file(&part).await;
             a.queue.push(Delivery {
                 from: from.to_string(),
-                text: format!("[file {} at {rel}]", safe_name(name)),
+                text: format!("[file {} {why}: ask for it again]", safe_name(name)),
                 thread: None,
                 msg_id: None,
             });
+            return;
         }
+        let rel = done
+            .strip_prefix(&a.cwd)
+            .unwrap_or(&done)
+            .to_string_lossy()
+            .into_owned();
+        a.queue.push(Delivery {
+            from: from.to_string(),
+            text: format!("[file {} at {rel}]", safe_name(name)),
+            thread: None,
+            msg_id: None,
+        });
     }
 
     /// The hub decided a permission request. Pick the matching option on the prompt that is showing.
@@ -1865,12 +1889,17 @@ impl State {
             return Resp::err("no such agent here");
         };
         let full = a.cwd.join(path);
-        let Ok(data) = std::fs::read(&full) else {
+        // The size is looked at before the file is read, so a huge file is refused without being loaded.
+        match tokio::fs::metadata(&full).await {
+            Ok(m) if m.len() > MAX_FILE_BYTES as u64 => {
+                return Resp::err(format!("over the {} MB limit", MAX_FILE_BYTES / 1_048_576));
+            }
+            Ok(_) => {}
+            Err(_) => return Resp::err("cannot read that file"),
+        }
+        let Ok(data) = tokio::fs::read(&full).await else {
             return Resp::err("cannot read that file");
         };
-        if data.len() > MAX_FILE_BYTES {
-            return Resp::err(format!("over the {} MB limit", MAX_FILE_BYTES / 1_048_576));
-        }
         let name = full
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
