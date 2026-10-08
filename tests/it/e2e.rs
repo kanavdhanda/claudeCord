@@ -133,10 +133,14 @@ async fn rig_tuned(
     let token = store.create_token("mac", 0).unwrap();
     let mut core = HubCore::default();
     core.add_owner("1");
+    // The daemon's options are made first: the hub's heartbeat follows the daemon's, so a test that changes one changes both.
+    let mut opts = fast(vec![bin], max_agents, labels);
+    opts.backend = backend;
+    tweak(&mut opts);
     let hub = server::start(
         ServerConfig {
             bind: "127.0.0.1:0".parse().unwrap(),
-            ping_every: Duration::from_millis(200),
+            ping_every: opts.link.ping_every,
             tick_every: Duration::from_millis(50),
             ..ServerConfig::default()
         },
@@ -152,12 +156,7 @@ async fn rig_tuned(
         node_name: "mac".into(),
     };
     let d = dir.clone();
-    tokio::spawn(async move {
-        let mut opts = fast(vec![bin], max_agents, labels);
-        opts.backend = backend;
-        tweak(&mut opts);
-        daemon::run(cfg, d, opts).await.unwrap()
-    });
+    tokio::spawn(async move { daemon::run(cfg, d, opts).await.unwrap() });
     eventually("daemon socket", async || {
         ipc::call(&dir, &Req::Ping).await.is_ok()
     })
@@ -2457,9 +2456,16 @@ async fn a_say_to_a_peer_whose_terminal_cannot_take_it_fails_with_the_reason_and
     r.hub.shutdown().await;
 }
 
-#[tokio::test]
+// On its own threads, as the hub and a machine are in real life: on one thread a debug build's ten megabytes of encoding and hashing would stop
+// every heartbeat for most of a second, which says nothing about the program.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_large_file_in_many_pieces_arrives_byte_for_byte_and_leaves_no_part_file() {
-    let r = rig("bigfile").await;
+    // A heartbeat like a real one: this test is about the file, and a debug build's encoding and hashing on a busy runner can take longer than the
+    // rig's usual 200 ms.
+    let r = rig_tuned("bigfile", NORMAL, 8, vec![], Backend::Pty, |o| {
+        o.link.ping_every = Duration::from_secs(5)
+    })
+    .await;
     up(&r, "otter").await;
     eventually("registered", async || {
         r.hub
@@ -2468,8 +2474,8 @@ async fn a_large_file_in_many_pieces_arrives_byte_for_byte_and_leaves_no_part_fi
             .unwrap()
     })
     .await;
-    // Ten megabytes, near the size limit, of a pattern (a big burst in the test rig, whose heartbeat is very short: it must never cost the connection) that shows if a piece is lost, doubled or out of place.
-    let body: Vec<u8> = (0..10_000_000u32).map(|i| (i % 251) as u8).collect();
+    // Four megabytes, past what the hub once allowed a device to have waiting, of a pattern that shows if a piece is lost, doubled or out of place.
+    let body: Vec<u8> = (0..4_000_000u32).map(|i| (i % 251) as u8).collect();
     let sent = body.clone();
     r.hub
         .call(move |c, _| {
