@@ -520,6 +520,13 @@ pub enum HubFrame {
         )]
         msg_id: Option<String>,
     },
+    /// A person asked, with a reaction on their message, for a delivery that has already been sent to go through sooner: `"now"` or `"steer"`.
+    #[serde(rename = "priority", rename_all = "camelCase")]
+    Priority {
+        agent_id: String,
+        msg_id: String,
+        mode: String,
+    },
     #[serde(rename = "answer", rename_all = "camelCase")]
     Answer {
         agent_id: String,

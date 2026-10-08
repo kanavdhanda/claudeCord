@@ -6,7 +6,7 @@
 //! one at a time by `State`, so there is nothing to lock. The only other threads are the ones that read each terminal.
 
 use super::config::Config;
-use super::inject::key_bytes;
+use super::inject::{Urgency, key_bytes};
 use super::ipc::{Envelope, Req, Resp, UpOpts, socket_path};
 use super::link::{self, Link, LinkEvent, LinkOpts};
 use super::logs::AgentLog;
@@ -53,6 +53,8 @@ pub fn shot(screen: &str) -> String {
 
 /// Received files are kept this long, and this much of them at most (the oldest go first).
 const FILES_KEEP_MS: i64 = 3 * 24 * 3_600_000;
+/// How long after Escape a steering message waits before it is pasted.
+const STEER_SETTLE_MS: i64 = 300;
 const FILES_KEEP_BYTES: u64 = 200 * 1024 * 1024;
 
 /// Removes the files in `dir` older than `max_age_ms`, then the oldest ones until what is left fits in `max_bytes`.
@@ -253,6 +255,10 @@ struct Agent {
     /// Text to type exactly as given (harness commands), oldest first. Sent one at a time, before ordinary messages.
     raw: VecDeque<String>,
     inflight: Option<Inflight>,
+    /// How urgently the waiting queue wants to go in (raised by a `priority` frame, back to `Queue` once pasted).
+    urgency: Urgency,
+    /// When Escape was pressed for a steering message, so the paste follows after the agent has had a moment to stop.
+    steered_at: Option<i64>,
     status: AgentStatus,
     held: bool,
     asks: u32,
@@ -563,6 +569,17 @@ impl State {
                         thread,
                         msg_id,
                     });
+                }
+            }
+            HubFrame::Priority {
+                agent_id,
+                msg_id,
+                mode,
+            } => {
+                if let (Some(a), Some(u)) = (self.agents.get_mut(&agent_id), Urgency::parse(&mode))
+                    && a.queue.iter().any(|d| d.msg_id.as_ref() == Some(&msg_id))
+                {
+                    a.urgency = a.urgency.max(u);
                 }
             }
             HubFrame::Answer { agent_id, text, .. } => {
@@ -1315,7 +1332,15 @@ impl State {
             {
                 let text = format_deliveries(&a.queue);
                 let before = a.proc.screen_hash();
-                if a.proc.inject(&text, now).is_ok() {
+                // Steering stops what the agent is doing first, then gives it a moment before the paste.
+                if a.urgency == Urgency::Steer && a.steered_at.is_none() {
+                    let _ = a.proc.interrupt(now);
+                    a.steered_at = Some(now);
+                }
+                let settled = a.steered_at.is_none_or(|t| now - t >= STEER_SETTLE_MS);
+                if settled && a.proc.inject_as(&text, now, a.urgency).is_ok() {
+                    a.urgency = Urgency::Queue;
+                    a.steered_at = None;
                     a.log.event(now, "delivered", &text);
                     let ids: Vec<String> = a.queue.drain(..).filter_map(|d| d.msg_id).collect();
                     a.inflight = Some(Inflight {
@@ -2042,6 +2067,8 @@ impl State {
                 queue: intro(&spec).into_iter().collect(),
                 raw: VecDeque::new(),
                 inflight: None,
+                urgency: Urgency::Queue,
+                steered_at: None,
                 status: AgentStatus::Starting,
                 held: false,
                 asks: 0,

@@ -3,7 +3,7 @@
 #![cfg(unix)]
 
 use claudecord::device::inject::Guard as G;
-use claudecord::device::inject::{Guard, Wait, paste_bytes};
+use claudecord::device::inject::{Guard, Urgency, Wait, paste_bytes};
 use claudecord::device::pty::PtyTerminal;
 use std::time::Duration;
 
@@ -54,6 +54,34 @@ fn the_guard_waits_for_the_person_and_for_the_agent() {
     g.on_output(15_100);
     assert_eq!(g.check(16_000, true), Err(Wait::AgentBusy));
     assert_eq!(g.check(19_000, false), Err(Wait::NotForeground));
+}
+
+#[test]
+fn an_urgent_message_does_not_wait_for_the_agent_to_go_quiet() {
+    let mut g = Guard::with_times(0, 2000, 3000);
+    g.on_output(10_000);
+    assert_eq!(
+        g.check_as(10_500, true, Urgency::Queue),
+        Err(Wait::AgentBusy)
+    );
+    assert_eq!(g.check_as(10_500, true, Urgency::Now), Ok(()));
+    assert_eq!(g.check_as(10_500, true, Urgency::Steer), Ok(()));
+    g.on_input(b"hel", 11_000);
+    assert_eq!(
+        g.check_as(11_500, true, Urgency::Now),
+        Err(Wait::PartialLine),
+        "going through does not trample a line a person is typing"
+    );
+    assert_eq!(
+        g.check_as(11_500, true, Urgency::Steer),
+        Ok(()),
+        "steering is the person taking the wheel"
+    );
+    assert_eq!(
+        g.check_as(11_500, false, Urgency::Steer),
+        Err(Wait::NotForeground),
+        "but never into a program that is not the agent"
+    );
 }
 
 #[test]
