@@ -343,3 +343,67 @@ async fn frames_sent_while_the_hub_is_away_arrive_once_and_in_order_when_it_is_b
     assert_eq!(seen, want, "frames were lost, doubled or reordered");
     hub.shutdown().await;
 }
+
+/// A hub that answers every request with `status` and counts the requests. Returns its address and the counter.
+async fn status_server(
+    status: &'static str,
+) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let hits = std::sync::Arc::new(AtomicUsize::new(0));
+    let counted = hits.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut s, _)) = listener.accept().await else {
+                break;
+            };
+            counted.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                let mut buf = [0u8; 2048];
+                let _ = s.read(&mut buf).await;
+                let _ = s
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {status}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        )
+                        .as_bytes(),
+                    )
+                    .await;
+            });
+        }
+    });
+    (format!("http://{addr}"), hits)
+}
+
+#[tokio::test]
+async fn a_hub_without_the_refresh_exchange_is_given_the_login_itself_and_only_asked_once() {
+    use std::sync::atomic::Ordering;
+    let (hub, hits) = status_server("404 Not Found").await;
+    let auth = claudecord::device::link::Auth::new(&hub, "ccn1.login".into(), None);
+    assert_eq!(auth.bearer().await.unwrap(), "ccn1.login");
+    assert_eq!(auth.bearer().await.unwrap(), "ccn1.login");
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "a hub that has no exchange is not asked again"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_refresh_leaves_the_connection_to_say_so_and_an_unreachable_hub_is_an_error() {
+    let (hub, _) = status_server("401 Unauthorized").await;
+    let auth = claudecord::device::link::Auth::new(&hub, "ccn1.login".into(), None);
+    // The login itself is tried next, and it is the hub's refusal of that which the person is told.
+    assert_eq!(auth.bearer().await.unwrap(), "ccn1.login");
+    let (hub, _) = status_server("500 Internal Server Error").await;
+    let auth = claudecord::device::link::Auth::new(&hub, "ccn1.login".into(), None);
+    assert!(auth.bearer().await.unwrap_err().contains("500"));
+    let closed = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        format!("http://{}", l.local_addr().unwrap())
+    };
+    let auth = claudecord::device::link::Auth::new(&closed, "ccn1.login".into(), None);
+    assert!(auth.bearer().await.unwrap_err().contains("cannot reach"));
+}

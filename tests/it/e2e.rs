@@ -2460,6 +2460,7 @@ async fn a_say_to_a_peer_whose_terminal_cannot_take_it_fails_with_the_reason_and
 // every heartbeat for most of a second, which says nothing about the program.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_large_file_in_many_pieces_arrives_byte_for_byte_and_leaves_no_part_file() {
+    let _heavy = super::procs::BIG_BUFFERS.read().await;
     // A heartbeat like a real one: this test is about the file, and a debug build's encoding and hashing on a busy runner can take longer than the
     // rig's usual 200 ms.
     let r = rig_tuned("bigfile", NORMAL, 8, vec![], Backend::Pty, |o| {
@@ -2547,5 +2548,64 @@ async fn threads_answers_in_the_same_call_with_where_the_agent_can_post() {
     .unwrap();
     assert!(resp.ok && resp.msg.contains("main channel"), "{}", resp.msg);
     assert!(started.elapsed() < Duration::from_secs(3));
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_steering_press_stops_the_agent_with_escape_before_the_message_goes_in() {
+    // Busy for a minute, so only a steering order gets a message in.
+    let r = rig_tuned("steer", NORMAL, 8, vec![], Backend::Pty, |o| {
+        o.quiet = (0, 60_000)
+    })
+    .await;
+    up(&r, "otter").await;
+    eventually("registered", async || {
+        r.hub
+            .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    r.hub
+        .call(|c, now| {
+            let r = c
+                .human_message(
+                    &kd(),
+                    "demo",
+                    "stop and look",
+                    &MessageOpts {
+                        reference: Some("c:3"),
+                        ..Default::default()
+                    },
+                    now,
+                )
+                .unwrap();
+            ((), r.1)
+        })
+        .await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(
+        std::fs::read_to_string(r.project.join("fake.log")).is_err(),
+        "nothing goes in while it is busy"
+    );
+    r.hub
+        .call(|c, _| {
+            let mut fx = Vec::new();
+            let _ = c.prioritise(&kd(), "demo", "c:3", "steer", &mut fx);
+            ((), fx)
+        })
+        .await;
+    eventually("the message", async || {
+        std::fs::read(r.project.join("fake.log"))
+            .is_ok_and(|b| String::from_utf8_lossy(&b).contains("stop and look"))
+    })
+    .await;
+    let log = std::fs::read(r.project.join("fake.log")).unwrap();
+    let text = String::from_utf8_lossy(&log);
+    let esc = text.find('\u{1b}').expect("Escape reached the terminal");
+    assert!(
+        esc < text.find("stop and look").unwrap(),
+        "Escape came first: {text:?}"
+    );
     r.hub.shutdown().await;
 }

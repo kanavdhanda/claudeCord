@@ -1432,3 +1432,64 @@ async fn move_files_an_agent_under_another_project_and_says_so() {
     })
     .await;
 }
+
+fn reaction(channel: &str, mid: &str, user: &str, emoji: &str) -> Value {
+    json!({"channel_id": channel, "message_id": mid, "user_id": user, "emoji": {"name": emoji}, "member": {"user": {"id": user, "bot": false}}})
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_delivery_reactions_are_offered_and_only_a_listed_person_can_press_them() {
+    let mut r = rig("reactions").await;
+    register(&r, "otter").await;
+    let ch = channel(&r).await;
+    r.event("MESSAGE_CREATE", message(&ch, "m1", "1", "look at this"));
+    r.frame("the message", |f| deliver_text(f, "look at this"))
+        .await;
+    // The bridge offers both choices on the message while it is waiting.
+    for emoji in ["\u{23E9}", "\u{1F9ED}"] {
+        r.until("the choice offered", |l| {
+            l.reactions
+                .iter()
+                .find(|x| x["message"] == "m1" && x["emoji"] == emoji)
+                .cloned()
+        })
+        .await;
+    }
+    // A person who is not on the project's list presses steer first, then the owner presses "straight through": the hub must act only on
+    // the owner's.
+    r.event(
+        "MESSAGE_REACTION_ADD",
+        reaction(&ch, "m1", "9", "\u{1F9ED}"),
+    );
+    r.event("MESSAGE_REACTION_ADD", reaction(&ch, "m1", "1", "\u{23E9}"));
+    let got = r
+        .frame("a priority order", |f| {
+            matches!(f, HubFrame::Priority { .. })
+        })
+        .await;
+    assert!(
+        matches!(&got, HubFrame::Priority { mode, .. } if mode == "now"),
+        "the stranger's press was acted on: {got:?}"
+    );
+    // Other reactions, and the bridge's own, do nothing.
+    let mut bot = reaction(&ch, "m1", "1", "\u{1F9ED}");
+    bot["member"]["user"]["bot"] = json!(true);
+    r.event("MESSAGE_REACTION_ADD", bot);
+    r.event(
+        "MESSAGE_REACTION_ADD",
+        reaction(&ch, "m1", "1", "\u{1F44D}"),
+    );
+    let more = tokio::time::timeout(Duration::from_millis(700), async {
+        while let Some(e) = r.device.recv().await {
+            if let LinkEvent::Frame(HubFrame::Priority { .. }) = e {
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    assert!(
+        more.is_err() || more == Ok(false),
+        "a bot's or an unknown reaction was acted on"
+    );
+}

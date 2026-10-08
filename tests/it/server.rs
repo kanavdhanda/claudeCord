@@ -346,6 +346,7 @@ async fn a_healthy_device_that_answers_pings_is_kept() {
 // made tiny so the backlog starts after kilobytes whatever the operating system's own buffering would have been.
 #[tokio::test]
 async fn a_device_that_stops_reading_is_cut_off_instead_of_filling_the_hub() {
+    let _heavy = super::procs::BIG_BUFFERS.read().await;
     let dir = tmp("slow");
     let (hub, tokens) = boot(
         Config {
@@ -370,8 +371,8 @@ async fn a_device_that_stops_reading_is_cut_off_instead_of_filling_the_hub() {
             .unwrap()
     })
     .await;
-    // Never read again. Push well past the hub's cap for one device (messages and file pieces have separate caps; this fills the file one).
-    for i in 0..16 {
+    // Never read again. Push well past the hub's cap for one device (messages and file pieces have separate caps; nine files of 3 MB is more than the file cap of about 28 MB in base64).
+    for i in 0..9 {
         hub.call(move |c, _| {
             let (_, fx) = c
                 .send_file(
@@ -1154,6 +1155,8 @@ async fn a_quiet_device_costs_the_hub_kilobytes_not_hundreds() {
     use tokio_tungstenite::connect_async_with_config;
     use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
     const N: usize = 400;
+    // Nothing that holds big buffers runs while memory is being measured.
+    let _alone = super::procs::BIG_BUFFERS.write().await;
     let names: Vec<String> = (0..N).map(|i| format!("m{i}")).collect();
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
     let dir = tmp("quiet");

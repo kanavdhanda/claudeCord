@@ -224,10 +224,30 @@ fn mem_mb() -> u64 {
 
 /// A file arriving in pieces: the open `.part` file and the checksum so far, so each piece is written once and nothing is read back.
 struct Incoming {
+    /// The `.part` file, and when a piece last came, so a transfer whose sender went away is cleaned up (see `drop_abandoned`).
+    part: PathBuf,
+    at: i64,
     next: u64,
     failed: bool,
     file: Option<tokio::fs::File>,
     hasher: sha2::Sha256,
+}
+
+/// How long a transfer may go without a new piece before it is given up on.
+const FILE_ABANDON_MS: i64 = 10 * 60_000;
+
+/// Closes and removes the transfers that have had no piece for `max_age_ms`: the sender went away, and an open file and a half-written `.part`
+/// would otherwise stay for as long as the agent runs. Returns how many.
+fn drop_abandoned(files: &mut HashMap<String, Incoming>, now: i64, max_age_ms: i64) -> usize {
+    let before = files.len();
+    files.retain(|_, f| {
+        let keep = now - f.at <= max_age_ms;
+        if !keep {
+            let _ = std::fs::remove_file(&f.part);
+        }
+        keep
+    });
+    before - files.len()
 }
 
 /// A message pasted into a terminal that the hub has not yet been told was accepted.
@@ -967,6 +987,8 @@ impl State {
             .files
             .entry(transfer_id.to_string())
             .or_insert_with(|| Incoming {
+                part: part.clone(),
+                at: crate::now_ms(),
                 next: 0,
                 failed: false,
                 file: None,
@@ -979,6 +1001,7 @@ impl State {
             }
             return;
         }
+        entry.at = crate::now_ms();
         // A piece out of order (one was lost when the connection dropped, or the start never came) ruins the file: what was written is removed,
         // and the agent is told, so it can say so instead of waiting for a file that will never be whole.
         let decoded = base64::engine::general_purpose::STANDARD.decode(data);
@@ -1208,6 +1231,15 @@ impl State {
     async fn on_tick(&mut self, now: i64) {
         // A `say` that stopped waiting leaves its slot behind: clear them.
         self.says.retain(|_, tx| !tx.is_closed());
+        for a in self.agents.values_mut() {
+            if drop_abandoned(&mut a.files, now, FILE_ABANDON_MS) > 0 {
+                crate::warn!(
+                    "daemon",
+                    "{}: a file stopped arriving part way and was dropped",
+                    a.spec.agent_id
+                );
+            }
+        }
         // Files people sent to the agents pile up in each folder's `.claudecord/files`: old ones are removed, once an hour.
         if now - self.tidied > 3_600_000 {
             self.tidied = now;
@@ -2379,6 +2411,35 @@ fn fingerprint(s: &str) -> u32 {
 #[cfg(test)]
 mod intro_tests {
     use super::*;
+
+    #[test]
+    fn a_transfer_that_stopped_coming_is_removed_with_its_part_file_and_a_live_one_is_kept() {
+        let dir = std::env::temp_dir().join(format!("cc-abandon-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let incoming = |name: &str, at: i64| {
+            let part = dir.join(name);
+            std::fs::write(&part, b"half").unwrap();
+            Incoming {
+                part,
+                at,
+                next: 3,
+                failed: false,
+                file: None,
+                hasher: sha2::Digest::new(),
+            }
+        };
+        let mut files = HashMap::new();
+        files.insert("old".to_string(), incoming("old.part", 1_000));
+        files.insert("live".to_string(), incoming("live.part", 1_000_000 - 5_000));
+        assert_eq!(drop_abandoned(&mut files, 1_000_000, 60_000), 1);
+        assert!(files.contains_key("live") && !files.contains_key("old"));
+        assert!(
+            !dir.join("old.part").exists(),
+            "the half-written file is gone"
+        );
+        assert!(dir.join("live.part").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn every_agent_gets_the_rules_as_its_first_message_whatever_its_program() {

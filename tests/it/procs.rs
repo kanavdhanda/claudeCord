@@ -1,6 +1,10 @@
 //! What this test program itself holds, read from the operating system: open files, threads and resident memory. The capacity and leak
 //! tests compare these before and after, so a leak shows as a number and not as a feeling.
 
+/// Tests that read this process's memory take the write side; tests that hold tens of megabytes at once (big files, a device that stops
+/// reading) take the read side. They run in one process, so without this a heavy test running alongside a measurement shows up as a leak.
+pub static BIG_BUFFERS: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
+
 /// Open file descriptors of this process.
 pub fn fds() -> usize {
     std::fs::read_dir(if cfg!(target_os = "linux") {

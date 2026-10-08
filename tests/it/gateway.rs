@@ -1968,3 +1968,44 @@ async fn the_machine_side_asks_for_an_access_token_once_and_keeps_it_until_it_is
     std::fs::remove_dir_all(&dir).ok();
     gw.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_machines_http_requests_accept_an_access_token_and_refuse_a_forged_or_revoked_one() {
+    let (gw, base) = rig().await;
+    let s = sign_in(&base, "111").await;
+    let login = enroll(&base, &s, "mac").await;
+    let (_, tokens) = refresh(&base, &login).await;
+    let access = tokens["access_token"].as_str().unwrap().to_string();
+    let ask = |t: String| {
+        let url = format!("{base}/api/device/project/demo");
+        async move {
+            client()
+                .get(url)
+                .bearer_auth(t)
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        }
+    };
+    assert_eq!(ask(access.clone()).await, 200, "an access token opens it");
+    assert_eq!(
+        ask(format!("{access}x")).await,
+        401,
+        "a changed one does not"
+    );
+    post_json(
+        &base,
+        "/api/v1/machines/revoke",
+        Some(&s),
+        json!({"node": "mac"}),
+    )
+    .await;
+    assert_eq!(
+        ask(access).await,
+        401,
+        "and a revoked machine's stops at once"
+    );
+    gw.shutdown().await;
+}
