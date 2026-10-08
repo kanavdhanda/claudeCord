@@ -2460,6 +2460,7 @@ async fn a_say_to_a_peer_whose_terminal_cannot_take_it_fails_with_the_reason_and
 // every heartbeat for most of a second, which says nothing about the program.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_large_file_in_many_pieces_arrives_byte_for_byte_and_leaves_no_part_file() {
+    let _heavy = super::procs::BIG_BUFFERS.read().await;
     // A heartbeat like a real one: this test is about the file, and a debug build's encoding and hashing on a busy runner can take longer than the
     // rig's usual 200 ms.
     let r = rig_tuned("bigfile", NORMAL, 8, vec![], Backend::Pty, |o| {
