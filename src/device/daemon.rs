@@ -53,6 +53,35 @@ pub fn shot(screen: &str) -> String {
 
 /// Received files are kept this long, and this much of them at most (the oldest go first).
 const FILES_KEEP_MS: i64 = 3 * 24 * 3_600_000;
+/// How long `claudecord say` waits for the hub to confirm that the agents it named have the message.
+const SAY_WAIT: Duration = Duration::from_secs(5);
+
+/// What `claudecord say` prints, from what the hub said (or did not say in time).
+fn say_answer(
+    got: Result<
+        Result<(String, Option<String>), oneshot::error::RecvError>,
+        tokio::time::error::Elapsed,
+    >,
+) -> Resp {
+    match got {
+        Ok(Ok((state, detail))) => match state.as_str() {
+            "delivered" => Resp::ok("delivered: they have it"),
+            "pending" => Resp::ok(format!(
+                "pending: {} cannot take it yet (offline or on hold); it will be delivered as soon as it can",
+                detail.unwrap_or_else(|| "the agent".into())
+            )),
+            "failed" => Resp::err(format!(
+                "message could not be sent: {}",
+                detail.unwrap_or_else(|| "the hub refused it".into())
+            )),
+            _ => Resp::ok("sent"),
+        },
+        _ => Resp::ok(
+            "pending: sent, but not yet confirmed as received; it will be delivered when the agent is ready",
+        ),
+    }
+}
+
 /// How long after Escape a steering message waits before it is pasted.
 const STEER_SETTLE_MS: i64 = 300;
 const FILES_KEEP_BYTES: u64 = 200 * 1024 * 1024;
@@ -308,6 +337,11 @@ struct State {
     up: bool,
     opts: Options,
     quit: bool,
+    /// The `say`s waiting for the hub's word on whether the agents they named have the message, by `say_id`.
+    says: HashMap<String, oneshot::Sender<(String, Option<String>)>>,
+    say_seq: u64,
+    /// Set by `handle` for a `say`: the answer to the caller comes from this, later, and the daemon's loop carries on meanwhile.
+    defer: Option<oneshot::Receiver<(String, Option<String>)>>,
 }
 
 /// Runs the daemon until told to shut down. Listens on the socket in `dir`, connects to the hub from `cfg`.
@@ -360,6 +394,9 @@ pub async fn run(cfg: Config, dir: PathBuf, opts: Options) -> std::io::Result<()
         up: false,
         opts: opts.clone(),
         quit: false,
+        says: HashMap::new(),
+        say_seq: 0,
+        defer: None,
     };
     let mut tick = tokio::time::interval(opts.tick);
     let mut stop = Box::pin(crate::task::shutdown_signal());
@@ -389,7 +426,15 @@ pub async fn run(cfg: Config, dir: PathBuf, opts: Options) -> std::io::Result<()
                 let Some((env, reply)) = call else { break };
                 let resp = crate::task::guarded("handling a command", st.handle(env.req, env.key.as_deref())).await
                     .unwrap_or_else(|| Resp::err("the daemon hit an internal error on that command; see its log"));
-                let _ = reply.send(resp);
+                match st.defer.take() {
+                    // A `say` that named agents: answered when the hub says they have it, or after a few seconds, without holding the loop.
+                    Some(receipt) if resp.ok => {
+                        tokio::spawn(async move {
+                            let _ = reply.send(say_answer(tokio::time::timeout(SAY_WAIT, receipt).await));
+                        });
+                    }
+                    _ => { let _ = reply.send(resp); }
+                }
             }
             _ = tick.tick() => { crate::task::guarded("looking at the terminals", st.on_tick(crate::now_ms())).await; }
             _ = &mut stop => {
@@ -587,6 +632,16 @@ impl State {
                 {
                     a.urgency = a.urgency.max(u);
                     a.urgent_id = Some(msg_id);
+                }
+            }
+            HubFrame::SayReceipt {
+                say_id,
+                state,
+                detail,
+                ..
+            } => {
+                if let Some(tx) = self.says.remove(&say_id) {
+                    let _ = tx.send((state, detail));
                 }
             }
             HubFrame::Answer { agent_id, text, .. } => {
@@ -1118,6 +1173,8 @@ impl State {
     /// Looks at every terminal: reports ended agents, status changes, limits and prompts, pastes waiting messages when it
     /// is safe, and says when a pasted message seems to have been taken up.
     async fn on_tick(&mut self, now: i64) {
+        // A `say` that stopped waiting leaves its slot behind: clear them.
+        self.says.retain(|_, tx| !tx.is_closed());
         // Files people sent to the agents pile up in each folder's `.claudecord/files`: old ones are removed, once an hour.
         if now - self.tidied > 3_600_000 {
             self.tidied = now;
@@ -1589,12 +1646,24 @@ impl State {
                 text,
                 thread,
             } => {
-                self.verb(&agent, |id| NodeFrame::AgentSay {
-                    agent_id: id,
-                    text,
-                    thread,
-                })
-                .await
+                self.say_seq += 1;
+                let say_id = format!("s{}-{:x}", self.say_seq, fingerprint(&text));
+                let (tx, rx) = oneshot::channel();
+                self.says.insert(say_id.clone(), tx);
+                let resp = self
+                    .verb(&agent, |id| NodeFrame::AgentSay {
+                        agent_id: id,
+                        text,
+                        thread,
+                        say_id: Some(say_id.clone()),
+                    })
+                    .await;
+                if resp.ok {
+                    self.defer = Some(rx);
+                } else {
+                    self.says.remove(&say_id);
+                }
+                resp
             }
             Req::Assign {
                 agent,

@@ -238,6 +238,7 @@ async fn an_agents_words_appear_under_its_own_name_in_a_channel_and_in_a_thread(
             agent_id: "demo/otter".into(),
             text: "hello team".into(),
             thread: None,
+            say_id: None,
         })
         .await;
     let post = r
@@ -255,6 +256,7 @@ async fn an_agents_words_appear_under_its_own_name_in_a_channel_and_in_a_thread(
             agent_id: "demo/otter".into(),
             text: "in a thread".into(),
             thread: Some("T1".into()),
+            say_id: None,
         })
         .await;
     let post = r
@@ -682,6 +684,7 @@ async fn a_long_reply_is_attached_as_a_file_instead_of_being_cut() {
             agent_id: "demo/otter".into(),
             text: long,
             thread: None,
+            say_id: None,
         })
         .await;
     let post = r
@@ -943,6 +946,7 @@ async fn an_agent_can_really_tag_a_person_and_a_reply_to_an_agents_message_goes_
             agent_id: "demo/heron".into(),
             text: "@user1 the build is done".into(),
             thread: None,
+            say_id: None,
         })
         .await;
     let post = r
@@ -974,6 +978,7 @@ async fn an_agent_can_really_tag_a_person_and_a_reply_to_an_agents_message_goes_
             agent_id: "demo/heron".into(),
             text: "@otter please check".into(),
             thread: None,
+            say_id: None,
         })
         .await;
     let ping = r

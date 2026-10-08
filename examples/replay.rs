@@ -210,6 +210,7 @@ fn claudecord() -> BTreeMap<String, Vec<String>> {
                     agent_id: format!("demo/{from}"),
                     text: t.into(),
                     thread: None,
+                    say_id: None,
                 },
                 now,
             ),

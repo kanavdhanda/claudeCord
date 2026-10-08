@@ -52,6 +52,14 @@ unicode-width = "0.2.2"
 lto = "thin"
 strip = true
 
+# The hub's Docker image: built for size (about 11 MB instead of 19). Panics are still caught (no `panic = "abort"`): the hub and the daemon rely on
+# that to lose one step instead of the whole process.
+[profile.release-hub]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+opt-level = "s"
+
 # Debug builds keep line numbers for panics but skip full debug info: much faster to link, which matters most on Windows CI.
 [profile.dev]
 debug = "line-tables-only"

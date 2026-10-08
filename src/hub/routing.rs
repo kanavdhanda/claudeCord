@@ -142,6 +142,8 @@ impl HubCore {
         self.seq += 1;
         let msg_id = format!("m{}", self.seq);
         let last = items.len() - 1;
+        // A message from another agent goes straight into the terminal: nobody is waiting at a keyboard, an agent is waiting for the answer.
+        let straight_in = items.iter().any(|q| q.say.is_some());
         let mut pending = Pending {
             project: a.project.clone(),
             agent_id: a.agent_id.clone(),
@@ -176,6 +178,17 @@ impl HubCore {
                 fx,
             );
         }
+        if straight_in {
+            self.send_to(
+                &a,
+                HubFrame::Priority {
+                    agent_id: a.agent_id.clone(),
+                    msg_id: msg_id.clone(),
+                    mode: "now".into(),
+                },
+                fx,
+            );
+        }
         // Everything stays pending until the device says the agent started on it, so a session that dies first can
         // be given it again.
         self.pending.insert(msg_id, pending);
@@ -198,6 +211,18 @@ impl HubCore {
             }
             let p = self.pending.remove(id).expect("checked above");
             self.metrics.accepted((now - p.at) as f64, now);
+            // The agent that said it is told once everyone it named has it in their terminal.
+            for (sender, say_id) in p.items.iter().filter_map(|q| q.say.clone()) {
+                let others = self
+                    .pending
+                    .values()
+                    .flat_map(|x| x.items.iter())
+                    .chain(self.queues.values().flatten())
+                    .any(|q| q.say.as_ref().is_some_and(|(_, i)| *i == say_id));
+                if let (false, Some(s)) = (others, self.agents.get(&sender).cloned()) {
+                    self.say_receipt(&s, Some(&say_id), "delivered", None, fx);
+                }
+            }
             for reference in p.references {
                 fx.push(Effect::Chat(super::effects::Chat::Confirm {
                     project: p.project.clone(),
@@ -393,6 +418,7 @@ impl HubCore {
                     handoff: None,
                     wake: true,
                     at: now,
+                    say: None,
                 },
             );
             if !self.conns.contains_key(&t.node_name) {
@@ -491,6 +517,7 @@ impl HubCore {
         from: &AgentRow,
         text: &str,
         thread: Option<String>,
+        say_id: Option<String>,
         now: i64,
         fx: &mut Vec<Effect>,
     ) {
@@ -501,6 +528,7 @@ impl HubCore {
             .cloned()
             .collect();
         if peers.is_empty() {
+            self.say_receipt(from, say_id.as_deref(), "posted", None, fx);
             return;
         }
         let mentioned = self.mentioned(&from.project, text, Some(&from.agent_id));
@@ -518,12 +546,27 @@ impl HubCore {
             );
         }
         if n >= self.streak_limit {
+            let (state, why) = if mentioned.is_empty() {
+                ("posted", None)
+            } else {
+                (
+                    "failed",
+                    Some(
+                        "forwarding is paused after many messages without a reply; a person has to reply first",
+                    ),
+                )
+            };
+            self.say_receipt(from, say_id.as_deref(), state, why, fx);
             return;
         }
         // Only naming someone sends a message to an agent. A plain say is for the chat, and nobody else's turn is spent on it.
         let wake = !mentioned.is_empty();
         let targets: Vec<AgentRow> = mentioned;
         let _ = peers;
+        if targets.is_empty() {
+            self.say_receipt(from, say_id.as_deref(), "posted", None, fx);
+        }
+        let mut waiting: Vec<String> = Vec::new();
         for t in targets {
             self.enqueue(
                 &t.agent_id,
@@ -536,10 +579,46 @@ impl HubCore {
                     handoff: None,
                     wake,
                     at: now,
+                    say: say_id.clone().map(|id| (from.agent_id.clone(), id)),
                 },
             );
             self.flush(&t.agent_id, now, fx);
+            // Still on the hub after the flush: the agent is offline or on hold, so it will get this when it can.
+            if self.queues.get(&t.agent_id).is_some_and(|q| !q.is_empty()) {
+                waiting.push(t.name.clone());
+            }
         }
+        if !waiting.is_empty() {
+            self.say_receipt(
+                from,
+                say_id.as_deref(),
+                "pending",
+                Some(&waiting.join(", ")),
+                fx,
+            );
+        }
+    }
+
+    /// Tells the agent that said something how it went (see `HubFrame::SayReceipt`). Nothing to say when it did not ask.
+    pub(super) fn say_receipt(
+        &self,
+        to: &AgentRow,
+        say_id: Option<&str>,
+        state: &str,
+        detail: Option<&str>,
+        fx: &mut Vec<Effect>,
+    ) {
+        let Some(say_id) = say_id else { return };
+        self.send_to(
+            to,
+            HubFrame::SayReceipt {
+                agent_id: to.agent_id.clone(),
+                say_id: say_id.to_string(),
+                state: state.to_string(),
+                detail: detail.map(String::from),
+            },
+            fx,
+        );
     }
 }
 
@@ -571,6 +650,7 @@ impl HubCore {
                 handoff: None,
                 wake: true,
                 at: now,
+                say: None,
             });
         self.flush(agent_id, now, fx);
     }

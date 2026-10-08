@@ -297,6 +297,7 @@ async fn frames_sent_while_the_hub_is_away_arrive_once_and_in_order_when_it_is_b
             agent_id: "p/otter".into(),
             text: format!("while away {i}"),
             thread: None,
+            say_id: None,
         })
         .await;
     }

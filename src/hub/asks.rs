@@ -175,6 +175,7 @@ impl HubCore {
                     handoff: None,
                     wake: true,
                     at: now,
+                    say: None,
                 },
             );
         }

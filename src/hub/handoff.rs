@@ -290,6 +290,7 @@ impl HubCore {
                     handoff: source.map(|h| h.seq),
                     wake: true,
                     at: now,
+                    say: None,
                 },
             );
         }
@@ -355,6 +356,7 @@ impl HubCore {
                 handoff: seq,
                 wake: true,
                 at: now,
+                say: None,
             },
         );
         self.flush(&to.agent_id, now, &mut fx);

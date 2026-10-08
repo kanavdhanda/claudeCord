@@ -81,6 +81,7 @@ impl HubCore {
                 handoff: None,
                 wake,
                 at: now,
+                say: None,
             },
         );
         self.flush(&a.agent_id, now, fx);
@@ -180,6 +181,7 @@ impl HubCore {
                 handoff: None,
                 wake: true,
                 at: now,
+                say: None,
             },
         );
         self.flush(&to.agent_id, now, fx);

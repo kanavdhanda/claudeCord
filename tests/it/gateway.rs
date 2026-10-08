@@ -723,6 +723,7 @@ async fn an_agents_words_reach_the_channel_chosen_in_the_chosen_server() {
             agent_id: "alpha/otter".into(),
             text: "hello from otter".into(),
             thread: None,
+            say_id: None,
         },
     ] {
         ws.send(Message::Text(serde_json::to_string(&f).unwrap().into()))
@@ -799,6 +800,7 @@ async fn an_agents_words_reach_the_channel_chosen_in_the_chosen_server() {
             agent_id: "alpha/otter".into(),
             text: "now in beta".into(),
             thread: None,
+            say_id: None,
         })
         .unwrap()
         .into(),

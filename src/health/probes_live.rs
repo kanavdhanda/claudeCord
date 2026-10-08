@@ -1009,6 +1009,7 @@ fn discord_probe() -> Probe {
             agent_id: "demo/otter".into(),
             text: "hello team".into(),
             thread: None,
+            say_id: None,
         })
         .await;
         ensure!(

@@ -156,6 +156,7 @@ fn saving_only_what_changed_always_rebuilds_exactly_the_state_in_memory() {
                         agent_id: format!("{p}/{n}"),
                         text: format!("note {step} @{}", names[rng.below(4)]),
                         thread: None,
+                        say_id: None,
                     },
                     now,
                 );

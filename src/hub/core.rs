@@ -38,6 +38,9 @@ pub(super) struct Queued {
     pub wake: bool,
     /// When it was queued, so an informing item that waits too long is still delivered.
     pub at: i64,
+    /// Set when an agent's `say` put this here: (the sender, its `say_id`). The sender is told once every agent it named has the message.
+    #[serde(default)]
+    pub say: Option<(String, String)>,
 }
 
 /// How long informing-only items may wait for a reason to wake the agent before they are delivered anyway.
@@ -745,7 +748,8 @@ impl HubCore {
                 agent_id,
                 text,
                 thread,
-            } => self.on_say(&agent_id, &text, thread, now, &mut fx),
+                say_id,
+            } => self.on_say(&agent_id, &text, thread, say_id, now, &mut fx),
             NodeFrame::AgentAsk {
                 agent_id,
                 ask_id,
@@ -976,6 +980,7 @@ impl HubCore {
         agent_id: &str,
         text: &str,
         thread: Option<String>,
+        say_id: Option<String>,
         now: i64,
         fx: &mut Vec<Effect>,
     ) {
@@ -1026,7 +1031,7 @@ impl HubCore {
             text: clean.clone(),
             thread: thread.clone(),
         }));
-        self.route_agent_message(&a, &clean, thread, now, fx);
+        self.route_agent_message(&a, &clean, thread, say_id, now, fx);
     }
 
     /// Whether any word in an action looks like a path the project must never expose.

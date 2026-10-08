@@ -185,6 +185,13 @@ pub enum NodeFrame {
             skip_serializing_if = "Option::is_none"
         )]
         thread: Option<String>,
+        /// Asks the hub for a `say.receipt` about this message, so `claudecord say` can tell the agent whether the peer it named has it.
+        #[serde(
+            default,
+            deserialize_with = "opt::de",
+            skip_serializing_if = "Option::is_none"
+        )]
+        say_id: Option<String>,
     },
     #[serde(rename = "agent.ask", rename_all = "camelCase")]
     AgentAsk {
@@ -526,6 +533,20 @@ pub enum HubFrame {
         agent_id: String,
         msg_id: String,
         mode: String,
+    },
+    /// What became of a `say`: `posted` (in the chat, nobody to wait for), `delivered` (every agent it named has it in its terminal), `pending`
+    /// (one of them is offline or on hold, it will get it when it can) or `failed` (the hub could not send it, `detail` says why).
+    #[serde(rename = "say.receipt", rename_all = "camelCase")]
+    SayReceipt {
+        agent_id: String,
+        say_id: String,
+        state: String,
+        #[serde(
+            default,
+            deserialize_with = "opt::de",
+            skip_serializing_if = "Option::is_none"
+        )]
+        detail: Option<String>,
     },
     #[serde(rename = "answer", rename_all = "camelCase")]
     Answer {

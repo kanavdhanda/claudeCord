@@ -136,6 +136,7 @@ async fn person_to_agent_and_back() {
                                 agent_id,
                                 text: format!("re msg{i}"),
                                 thread: None,
+                                say_id: None,
                             })
                             .await;
                         }

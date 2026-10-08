@@ -2319,3 +2319,76 @@ async fn messages_waiting_in_different_threads_are_pasted_one_thread_at_a_time()
         "the second thread was mixed in: {log}"
     );
 }
+
+#[tokio::test]
+async fn a_say_to_a_peer_returns_delivered_once_the_peer_has_it_and_a_plain_say_returns_at_once() {
+    let r = rig("sayreceipt").await;
+    let key = up(&r, "otter").await;
+    // The peer works in a folder of its own: two agents never share one.
+    let other = r.project.parent().unwrap().join("demo2");
+    std::fs::create_dir_all(&other).unwrap();
+    let resp = ipc::call(
+        &r.dir,
+        &Req::Up {
+            project: "demo".into(),
+            name: Some("heron".into()),
+            adapter: "claude".into(),
+            model: None,
+            role: None,
+            cwd: other.to_string_lossy().into(),
+            policy: "autonomous".into(),
+            rows: 24,
+            cols: 80,
+            opts: UpOpts::default(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(resp.ok, "{}", resp.msg);
+    eventually("both registered", async || {
+        r.hub
+            .call(|c, _| {
+                (
+                    c.agent("demo/otter").is_some() && c.agent("demo/heron").is_some(),
+                    vec![],
+                )
+            })
+            .await
+            .unwrap()
+    })
+    .await;
+    let say = |text: &str| {
+        let (dir, key, text) = (r.dir.clone(), key.clone(), text.to_string());
+        async move {
+            let started = std::time::Instant::now();
+            let resp = ipc::call_as(
+                &dir,
+                Some(&key),
+                &Req::Say {
+                    agent: "demo/otter".into(),
+                    text,
+                    thread: None,
+                },
+            )
+            .await
+            .unwrap();
+            (resp, started.elapsed())
+        }
+    };
+    let (plain, took) = say("thinking aloud").await;
+    assert!(plain.ok && plain.msg == "sent", "{}", plain.msg);
+    assert!(took < Duration::from_secs(3), "a plain say waited {took:?}");
+    let (named, _) = say("@heron please look at this").await;
+    assert!(
+        named.ok && named.msg.starts_with("delivered"),
+        "{}",
+        named.msg
+    );
+    // It really is in the peer's terminal by then.
+    assert!(
+        std::fs::read_to_string(other.join("fake.log"))
+            .unwrap_or_default()
+            .contains("please look at this")
+    );
+    r.hub.shutdown().await;
+}

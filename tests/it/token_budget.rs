@@ -116,6 +116,7 @@ fn coordination_overhead_stays_within_budget_on_a_sample_chat() {
                 agent_id: format!("p/{who}"),
                 text: text.into(),
                 thread: Some("T1".into()),
+                say_id: None,
             },
             T0,
         ))

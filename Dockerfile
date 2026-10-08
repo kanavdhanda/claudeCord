@@ -17,8 +17,8 @@ COPY web/dist ./web/dist
 # The cache mounts keep downloaded crates and compiled dependencies between builds on the same machine.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked --bin claudecord-hub \
-    && cp target/release/claudecord-hub /claudecord-hub \
+    cargo build --profile release-hub --locked --bin claudecord-hub \
+    && cp target/release-hub/claudecord-hub /claudecord-hub \
     && mkdir /data
 
 # glibc and the C runtime library, CA certificates, no shell and no package manager.

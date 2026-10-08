@@ -178,7 +178,8 @@ impl HubCore {
                 handoff: None,
                 wake: true,
                 at: now,
-            },
+say: None,
+},
         );
         self.flush(&id, now, &mut fx);
         Self::refresh(from, &mut fx);
