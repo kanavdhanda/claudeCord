@@ -1,4 +1,4 @@
-//! A stand-in Discord for tests and for `claudecord selftest`: the small part of Discord's REST API and live gateway that the
+//! A stand-in Discord for tests and for `claudecord-hub selftest`: the small part of Discord's REST API and live gateway that the
 //! bridge uses, kept in memory. It records everything the bridge asks it to do (in `Log`) and lets a test inject gateway events.
 //! It is not Discord and checks nothing about permissions, rate limits or message formats beyond what the bridge needs.
 

@@ -12,7 +12,7 @@
 # Needs a release build (cargo build --release). On one address a machine runs out of local ports at about 16,000 connections.
 set -euo pipefail
 mode=${1:?mode}; n=${2:?machines}; agents=${3:-3}; secs=${4:-60}; every=${5:-5}
-bin=${CLAUDECORD_BIN:-target/release/claudecord}
+bin=${CLAUDECORD_HUB_BIN:-target/release/claudecord-hub}
 here=$(cd "$(dirname "$0")" && pwd)
 work=$(mktemp -d /tmp/ccl.XXXX); hub=""; sampler=""
 cleanup() { [ -n "$sampler" ] && kill "$sampler" 2>/dev/null || true; [ -n "$hub" ] && kill "$hub" 2>/dev/null || true; wait 2>/dev/null || true; rm -rf "$work"; }

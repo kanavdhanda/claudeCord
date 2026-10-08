@@ -112,7 +112,12 @@ pub fn features() -> Vec<Feature> {
         },
         Feature {
             name: "rate limits and pairing codes",
-            covers: &["security/limits", "security/codes", "security/mod"],
+            covers: &[
+                "security/limits",
+                "security/codes",
+                "security/jwt",
+                "security/mod",
+            ],
             probe: limits,
         },
         Feature {
@@ -198,7 +203,7 @@ pub fn features() -> Vec<Feature> {
         },
         Feature {
             name: "crate helpers",
-            covers: &["lib", "health", "main"],
+            covers: &["lib", "health", "main", "bin/claudecord-hub"],
             probe: helpers,
         },
     ]

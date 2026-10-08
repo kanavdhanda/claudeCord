@@ -1,4 +1,4 @@
-//! `claudecord export`: writes the conversation history as an Obsidian vault. Run it once, or with `--watch` to keep the
+//! `claudecord-hub export`: writes the conversation history as an Obsidian vault. Run it once, or with `--watch` to keep the
 //! vault up to date while the hub runs. It reads the hub's data folder (the database and the compressed history files, from
 //! the bucket if that is where they went) and never changes it.
 

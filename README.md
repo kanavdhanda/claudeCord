@@ -35,7 +35,7 @@ You do not run a server unless you want to (see "Run your own" below).
 2. **Run `claudecord`** (or `npx claudecord`) on a machine. The first time, it opens your browser: sign in with Discord and approve the machine.
 3. **Add a project** on the dashboard. A wizard takes you through it: save a Discord bot token (checked with Discord, stored encrypted, never shown
    again), pick a server and a channel (or make a new one), and name the project and its first agent. One bot can serve any number of servers.
-4. **Start an agent** in a project folder with `claudecord start`: it opens a page on the dashboard where you choose the project, the agent's name, its program (or a saved startup command) and its role, and press Start. The hub then has your machine start the agent in that folder.
+4. **Start an agent** in a project folder with `claudecord`: it opens a page on the dashboard where you choose the project, the agent's name, its program (or a saved startup command) and its role, and press Start. The hub then has your machine start the agent in that folder.
    A channel in Discord now carries the agent, which posts under its own name. Type there and the agent hears you. Leave with the usual tmux
    detach (Ctrl-b d); the agent keeps running. `claudecord attach NAME` returns to it. Where tmux is not installed (native Windows) a built-in
    terminal is used instead, and Ctrl-] leaves it.
@@ -46,20 +46,20 @@ Discord threads).
 
 ### Run your own
 
-    claudecord serve --data claudecord-data --public-url https://claudecord.example.com --client-id DISCORD_APP_ID --secret-file secret.txt
+    claudecord-hub serve --data claudecord-data --public-url https://claudecord.example.com --client-id DISCORD_APP_ID --secret-file secret.txt
 
 With Docker (built on the server itself, nothing is pulled from a registry): `deploy/compose.yml` has the steps; put nginx or Caddy in front for TLS. `deploy/baremetal/bootstrap.sh` does it without Docker on a fresh Ubuntu or Debian machine (service, TLS, firewall). The Discord application given here only signs people
 in; their bots are saved on the dashboard, encrypted with a key the program makes in the data folder (**back up the file `kek`**). To look around
-on your own computer with no Discord at all: `claudecord serve --demo --public-url http://127.0.0.1:8787` (a stand-in Discord and pre-filled demo data), then `cd web && npm run dev`. `--dev` alone keeps only the made-up sign-in: bots must be real, and nothing is pre-filled.
+on your own computer with no Discord at all: `claudecord-hub serve --demo --public-url http://127.0.0.1:8787` (a stand-in Discord and pre-filled demo data), then `cd web && npm run dev`. `--dev` alone keeps only the made-up sign-in: bots must be real, and nothing is pre-filled.
 
 `claudecord` on its own lists the agents running here (the one in this folder highlighted) and a "+ new agent" line; Enter takes the highlighted line. A new agent opens the dashboard, where you choose the project (new or existing), the agent's name, program and role; nothing is asked in the terminal. `claudecord stop` lists what is running, asks, then stops everything here (every agent, and the connection to the hub; `-y` skips the question); `claudecord stop NAME` stops one. `claudecord restart` starts every
 agent's program again with the same name and folder (`claudecord restart NAME` for one).
 
-**What a machine needs.** `tmux` (it keeps each agent running when you close the window; not needed on Windows) and the program of the agent you start (`claude`, `codex` or `agy`). Before anything is asked, `claudecord start` checks both and, if something is missing, lists what and how to install it, then stops. A command of your own after `--` skips the agent-program check.
+**What a machine needs.** `tmux` (it keeps each agent running when you close the window; not needed on Windows) and the program of the agent you start (`claude`, `codex` or `agy`). Before anything is asked, `claudecord` checks both and, if something is missing, lists what and how to install it, then stops. A command of your own after `--` skips the agent-program check.
 
-**Updates.** The hub knows the newest version. A machine that connects running an older one is told, and the next `claudecord` or `claudecord start` prints one line with the command that updates it the way it was installed (`uv tool upgrade claudecord`, `npm i -g claudecord@latest`, `pip install -U claudecord`).
+**Updates.** The hub knows the newest version. A machine that connects running an older one is told, and the next `claudecord` or `claudecord` prints one line with the command that updates it the way it was installed (`uv tool upgrade claudecord`, `npm i -g claudecord@latest`, `pip install -U claudecord`).
 
-**Agents are started by the hub.** Only the hub (the dashboard's Start and Spawn buttons, and `/spawn` in Discord) can start an agent: a machine's own `claudecord` never does, so nobody can make a mess of what the hub knows. `claudecord start` only asks: it opens the page and waits, and when you press Start the hub asks this machine to start the agent in the folder you ran it from. If something stops it (the program is not installed, the name is taken), the page says what.
+**Agents are started by the hub.** Only the hub (the dashboard's Start and Spawn buttons, and `/spawn` in Discord) can start an agent: a machine's own `claudecord` never does, so nobody can make a mess of what the hub knows. `claudecord` only asks: it opens the page and waits, and when you press Start the hub asks this machine to start the agent in the folder you ran it from. If something stops it (the program is not installed, the name is taken), the page says what.
 
 **Saved startup commands.** Any shell line can be saved under a name on the dashboard (Startup commands), such as setup steps followed by the launch: `source venv/bin/activate && claude --model opus`, and which program it starts. They are kept with your account on the hub, shown there, and chosen in the Program list of the start page, on the Spawn button, or as `command:` in Discord's `/spawn` (names autocomplete). The hub sends the line with the request to start; the machine runs it in your own login shell, **only if its owner allowed that** with `claudecord settings custom-commands on` (off by default, so a stolen dashboard login cannot run code on machines that never agreed). Not available on Windows.
 
@@ -67,7 +67,7 @@ agent's program again with the same name and folder (`claudecord restart NAME` f
 
 **Files between agents.** `claudecord send FILE` puts a file in the chat; `claudecord send FILE --to NAME` sends it to another agent. It lands in that agent's `.claudecord/files/<project>` folder, the agent is told where, and the chat shows it in the thread of the two of them. Agents learn this from `claudecord guide`.
 
-`claudecord start` does exactly what you ask and nothing more. `--project`, `--name`, `--adapter` and `--role` only give the page something to start with. These choices belong to your machine alone, and every one is a flag you choose:
+`claudecord` does exactly what you ask and nothing more. `--project`, `--name`, `--adapter` and `--role` only give the page something to start with. These choices belong to your machine alone, and every one is a flag you choose:
 
 | Flag | Does |
 |---|---|
@@ -76,6 +76,12 @@ agent's program again with the same name and folder (`claudecord restart NAME` f
 | `--restart N` | starts the agent again up to N times if it dies (default: never) |
 
 Start-up dialogs (such as a trust question) are never answered for you: they reach the chat as a permission request.
+
+## Two programs, and how a machine logs in
+
+`claudecord` is for a machine and its agents (`claudecord login --hub ADDRESS` is the only place a hub's address is given). `claudecord-hub` is for whoever runs the hub (`serve`, `storage`, `export`, `token`, `web-token`, `uptime`, `probe`, `selftest`); a machine never needs it.
+
+A machine's login is a **refresh token**, kept as a hash on the hub and in the machine's private config. What goes on each connection is a short-lived **access token** (a JWT, 15 minutes) the hub gives in exchange at `/api/device/refresh`. Each exchange also replaces the refresh token; the old one works for another minute, so a lost answer does not lock the machine out. Revoking a machine on the dashboard ends its access token at once. Access tokens are signed with a key made when the hub starts, so a hub restart only makes machines ask again.
 
 ## Agents cannot act as each other
 
@@ -178,8 +184,8 @@ program is not installed or whose folder is gone, immediately and with the reaso
 The hub records its own state and the Discord bridge's (a crash counts as down from the last heartbeat), answers `/healthz` (the
 process is there) and `/readyz` (it can do its job, including Discord), and serves Prometheus text at `/metrics`.
 
-    claudecord uptime --target 99.9       # availability over 1 hour, 1 day, 1 week, 1 month, and the error budget left
-    claudecord probe https://hub.example.com --name eu    # on ANOTHER machine: an outside check with its own record
+    claudecord-hub uptime --target 99.9       # availability over 1 hour, 1 day, 1 week, 1 month, and the error budget left
+    claudecord-hub probe https://hub.example.com --name eu    # on ANOTHER machine: an outside check with its own record
 
 A scheduled GitHub Actions check (`.github/workflows/uptime.yml`, set the repository variable `HUB_URL`) is the free safety net.
 `deploy/baremetal/` has a Caddyfile (automatic TLS), a systemd unit, and `bootstrap.sh`, which sets up a hub on a fresh Ubuntu or Debian machine in one command (not yet tried on a real server).
@@ -214,17 +220,17 @@ database stays small and fast however many messages there are.
 The last two weeks of conversation stay in the hub's database. Older history is compressed into files and moved to an
 S3-compatible bucket (Oracle Cloud's free tier first, Cloudflare R2 later), so a small free server never fills its disk:
 
-    claudecord storage oracle --namespace NS --region us-ashburn-1 --bucket claudecord-history --key-id KEY --secret-file secret.txt
-    claudecord storage test
-    claudecord storage move r2.json         # later: copy everything to another provider, verify, switch
-    claudecord storage backup               # the hub also copies the live database to the bucket every few hours
-    claudecord storage restore              # on a host that lost its disk: bring the database back
+    claudecord-hub storage oracle --namespace NS --region us-ashburn-1 --bucket claudecord-history --key-id KEY --secret-file secret.txt
+    claudecord-hub storage test
+    claudecord-hub storage move r2.json         # later: copy everything to another provider, verify, switch
+    claudecord-hub storage backup               # the hub also copies the live database to the bucket every few hours
+    claudecord-hub storage restore              # on a host that lost its disk: bring the database back
 
 To read and graph the whole conversation in Obsidian (messages, plans, questions and answers, permission decisions, tasks and the agents' reports),
 open a folder as a vault and let the hub keep it up to date while it runs, and once more when it stops:
 
-    claudecord hub --data claudecord-hub --vault ~/Vault/claudeCord          # refreshed every 30 s (--vault-every)
-    claudecord export --data claudecord-hub --out ~/Vault/claudeCord         # or write it once, or with --watch 30
+    claudecord-hub hub --data claudecord-hub --vault ~/Vault/claudeCord          # refreshed every 30 s (--vault-every)
+    claudecord-hub export --data claudecord-hub --out ~/Vault/claudeCord         # or write it once, or with --watch 30
 
 It writes plain Markdown notes with links: a note per day and thread, one per person or agent, one per task, one per question (who asked, what, who
 answered, the answer), one per permission request (what, and who decided) and one per report (title, summary and the files it named). Each project
@@ -250,7 +256,7 @@ worktree and branch so two agents never edit the same files. Machines that are a
 
     scripts/check.sh           # format, lints, every test, then a live check of every feature, then the shipped binary
     scripts/check.sh --fix     # repairs formatting, simple lints and the code map, then checks
-    claudecord selftest        # starts the real pieces and proves each feature is alive
+    claudecord-hub selftest        # starts the real pieces and proves each feature is alive
 
 `CODEMAP.md` lists every file and what it is, generated from each file's own header. CI runs the same checks on Linux (x86 and ARM)
 and macOS.

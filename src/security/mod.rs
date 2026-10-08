@@ -2,5 +2,6 @@
 
 pub mod codes;
 pub mod env;
+pub mod jwt;
 pub mod limits;
 pub mod redact;

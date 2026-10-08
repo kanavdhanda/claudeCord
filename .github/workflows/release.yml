@@ -69,13 +69,17 @@ jobs:
           targets: ${{ matrix.target }}
       - run: sudo apt-get update && sudo apt-get install -y musl-tools
         if: contains(matrix.target, 'musl')
-      - run: cargo build --release --target ${{ matrix.target }} --bin claudecord
-      - run: cp target/${{ matrix.target }}/release/claudecord${{ matrix.ext }} claudecord-${{ matrix.name }}${{ matrix.ext }}
+      - run: cargo build --release --target ${{ matrix.target }} --bin claudecord --bin claudecord-hub
+      - run: |
+          cp target/${{ matrix.target }}/release/claudecord${{ matrix.ext }} claudecord-${{ matrix.name }}${{ matrix.ext }}
+          cp target/${{ matrix.target }}/release/claudecord-hub${{ matrix.ext }} claudecord-hub-${{ matrix.name }}${{ matrix.ext }}
         shell: bash
       - uses: actions/upload-artifact@v4
         with:
           name: bin-${{ matrix.name }}
-          path: claudecord-${{ matrix.name }}${{ matrix.ext }}
+          path: |
+            claudecord-${{ matrix.name }}${{ matrix.ext }}
+            claudecord-hub-${{ matrix.name }}${{ matrix.ext }}
 
   # Wheels for glibc Linux (almost every distribution) are built in maturin's manylinux container, where the C compiler the TLS library needs is
   # present. The standalone programs further up are static musl builds, which is what npm and the release files use.

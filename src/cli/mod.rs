@@ -1,9 +1,9 @@
-//! The command line: what each command is, and where it is handled. Commands fall in three groups:
-//! - running things: `serve` (the hosted service), `daemon` (the program on a machine)
-//! - working with agents: `login`, `up`, `ls`, `attach`, `stop`, `down`, `doctor`
-//! - what an agent runs in its own shell: `say`, `ask`, `assign`, `done`, `report`, `dump`, `pickup`, `team`, `send`
+//! The command lines: what each command is, and where it is handled. There are two programs, kept completely apart:
+//! - `claudecord` (`Cli`), for a machine and its agents: `login` (the only place a hub's address is given, with --hub), `daemon`, `ls`, `attach`,
+//!   `stop`, `down`, `doctor`, and what an agent runs in its own shell: `say`, `ask`, `assign`, `done`, `report`, `dump`, `pickup`, `team`, `send`
+//! - `claudecord-hub` (`HubCli`), for whoever runs the hub: `serve`, `storage`, `export`, `token`, `web-token`, `uptime`, `probe`, `selftest`
 //!
-//! Files: `hub` (server commands), `storage` (where old history goes), `machine` (daemon, login, up, attach and friends), `verbs` (the agent's commands).
+//! Files: `hub`, `storage`, `export`, `uptime` (the hub program's commands), `machine` (daemon, login, attach and friends), `verbs` (the agent's commands).
 
 pub mod export;
 pub mod hub;
@@ -33,25 +33,6 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// Run a bare hub with no Discord, for tests and development. Real use is `serve`.
-    #[command(hide = true)]
-    Hub(hub::HubArgs),
-    /// Run the hosted service: many accounts sign in with Discord, join machines by code, and each gets its own hub.
-    Serve(hub::ServeArgs),
-    /// Choose, test and change where old history files are kept (Oracle Cloud, Cloudflare R2, ...).
-    Storage(storage::StorageArgs),
-    /// Write the conversation history as Obsidian notes you can browse and graph.
-    Export(export::ExportArgs),
-    /// Make a token for a machine (run on the hub's host).
-    Token(hub::TokenArgs),
-    /// Show how much of the time the hub and Discord were working, and the error budget left.
-    Uptime(uptime::UptimeArgs),
-    /// Check a hub from the outside (run on another machine) and keep a record of what was seen.
-    Probe(uptime::ProbeArgs),
-    /// Make many machine tokens at once into a private file, for the k6 load test.
-    LoadTokens(hub::LoadTokensArgs),
-    /// Make a token that opens the dashboard in a browser (run on the hub's host).
-    WebToken(hub::TokenArgs),
     /// Run the daemon on this machine (started for you by `up`).
     Daemon,
     /// Save which hub this machine talks to.
@@ -100,12 +81,6 @@ pub enum Cmd {
     Down,
     /// Check whether this machine can reach the hub, and where it stops.
     Doctor,
-    /// Check that every feature is alive (starts real servers on this machine; changes nothing).
-    Selftest {
-        /// Print the result as JSON.
-        #[arg(long)]
-        json: bool,
-    },
     /// Post a message to the team (plain say is information; @name someone to need a reply).
     Say {
         /// The message. `-` (or nothing, when something is piped in) reads it from standard input, which keeps real line breaks for multi-line text.
@@ -152,15 +127,6 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         return machine::start(cli.start).await;
     };
     match command {
-        Cmd::Hub(a) => hub::run_hub(a).await,
-        Cmd::Serve(a) => hub::run_serve(a).await,
-        Cmd::Token(a) => hub::make_token(a),
-        Cmd::WebToken(a) => hub::make_web_token(a),
-        Cmd::LoadTokens(a) => hub::make_load_tokens(a),
-        Cmd::Uptime(a) => uptime::show(a),
-        Cmd::Probe(a) => uptime::probe(a).await,
-        Cmd::Storage(a) => storage::run(a),
-        Cmd::Export(a) => export::run(a),
         Cmd::Daemon => machine::run_daemon().await,
         Cmd::Login(a) => machine::login(a).await,
         Cmd::Logs {
@@ -177,7 +143,6 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         Cmd::Restart { agent } => machine::restart(agent).await,
         Cmd::Down => machine::down().await,
         Cmd::Doctor => machine::doctor().await,
-        Cmd::Selftest { json } => selftest(json).await,
         Cmd::Say { text, thread } => verbs::say(text, thread).await,
         Cmd::Ask { question } => verbs::ask(question).await,
         Cmd::Assign { to, task } => verbs::assign(to, task).await,
@@ -192,6 +157,64 @@ pub async fn run(cli: Cli) -> Result<(), String> {
             Ok(())
         }
         Cmd::Send { path, to, caption } => verbs::send_file(path, to, caption).await,
+    }
+}
+
+/// The `claudecord-hub` program: the server side, kept apart from `claudecord` (the machine and agent side). It is never needed on a
+/// machine that only runs agents, and a machine never needs the other one's commands.
+#[derive(Parser)]
+#[command(
+    name = "claudecord-hub",
+    version,
+    about = "Run and look after a claudeCord hub"
+)]
+pub struct HubCli {
+    #[command(subcommand)]
+    pub command: HubCmd,
+}
+
+#[derive(Subcommand)]
+pub enum HubCmd {
+    /// Run a bare hub with no Discord, for tests and development. Real use is `serve`.
+    #[command(hide = true)]
+    Hub(hub::HubArgs),
+    /// Run the hosted service: many accounts sign in with Discord, join machines by code, and each gets its own hub.
+    Serve(hub::ServeArgs),
+    /// Choose, test and change where old history files are kept (Oracle Cloud, Cloudflare R2, ...).
+    Storage(storage::StorageArgs),
+    /// Write the conversation history as Obsidian notes you can browse and graph.
+    Export(export::ExportArgs),
+    /// Make a token for a machine (run on the hub's host).
+    Token(hub::TokenArgs),
+    /// Show how much of the time the hub and Discord were working, and the error budget left.
+    Uptime(uptime::UptimeArgs),
+    /// Check a hub from the outside (run on another machine) and keep a record of what was seen.
+    Probe(uptime::ProbeArgs),
+    /// Make many machine tokens at once into a private file, for the k6 load test.
+    LoadTokens(hub::LoadTokensArgs),
+    /// Make a token that opens the dashboard in a browser (run on the hub's host).
+    WebToken(hub::TokenArgs),
+    /// Check that every feature is alive (starts real servers on this machine; changes nothing).
+    Selftest {
+        /// Print the result as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// Runs a parsed `claudecord-hub` command.
+pub async fn run_hub_cli(cli: HubCli) -> Result<(), String> {
+    match cli.command {
+        HubCmd::Hub(a) => hub::run_hub(a).await,
+        HubCmd::Serve(a) => hub::run_serve(a).await,
+        HubCmd::Token(a) => hub::make_token(a),
+        HubCmd::WebToken(a) => hub::make_web_token(a),
+        HubCmd::LoadTokens(a) => hub::make_load_tokens(a),
+        HubCmd::Uptime(a) => uptime::show(a),
+        HubCmd::Probe(a) => uptime::probe(a).await,
+        HubCmd::Storage(a) => storage::run(a),
+        HubCmd::Export(a) => export::run(a),
+        HubCmd::Selftest { json } => selftest(json).await,
     }
 }
 

@@ -12,16 +12,22 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | `src/agents/mod.rs` | Everything about the coding agents themselves: how each harness is launched and read, and how text is made safe before it reaches one. |
 | `src/agents/text.rs` | Everything pasted into an agent's terminal passes through here. |
 
+## src/bin
+
+| File | What it is |
+|---|---|
+| `src/bin/claudecord-hub.rs` | The `claudecord-hub` program: runs the hosted hub and looks after it (storage, tokens, uptime, export). |
+
 ## src/cli
 
 | File | What it is |
 |---|---|
-| `src/cli/export.rs` | `claudecord export`: writes the conversation history as an Obsidian vault. |
-| `src/cli/hub.rs` | The server commands: `claudecord hub` runs the central hub, `claudecord token` makes a token for a machine, and `claudecord load-tokens` makes many at once into a private file for the k6 load test. |
+| `src/cli/export.rs` | `claudecord-hub export`: writes the conversation history as an Obsidian vault. |
+| `src/cli/hub.rs` | The server commands: `claudecord-hub hub` runs the central hub, `claudecord-hub token` makes a token for a machine, and `claudecord-hub load-tokens` makes many at once into a private file for the k6 load test. |
 | `src/cli/machine.rs` | Commands for a machine that runs agents: save the hub address, run the daemon, start an agent in the current folder, open an agent's terminal, list, stop, and check connectivity. |
-| `src/cli/mod.rs` | The command line: what each command is, and where it is handled. |
-| `src/cli/storage.rs` | `claudecord storage`: where old history files go. |
-| `src/cli/uptime.rs` | `claudecord uptime` shows how much of the time each part was working; `claudecord probe` checks a hub from the outside (run it on a different machine) and keeps its own record of what it saw. |
+| `src/cli/mod.rs` | The command lines: what each command is, and where it is handled. |
+| `src/cli/storage.rs` | `claudecord-hub storage`: where old history files go. |
+| `src/cli/uptime.rs` | `claudecord-hub uptime` shows how much of the time each part was working; `claudecord-hub probe` checks a hub from the outside (run it on a different machine) and keeps its own record of what it saw. |
 | `src/cli/verbs.rs` | The commands an agent runs in its own shell. |
 
 ## src/control
@@ -57,7 +63,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | `src/discord/api.rs` | A small client for the parts of Discord's REST API the bridge uses: finding and making channels, webhooks (so each agent posts under its own name), threads, messages with buttons, reactions, slash commands and attachments. |
 | `src/discord/bridge.rs` | The bridge between Discord and the hub. |
 | `src/discord/commands.rs` | The slash commands people use in Discord, and what each one does. |
-| `src/discord/fake.rs` | A stand-in Discord for tests and for `claudecord selftest`: the small part of Discord's REST API and live gateway that the bridge uses, kept in memory. |
+| `src/discord/fake.rs` | A stand-in Discord for tests and for `claudecord-hub selftest`: the small part of Discord's REST API and live gateway that the bridge uses, kept in memory. |
 | `src/discord/gateway.rs` | The connection that carries Discord's live events (new messages, button presses, slash commands) to the bridge. |
 | `src/discord/mod.rs` | Everything about Discord: the permissions the bot needs, a client for its REST API, the live gateway connection, and the bridge that connects all of that to the hub. |
 | `src/discord/perms.rs` | The Discord permissions the bot needs, in one place, so the invite link, the self-check and the docs cannot drift apart. |
@@ -118,6 +124,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 |---|---|
 | `src/security/codes.rs` | Pairing codes are typed by people, so they are matched without regard to case, dashes or spaces. |
 | `src/security/env.rs` | Agents run as the user, so by default they inherit the daemon's whole environment, including cloud credentials, tokens and passwords the user exported for other things. |
+| `src/security/jwt.rs` | Short-lived access tokens for machines: a JWT (HS256) a hub signs after a machine shows its refresh token. |
 | `src/security/limits.rs` | Small rate limiters. |
 | `src/security/mod.rs` | Defences that keep secrets and abuse out: secret scrubbing, environment scrubbing, rate limiting, pairing codes. |
 | `src/security/redact.rs` | Best-effort secret scrubbing for text and files that leave a machine through an agent. |
@@ -129,7 +136,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | `src/server/actor.rs` | The actor: the one task that owns the hub core and the store. |
 | `src/server/app.rs` | The dashboard app: the React page built in `web/` (`npm run build`), embedded in the program so there is nothing separate to host. |
 | `src/server/bots.rs` | The dashboard's bot and workspace endpoints: saving a Discord bot token (sealed, never shown again), listing the servers and channels the bot can reach, choosing or making the channel a project posts to, and starting another agent on one of the account's machines. |
-| `src/server/demo.rs` | Demo data for `claudecord serve --dev`: so the dashboard has something to show without any real machine or Discord. |
+| `src/server/demo.rs` | Demo data for `claudecord-hub serve --dev`: so the dashboard has something to show without any real machine or Discord. |
 | `src/server/disk.rs` | The hub's disk writes, kept off the async runtime, and the one rule they serve: NOTHING is sent, reacted to or acknowledged until the change that caused it is on disk. |
 | `src/server/gateway.rs` | The gateway: the hosted service's one front door. |
 | `src/server/health.rs` | What a prober, a load balancer and the dashboard ask the hub about its own health. |
@@ -158,7 +165,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 |---|---|
 | `src/lib.rs` | claudeCord: run coding agents on any machine and manage them from a chat. |
 | `src/log.rs` | Logging: one line per event, `2026-10-04 14:05:09 UTC INFO  hub: message`, to stderr and, once a file is set, to a size-capped file as well. |
-| `src/main.rs` | The `claudecord` program. |
+| `src/main.rs` | The `claudecord` program, for a machine and its agents: sign in to a hub, run the daemon, start and watch agents, and the short commands an agent runs in its shell (`claudecord say ...`). |
 | `src/notify.rs` | Telling systemd how the hub is doing, so it can restart a hub that is stuck and not only one that has died. |
 | `src/sync.rs` | A lock that survives a panic elsewhere. |
 | `src/task.rs` | Keeping long-running work alive: a supervisor that restarts a task if it panics, and the signal that means "stop now". |

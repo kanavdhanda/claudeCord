@@ -89,7 +89,18 @@ pub async fn run(cfg: &Config, opts: &LinkOpts) -> Vec<Check> {
         ),
     ));
     let started = Instant::now();
-    let mut ws: Ws = match connect_detailed(&cfg.connect_url(), &cfg.token, opts).await {
+    let auth = super::link::Auth::new(
+        &cfg.hub_url,
+        cfg.token.clone(),
+        // The saved login is kept up to date only if this is the saved one.
+        Some(super::config::home_dir())
+            .filter(|d| super::config::Config::load(d).as_ref() == Some(cfg)),
+    );
+    let connected = match auth.bearer().await {
+        Ok(token) => connect_detailed(&cfg.connect_url(), &token, opts).await,
+        Err(e) => Err(e),
+    };
+    let mut ws: Ws = match connected {
         Ok(ws) => ws,
         Err(e) => {
             // A refused token is the hub not knowing this machine any more: say how to fix it, not only what the handshake said.

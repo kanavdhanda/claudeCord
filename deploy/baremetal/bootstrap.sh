@@ -42,16 +42,16 @@ if [ -z "$binary" ]; then
     aarch64|arm64) arch=arm64 ;;
     *) echo "no build for $(uname -m)" >&2; exit 1 ;;
   esac
-  url="https://github.com/kanavdhanda/claudeCord/releases/latest/download/claudecord-linux-$arch"
-  [ "$version" = latest ] || url="https://github.com/kanavdhanda/claudeCord/releases/download/$version/claudecord-linux-$arch"
+  url="https://github.com/kanavdhanda/claudeCord/releases/latest/download/claudecord-hub-linux-$arch"
+  [ "$version" = latest ] || url="https://github.com/kanavdhanda/claudeCord/releases/download/$version/claudecord-hub-linux-$arch"
   echo "downloading $url"
-  curl -fsSL -o /tmp/claudecord.new "$url" || { echo "could not download it: is there a published release? Use --binary FILE instead." >&2; exit 1; }
-  binary=/tmp/claudecord.new
+  curl -fsSL -o /tmp/claudecord-hub.new "$url" || { echo "could not download it: is there a published release? Use --binary FILE instead." >&2; exit 1; }
+  binary=/tmp/claudecord-hub.new
 fi
 [ -f "$binary" ] || { echo "$binary is not a file" >&2; exit 1; }
-[ -f /usr/local/bin/claudecord ] && cp -f /usr/local/bin/claudecord /usr/local/bin/claudecord.previous
-install -m 755 "$binary" /usr/local/bin/claudecord
-/usr/local/bin/claudecord --help >/dev/null || { echo "the program does not run on this machine" >&2; exit 1; }
+[ -f /usr/local/bin/claudecord-hub ] && cp -f /usr/local/bin/claudecord-hub /usr/local/bin/claudecord-hub.previous
+install -m 755 "$binary" /usr/local/bin/claudecord-hub
+/usr/local/bin/claudecord-hub --help >/dev/null || { echo "the program does not run on this machine" >&2; exit 1; }
 
 # 2. A user of its own, and a folder only it can use.
 id claudecord >/dev/null 2>&1 || useradd --system --create-home --shell /usr/sbin/nologin claudecord
@@ -72,7 +72,7 @@ NotifyAccess=main
 WatchdogSec=30
 TimeoutStopSec=30
 User=claudecord
-ExecStart=/usr/local/bin/claudecord serve --data /var/lib/claudecord --bind 127.0.0.1:8787 --public-url https://$domain --client-id $client --secret-file /var/lib/claudecord/oauth-secret
+ExecStart=/usr/local/bin/claudecord-hub serve --data /var/lib/claudecord --bind 127.0.0.1:8787 --public-url https://$domain --client-id $client --secret-file /var/lib/claudecord/oauth-secret
 Restart=always
 RestartSec=2
 NoNewPrivileges=true

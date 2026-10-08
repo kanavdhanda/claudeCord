@@ -1,4 +1,4 @@
-//! Demo data for `claudecord serve --dev`: so the dashboard has something to show without any real machine or Discord. It makes a
+//! Demo data for `claudecord-hub serve --dev`: so the dashboard has something to show without any real machine or Discord. It makes a
 //! made-up account with a bot, a placed project, a machine and a few agents, then plays a short day of work through the real hub core
 //! (messages, a task handed out and finished, a question asked and answered, states changing) so every graph has data.
 //! Never runs outside `--dev`, and everything it makes goes through the same paths real activity would.

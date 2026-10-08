@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// The hub (`claudecord serve --dev`) listens here; the dev server forwards API and sign-in calls to it so the cookie stays same-site.
+// The hub (`claudecord-hub serve --dev`) listens here; the dev server forwards API and sign-in calls to it so the cookie stays same-site.
 const hub = process.env.CLAUDECORD_HUB ?? 'http://127.0.0.1:8787'
 
 export default defineConfig({

@@ -261,6 +261,8 @@ struct Agent {
     inflight: Option<Inflight>,
     /// How urgently the waiting queue wants to go in (raised by a `priority` frame, back to `Queue` once pasted).
     urgency: Urgency,
+    /// The delivery that asked for it: once it has been pasted nothing is urgent any more. What waits ahead of it goes in with the same urgency.
+    urgent_id: Option<String>,
     /// When Escape was pressed for a steering message, so the paste follows after the agent has had a moment to stop.
     steered_at: Option<i64>,
     status: AgentStatus,
@@ -274,7 +276,7 @@ struct Agent {
     /// When a picture of this terminal was last sent by itself (not asked for): at most one every five minutes.
     shot_at: i64,
     /// The screen as of the last change and since when: an agent that looks the same for minutes while "working" is stuck.
-    still: (u64, i64, bool),
+    still: (u64, i64),
     deciding: Option<AwaitingDecision>,
     limit_reported: bool,
     /// Internal errors in a row while looking at this agent (see `agent_faulted`).
@@ -326,9 +328,9 @@ pub async fn run(cfg: Config, dir: PathBuf, opts: Options) -> std::io::Result<()
         std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
     }
     let (ev_tx, mut events) = mpsc::channel(256);
-    let link = link::spawn(
+    let link = link::spawn_with(
+        link::Auth::new(&cfg.hub_url, cfg.token.clone(), Some(dir.clone())),
         cfg.connect_url(),
-        cfg.token.clone(),
         cfg.node_name.clone(),
         ev_tx,
         opts.link.clone(),
@@ -584,6 +586,7 @@ impl State {
                     && a.queue.iter().any(|d| d.msg_id.as_ref() == Some(&msg_id))
                 {
                     a.urgency = a.urgency.max(u);
+                    a.urgent_id = Some(msg_id);
                 }
             }
             HubFrame::Answer { agent_id, text, .. } => {
@@ -1300,27 +1303,15 @@ impl State {
                 let _ = shown;
             }
             let status = status_of(&state);
-            // A turn that ended with nobody told anything: the person is looking at silence, so show them what the terminal says.
-            if status == AgentStatus::Idle
-                && a.status != AgentStatus::Idle
-                && a.awaiting.is_some()
-                && a.queue.is_empty()
-                && a.inflight.is_none()
-            {
+            // A turn ended: the agent is no longer owed an answer. No picture of the terminal is sent unasked, only when the agent asks a person for
+            // permission or runs into a usage limit, or when a person asks for one.
+            if status == AgentStatus::Idle && a.status != AgentStatus::Idle {
                 a.awaiting = None;
-                shots.push("finished without answering");
             }
-            // Working, or waiting on something, but the screen has not changed for two minutes: stuck.
+            // When the screen last changed (the idle shutdown goes by it).
             let hash = a.proc.screen_hash();
             if hash != a.still.0 {
-                a.still = (hash, now, false);
-            } else if !a.still.2
-                && status != AgentStatus::Idle
-                && status != AgentStatus::Starting
-                && now - a.still.1 > 120_000
-            {
-                a.still.2 = true;
-                shots.push("looks stuck: the screen has not changed for two minutes");
+                a.still = (hash, now);
             }
             if status != a.status {
                 a.log.event(now, "status", &format!("{status:?}"));
@@ -1362,7 +1353,13 @@ impl State {
                 // Not before the agent's input box is showing, or start-up would swallow the message.
                 && (state.ready || a.status != AgentStatus::Starting)
             {
-                let text = format_deliveries(&a.queue);
+                // One thread at a time: what waited in different threads is not mixed into one prompt, so the agent answers each where it was asked.
+                let n = a
+                    .queue
+                    .iter()
+                    .take_while(|d| d.thread == a.queue[0].thread)
+                    .count();
+                let text = format_deliveries(&a.queue[..n]);
                 let before = a.proc.screen_hash();
                 // Steering stops what the agent is doing first, then gives it a moment before the paste.
                 if a.urgency == Urgency::Steer && a.steered_at.is_none() {
@@ -1371,10 +1368,13 @@ impl State {
                 }
                 let settled = a.steered_at.is_none_or(|t| now - t >= STEER_SETTLE_MS);
                 if settled && a.proc.inject_as(&text, now, a.urgency).is_ok() {
-                    a.urgency = Urgency::Queue;
-                    a.steered_at = None;
                     a.log.event(now, "delivered", &text);
-                    let ids: Vec<String> = a.queue.drain(..).filter_map(|d| d.msg_id).collect();
+                    let ids: Vec<String> = a.queue.drain(..n).filter_map(|d| d.msg_id).collect();
+                    if a.urgent_id.as_ref().is_none_or(|u| ids.contains(u)) {
+                        a.urgency = Urgency::Queue;
+                        a.urgent_id = None;
+                        a.steered_at = None;
+                    }
                     a.inflight = Some(Inflight {
                         ids,
                         since: now,
@@ -2100,6 +2100,7 @@ impl State {
                 raw: VecDeque::new(),
                 inflight: None,
                 urgency: Urgency::Queue,
+                urgent_id: None,
                 steered_at: None,
                 status: AgentStatus::Starting,
                 held: false,
@@ -2108,7 +2109,7 @@ impl State {
                 candidate_prompt: None,
                 awaiting: None,
                 shot_at: 0,
-                still: (0, 0, false),
+                still: (0, 0),
                 deciding: None,
                 limit_reported: false,
                 faults: 0,

@@ -17,13 +17,13 @@ COPY web/dist ./web/dist
 # The cache mounts keep downloaded crates and compiled dependencies between builds on the same machine.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked --bin claudecord \
-    && cp target/release/claudecord /claudecord \
+    cargo build --release --locked --bin claudecord-hub \
+    && cp target/release/claudecord-hub /claudecord-hub \
     && mkdir /data
 
 # glibc and the C runtime library, CA certificates, no shell and no package manager.
 FROM gcr.io/distroless/cc-debian12:nonroot
-COPY --from=build /claudecord /claudecord
+COPY --from=build /claudecord-hub /claudecord-hub
 # 65532 is the `nonroot` user. A named volume mounted here starts out owned by it.
 COPY --from=build --chown=65532:65532 /data /data
 WORKDIR /data
@@ -31,7 +31,7 @@ EXPOSE 8787
 VOLUME /data
 # The program asks the hub itself whether it is ready (there is no curl in this image). The prober keeps its small record in /tmp.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
-    CMD ["/claudecord", "probe", "http://127.0.0.1:8787", "--once", "--data", "/tmp/probe"]
-ENTRYPOINT ["/claudecord"]
+    CMD ["/claudecord-hub", "probe", "http://127.0.0.1:8787", "--once", "--data", "/tmp/probe"]
+ENTRYPOINT ["/claudecord-hub"]
 # Arguments come from deploy/compose.yml (`serve` needs the public address and the Discord application). Without them it prints its help.
 CMD ["--help"]

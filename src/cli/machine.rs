@@ -512,9 +512,17 @@ async fn request_pick(
         .unwrap_or_else(|| "project".into());
     let cfg = Config::load(&home_dir()).ok_or(PickError::Other("not logged in".into()))?;
     let base = enroll::http_base(&cfg.hub_url);
+    let bearer =
+        match crate::device::link::Auth::new(&cfg.hub_url, cfg.token.clone(), Some(home_dir()))
+            .bearer()
+            .await
+        {
+            Ok(t) => t,
+            Err(e) => return Err(PickError::Other(e)),
+        };
     let asked = reqwest::Client::new()
         .post(format!("{base}/api/device/pick"))
-        .bearer_auth(&cfg.token)
+        .bearer_auth(&bearer)
         .json(&serde_json::json!({
             "folder": folder,
             "project": prefill.project,
@@ -555,12 +563,19 @@ async fn report_pick(code: &str, ok: bool, what: &str) {
     let Some(cfg) = Config::load(&home_dir()) else {
         return;
     };
+    let Ok(bearer) =
+        crate::device::link::Auth::new(&cfg.hub_url, cfg.token.clone(), Some(home_dir()))
+            .bearer()
+            .await
+    else {
+        return;
+    };
     let _ = reqwest::Client::new()
         .post(format!(
             "{}/api/device/pick/{code}/result",
             enroll::http_base(&cfg.hub_url)
         ))
-        .bearer_auth(&cfg.token)
+        .bearer_auth(&bearer)
         .json(&serde_json::json!({ "ok": ok, "message": what }))
         .timeout(Duration::from_secs(5))
         .send()

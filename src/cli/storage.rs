@@ -1,4 +1,4 @@
-//! `claudecord storage`: where old history files go. Set up Oracle Cloud or Cloudflare R2 (or any S3-compatible bucket),
+//! `claudecord-hub storage`: where old history files go. Set up Oracle Cloud or Cloudflare R2 (or any S3-compatible bucket),
 //! test that it works, and move everything from one provider to another. The bucket's keys are kept in the hub's data
 //! folder, in a file only the owner can read, never in the environment or on a command line that a shell would remember.
 
@@ -191,7 +191,7 @@ fn save(b: &Bucket, path: &Path) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
     println!(
-        "saved {} (readable by you only). Next: claudecord storage test",
+        "saved {} (readable by you only). Next: claudecord-hub storage test",
         path.display()
     );
     Ok(())
@@ -201,7 +201,7 @@ fn save(b: &Bucket, path: &Path) -> Result<(), String> {
 pub fn load(path: &Path) -> Result<Bucket, String> {
     let text = std::fs::read_to_string(path).map_err(|_| {
         format!(
-            "{} not found: set a provider up first (claudecord storage oracle ...)",
+            "{} not found: set a provider up first (claudecord-hub storage oracle ...)",
             path.display()
         )
     })?;

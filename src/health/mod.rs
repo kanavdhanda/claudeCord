@@ -1,5 +1,5 @@
 //! The health check: boots the real parts of the system in this process and exercises every feature, to prove each one
-//! is not just present but wired up and working. It is what `claudecord selftest` runs, what CI runs after the unit
+//! is not just present but wired up and working. It is what `claudecord-hub selftest` runs, what CI runs after the unit
 //! tests, and what you can run on a new machine to see that everything is alive.
 //!
 //! Each feature has a probe that does something a user would depend on and reports the evidence it saw. A feature that

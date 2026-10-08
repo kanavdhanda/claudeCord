@@ -3,7 +3,7 @@
 # fails when connects fail, the hub is slow to answer or messages are lost (the thresholds in hub.js). The big runs are load.yml.
 #   scripts/load/smoke.sh [USERS] [PATH_TO_CLAUDECORD]
 set -euo pipefail
-users=${1:-200}; bin=${2:-target/release/claudecord}
+users=${1:-200}; bin=${2:-target/release/claudecord-hub}
 work=$(mktemp -d); trap 'kill $hub 2>/dev/null || true; rm -rf "$work"' EXIT
 "$bin" load-tokens --count "$users" --out "$work/tokens.json" --data "$work/hub" 2>/dev/null
 port=$((20000 + RANDOM % 20000))

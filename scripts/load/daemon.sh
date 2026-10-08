@@ -6,6 +6,7 @@
 set -euo pipefail
 step=${1:-10}; steps=${2:-6}; settle=${3:-20}
 bin=$(cd "$(dirname "${CLAUDECORD_BIN:-target/release/claudecord}")" && pwd)/$(basename "${CLAUDECORD_BIN:-target/release/claudecord}")
+hubbin=${CLAUDECORD_HUB_BIN:-target/release/claudecord-hub}
 work=$(mktemp -d /tmp/ccl.XXXX); hub=""; sock="ccl-$$-$RANDOM"
 export CLAUDECORD_HOME="$work/h" CLAUDECORD_TMUX_SOCKET="$sock" CLAUDECORD_MAX_AGENTS=1000
 cleanup() {
@@ -17,9 +18,9 @@ cleanup() {
 trap cleanup EXIT
 mkdir -p "$work/h"
 port=$((20000 + RANDOM % 20000))
-"$bin" hub --data "$work/hub" --bind "127.0.0.1:$port" >"$work/hub.log" 2>&1 & hub=$!
+"$hubbin" hub --data "$work/hub" --bind "127.0.0.1:$port" >"$work/hub.log" 2>&1 & hub=$!
 for _ in $(seq 40); do curl -fs "http://127.0.0.1:$port/readyz" >/dev/null && break; sleep 0.25; done
-token=$("$bin" token m1 --data "$work/hub" 2>/dev/null | tail -1)
+token=$("$hubbin" token m1 --data "$work/hub" 2>/dev/null | tail -1)
 "$bin" login --hub "http://127.0.0.1:$port" --token "$token" --name m1 >/dev/null
 printf 'agents\tdaemon_cpu%%\tdaemon_rss_mb\tdaemon_threads\ttmux_cpu%%\n'
 total=0

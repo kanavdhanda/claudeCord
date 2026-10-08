@@ -2265,3 +2265,57 @@ async fn a_daemon_with_an_agent_that_keeps_getting_messages_stays() {
     }
     r.hub.shutdown().await;
 }
+
+#[tokio::test]
+async fn messages_waiting_in_different_threads_are_pasted_one_thread_at_a_time() {
+    let r = rig_tuned("threads", NORMAL, 8, vec![], Backend::Pty, |o| {
+        o.quiet = (0, 60_000)
+    })
+    .await;
+    up(&r, "otter").await;
+    eventually("registered", async || {
+        r.hub
+            .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    for (text, thread, reference) in [("alpha", "T1 one", "c:1"), ("beta", "T2 two", "c:2")] {
+        r.hub
+            .call(move |c, now| {
+                let r = c
+                    .human_message(
+                        &kd(),
+                        "demo",
+                        text,
+                        &MessageOpts {
+                            thread: Some(thread),
+                            reference: Some(reference),
+                            ..Default::default()
+                        },
+                        now,
+                    )
+                    .unwrap();
+                ((), r.1)
+            })
+            .await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    r.hub
+        .call(|c, _| {
+            let mut fx = Vec::new();
+            let _ = c.prioritise(&kd(), "demo", "c:1", "now", &mut fx);
+            ((), fx)
+        })
+        .await;
+    eventually("the first thread", async || {
+        std::fs::read_to_string(r.project.join("fake.log")).is_ok_and(|s| s.contains("alpha"))
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let log = std::fs::read_to_string(r.project.join("fake.log")).unwrap();
+    assert!(
+        !log.contains("beta"),
+        "the second thread was mixed in: {log}"
+    );
+}

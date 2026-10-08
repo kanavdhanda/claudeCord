@@ -90,6 +90,9 @@ pub const MAX_MACHINES: usize = 200;
 /// The letters a typed code uses: no 0/O, 1/I/L, so a code read aloud or copied by eye is not misread.
 const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 
+/// How long a replaced refresh token keeps working.
+pub const REFRESH_GRACE_MS: i64 = 60_000;
+
 fn random_bytes<const N: usize>() -> [u8; N] {
     let mut b = [0u8; N];
     getrandom::fill(&mut b).expect("the system has a random source");
@@ -178,6 +181,14 @@ impl Control {
                 "ALTER TABLE accounts ADD COLUMN commands TEXT NOT NULL DEFAULT '{}'",
                 [],
             )?;
+        }
+        // Refresh tokens are replaced each time they are used; the old one keeps working for a minute, so a reply lost on the way does not lock a
+        // machine out. Added after the first release, like the column above.
+        let has_retire = conn
+            .prepare("SELECT 1 FROM pragma_table_info('machine_tokens') WHERE name = 'retire'")?
+            .exists([])?;
+        if !has_retire {
+            conn.execute("ALTER TABLE machine_tokens ADD COLUMN retire INTEGER", [])?;
         }
         Ok(Self {
             conn: Mutex::new(conn),
@@ -478,11 +489,56 @@ impl Control {
         self.conn
             .locked()
             .query_row(
-                "SELECT tenant, node FROM machine_tokens WHERE hash = ?1",
-                params![hash_secret(token)],
+                "SELECT tenant, node FROM machine_tokens WHERE hash = ?1 AND (retire IS NULL OR retire > ?2)",
+                params![hash_secret(token), crate::now_ms()],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()
+    }
+
+    /// Whether the account still has this machine (a revoked machine's access tokens stop working at once, not when they run out).
+    pub fn machine_exists(&self, tenant: &str, node: &str) -> rusqlite::Result<bool> {
+        self.conn.locked().query_row(
+            "SELECT EXISTS(SELECT 1 FROM machine_tokens WHERE tenant = ?1 AND node = ?2 AND (retire IS NULL OR retire > ?3))",
+            params![tenant, node, crate::now_ms()],
+            |r| r.get(0),
+        )
+    }
+
+    /// Exchanges a refresh token for a new one: the machine's login carries on with the new token, and the old one works for `REFRESH_GRACE_MS`
+    /// more, then is gone. None if the token is not a live one.
+    pub fn rotate_machine_token(
+        &self,
+        token: &str,
+        now: i64,
+    ) -> rusqlite::Result<Option<(String, String, String)>> {
+        let c = self.conn.locked();
+        let tx = c.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM machine_tokens WHERE retire IS NOT NULL AND retire <= ?1",
+            params![now],
+        )?;
+        let found: Option<(String, String)> = tx
+            .query_row(
+                "SELECT tenant, node FROM machine_tokens WHERE hash = ?1 AND (retire IS NULL OR retire > ?2)",
+                params![hash_secret(token), now],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((tenant, node)) = found else {
+            return Ok(None);
+        };
+        let fresh = format!("ccn1.{}", random_hex(32));
+        tx.execute(
+            "INSERT INTO machine_tokens (hash, tenant, node, created) VALUES (?1, ?2, ?3, ?4)",
+            params![hash_secret(&fresh), tenant, node, now],
+        )?;
+        tx.execute(
+            "UPDATE machine_tokens SET retire = ?1 WHERE hash = ?2 AND retire IS NULL",
+            params![now + REFRESH_GRACE_MS, hash_secret(token)],
+        )?;
+        tx.commit()?;
+        Ok(Some((tenant, node, fresh)))
     }
 
     /// The machines an account has approved, with when each was first approved.
