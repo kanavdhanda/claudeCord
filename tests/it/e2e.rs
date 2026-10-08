@@ -2457,7 +2457,9 @@ async fn a_say_to_a_peer_whose_terminal_cannot_take_it_fails_with_the_reason_and
     r.hub.shutdown().await;
 }
 
-#[tokio::test]
+// On its own threads, as the hub and a machine are in real life: on one thread a debug build's ten megabytes of encoding and hashing would stop
+// every heartbeat for most of a second, which says nothing about the program.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_large_file_in_many_pieces_arrives_byte_for_byte_and_leaves_no_part_file() {
     let r = rig("bigfile").await;
     up(&r, "otter").await;
