@@ -44,6 +44,8 @@ pub trait Targets: Send + Sync {
     fn commands(&self) -> Vec<(String, String, String)> {
         Vec::new()
     }
+    /// The project now posts in `channel` (its old one was remade by `/clear chat`).
+    fn move_channel(&self, _project: &str, _channel: &str) {}
 }
 
 /// What makes a bridge serve only one bot of an account, in any of that bot's servers.
@@ -405,12 +407,9 @@ impl Bridge {
 
     /// The Discord thread for a named thread in a project (made on first use).
     async fn thread(&mut self, project: &str, channel: &str, name: &str) -> Option<String> {
-        // Serving an account, the key names the channel too: a project moved to another channel must not reuse the old channel's thread.
-        let key = if self.scope.is_some() {
-            format!("thread:{project}:{channel}:{name}")
-        } else {
-            format!("thread:{project}:{name}")
-        };
+        // The key names the channel too: a project moved to another channel (or whose channel `/clear chat` remade) must not reuse the old
+        // channel's thread.
+        let key = format!("thread:{project}:{channel}:{name}");
         if let Some(id) = self.get(&key) {
             return Some(id);
         }
@@ -606,10 +605,56 @@ impl Bridge {
         Ok(())
     }
 
-    /// Starts a fresh chat in a project's channel: deletes its recent messages (not the pinned ones, nor the status board, and Discord will not delete
-    /// anything older than two weeks in bulk) and says that a new chat has started.
+    /// Starts a fresh chat for a project: the channel is deleted and made again with the same name, place and permissions, so its messages and
+    /// threads are all gone. If that is not allowed, its recent messages are deleted instead. Then it says that a new chat has started.
     async fn clear_channel(&mut self, project: &str) -> Result<(), String> {
-        let ch = self.channel(project).await.ok_or("no channel")?;
+        let old = self.channel(project).await.ok_or("no channel")?;
+        let ch = match self.remake_channel(project, &old).await {
+            Ok(new) => new,
+            Err(e) => {
+                crate::warn!(
+                    "discord",
+                    "{project}: could not remake the channel ({e}); deleting its messages instead"
+                );
+                self.delete_recent(project, &old).await?;
+                old
+            }
+        };
+        self.rest
+            .send(&ch, "New chat. The agents have started over.", None, &[])
+            .await
+            .map_err(|e| e.to_string())?;
+        let _ = self.refresh_status(project).await;
+        Ok(())
+    }
+
+    /// Makes a copy of a project's channel, moves the project to it, then deletes the old one. Returns the new channel.
+    async fn remake_channel(&mut self, project: &str, old: &str) -> Result<String, String> {
+        let guild = self.guild_of(project).ok_or("no server")?;
+        let c = self.rest.channel(old).await.map_err(|e| e.to_string())?;
+        let new = self
+            .rest
+            .copy_channel(&guild, &c)
+            .await
+            .map_err(|e| e.to_string())?;
+        // The project points at the new channel before the old one goes, so nothing is posted into a channel being deleted.
+        if let Some(sc) = &self.scope {
+            sc.targets.move_channel(project, &new);
+        }
+        self.adopt(project, &new).await;
+        self.owned.remove(old);
+        // The status board was in the old channel: a new one is posted.
+        self.set(&format!("status:{project}"), "");
+        self.status_shown.remove(project);
+        if let Err(e) = self.rest.delete_channel(old).await {
+            crate::warn!("discord", "{project}: the old channel was left: {e}");
+        }
+        Ok(new)
+    }
+
+    /// The fallback when the channel cannot be remade (the bot may not manage channels): deletes its recent messages (not the pinned ones, nor
+    /// the status board, and Discord will not delete anything older than two weeks in bulk).
+    async fn delete_recent(&mut self, project: &str, ch: &str) -> Result<(), String> {
         let keep = self
             .get(&format!("status:{project}"))
             .and_then(|v| v.split_once(':').map(|(_, m)| m.to_string()));
@@ -618,7 +663,7 @@ impl Bridge {
             ((crate::now_ms() - 1_420_070_400_000 - 13 * 24 * 3_600_000).max(0) as u64) << 22;
         let ids: Vec<String> = self
             .rest
-            .recent_messages(&ch)
+            .recent_messages(ch)
             .await
             .map_err(|e| e.to_string())?
             .iter()
@@ -633,20 +678,16 @@ impl Bridge {
                 [] => {}
                 [one] => self
                     .rest
-                    .delete_message(&ch, one)
+                    .delete_message(ch, one)
                     .await
                     .map_err(|e| e.to_string())?,
                 many => self
                     .rest
-                    .bulk_delete(&ch, many)
+                    .bulk_delete(ch, many)
                     .await
                     .map_err(|e| e.to_string())?,
             }
         }
-        self.rest
-            .send(&ch, "New chat. The agents have started over.", None, &[])
-            .await
-            .map_err(|e| e.to_string())?;
         Ok(())
     }
 

@@ -186,6 +186,36 @@ impl Rest {
             .ok_or_else(|| ApiError("no channel id in the answer".into()))
     }
 
+    /// Makes a copy of a channel (as `GET /channels/{id}` returned it): same name, topic, category, place in the list and permissions, with no
+    /// messages. Returns the new channel's id.
+    pub async fn copy_channel(&self, guild: &str, c: &Value) -> Result<String> {
+        let mut body = json!({"name": c["name"], "type": c["type"], "topic": c["topic"], "nsfw": c["nsfw"],
+            "rate_limit_per_user": c["rate_limit_per_user"], "parent_id": c["parent_id"], "position": c["position"],
+            "permission_overwrites": c["permission_overwrites"]});
+        // Discord refuses an explicit null for some of these: leave out what the old channel did not have.
+        if let Some(o) = body.as_object_mut() {
+            o.retain(|_, v| !v.is_null());
+        }
+        let v = self
+            .call(
+                Method::POST,
+                &format!("/guilds/{guild}/channels"),
+                Some(body),
+            )
+            .await?;
+        v["id"]
+            .as_str()
+            .map(String::from)
+            .ok_or_else(|| ApiError("no channel id in the answer".into()))
+    }
+
+    /// Deletes a channel, with its messages and threads.
+    pub async fn delete_channel(&self, id: &str) -> Result<()> {
+        self.call(Method::DELETE, &format!("/channels/{id}"), None)
+            .await
+            .map(|_| ())
+    }
+
     /// Makes a webhook in a channel and returns (id, token).
     pub async fn create_webhook(&self, channel: &str, name: &str) -> Result<(String, String)> {
         let v = self

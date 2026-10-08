@@ -133,9 +133,12 @@ export function Pick() {
       {(projects.data ?? []).length > 0 && (
         <div className="row">
           <span className="muted small">or join:</span>
-          {(projects.data ?? []).map((p) => (
-            <button key={p.project} className="btn" onClick={() => setProject(p.project)}>{p.project}</button>
-          ))}
+          {/* The chosen project is highlighted, so it is clear the click took. */}
+          <div className="seg">
+            {(projects.data ?? []).map((p) => (
+              <button key={p.project} className={p.project === project ? 'on' : ''} onClick={() => setProject(p.project)}>{p.project}</button>
+            ))}
+          </div>
         </div>
       )}
 

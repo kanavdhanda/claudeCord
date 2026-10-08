@@ -36,6 +36,8 @@ pub struct Log {
     pub reactions: Vec<Value>,
     /// Message ids deleted in bulk.
     pub deleted: Vec<String>,
+    /// Ids of the channels that were deleted.
+    pub deleted_channels: Vec<String>,
     pub responses: Vec<Value>,
     pub commands: Option<Value>,
     /// What people said in each channel, as the "read the messages after" call returns it (a test fills this to stand in for messages sent
@@ -187,6 +189,12 @@ pub async fn start_fake() -> (Fake, String) {
             c["topic"] = t.clone();
         }
         Ok(Json(c.clone()))
+    }
+    async fn del_channel(State(f): State<Fake>, Path(id): Path<String>) -> Json<Value> {
+        let mut l = f.log.lock().unwrap();
+        l.channels.retain(|c| c["id"] != id.as_str());
+        l.deleted_channels.push(id);
+        Json(json!({}))
     }
     async fn mk_channel(
         State(f): State<Fake>,
@@ -429,7 +437,10 @@ pub async fn start_fake() -> (Fake, String) {
             "/api/guilds/{g}/roles/{id}",
             axum::routing::delete(del_role),
         )
-        .route("/api/channels/{id}", get(get_channel).patch(patch_channel))
+        .route(
+            "/api/channels/{id}",
+            get(get_channel).patch(patch_channel).delete(del_channel),
+        )
         .route("/api/channels/{id}/webhooks", post(mk_hook))
         .route("/api/webhooks/{id}/{tok}", post(hook_post))
         .route(

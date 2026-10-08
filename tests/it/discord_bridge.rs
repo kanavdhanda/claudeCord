@@ -1007,23 +1007,10 @@ async fn an_agent_can_really_tag_a_person_and_a_reply_to_an_agents_message_goes_
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn clear_deletes_the_chat_keeps_the_pinned_ones_and_starts_every_agent_over() {
+async fn clear_remakes_the_channel_and_starts_every_agent_over() {
     let mut r = rig("clear").await;
     register(&r, "otter").await;
     let ch = channel(&r).await;
-    // Some messages are in the channel, one of them pinned (and so kept).
-    let base = ((claudecord::now_ms() - 1_420_070_400_000) as u64) << 22;
-    let id = |n: u64| base + n;
-    let msgs: Vec<serde_json::Value> = (1..=4)
-        .map(|n| {
-            let mut m = message(&ch, &id(n).to_string(), "1", &format!("old {n}"));
-            if n == 2 {
-                m["pinned"] = json!(true);
-            }
-            m
-        })
-        .collect();
-    r.fake.log.lock().unwrap().history.insert(ch.clone(), msgs);
     r.event(
         "INTERACTION_CREATE",
         interaction(
@@ -1039,7 +1026,7 @@ async fn clear_deletes_the_chat_keeps_the_pinned_ones_and_starts_every_agent_ove
         |f| matches!(f, HubFrame::Restart { agent_id } if agent_id == "demo/otter"),
     )
     .await;
-    // The channel's messages are deleted, the pinned one is not, and the new chat is announced.
+    // A new channel of the same name takes the old one's place, the old one is deleted, and the new chat is announced in the new one.
     let said = r
         .until("the new chat", |l| {
             l.messages
@@ -1052,11 +1039,15 @@ async fn clear_deletes_the_chat_keeps_the_pinned_ones_and_starts_every_agent_ove
                 .cloned()
         })
         .await;
-    assert_eq!(said["channel"], ch.as_str());
-    let mut deleted = r.fake.log.lock().unwrap().deleted.clone();
-    deleted.sort();
-    let want: Vec<String> = [1, 3, 4].iter().map(|n| id(*n).to_string()).collect();
-    assert_eq!(deleted, want, "everything but the pinned message");
+    let new = said["channel"].as_str().unwrap().to_string();
+    assert_ne!(new, ch, "posted in a new channel");
+    let l = r.fake.log.lock().unwrap();
+    assert_eq!(l.deleted_channels, vec![ch.clone()]);
+    assert!(
+        l.channels
+            .iter()
+            .any(|c| c["id"] == new.as_str() && c["name"] == "demo")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

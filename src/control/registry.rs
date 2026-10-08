@@ -83,6 +83,13 @@ impl Targets for ControlTargets {
             .map(|(name, c)| (name, c.command, c.program))
             .collect()
     }
+
+    fn move_channel(&self, project: &str, channel: &str) {
+        if let Ok(Some(mut p)) = self.control.target(&self.tenant, project) {
+            p.channel = channel.to_string();
+            let _ = self.control.set_target(&self.tenant, &p);
+        }
+    }
 }
 
 fn as_target(p: super::Placement) -> Target {
