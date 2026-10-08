@@ -30,7 +30,7 @@ fn start_hub_on(data: &std::path::Path, port: u16) -> (Child, u16) {
         .unwrap_or_default()
         .matches("listening on")
         .count();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_claudecord"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_claudecord-hub"))
         .args(["hub", "--data"])
         .arg(data)
         .args(["--bind", &format!("127.0.0.1:{port}")])
@@ -138,7 +138,7 @@ fn a_kill_is_recorded_as_a_crash_from_the_last_heartbeat_and_the_next_start_says
 
 /// Runs the hub program expecting it to refuse to start, and returns what it said.
 fn refuses_to_start(args: &[&str]) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_claudecord"))
+    let out = Command::new(env!("CARGO_BIN_EXE_claudecord-hub"))
         .arg("hub")
         .args(args)
         .stdin(Stdio::null())
@@ -270,7 +270,7 @@ async fn nothing_acknowledged_is_lost_when_the_hub_is_killed_at_random_moments_a
     let data = dir("crash");
     let tokens = data.join("tokens.json");
     assert!(
-        Command::new(env!("CARGO_BIN_EXE_claudecord"))
+        Command::new(env!("CARGO_BIN_EXE_claudecord-hub"))
             .args(["load-tokens", "--count", "1", "--prefix", "mac", "--out"])
             .arg(&tokens)
             .arg("--data")
@@ -371,7 +371,7 @@ fn the_hub_tells_systemd_when_it_is_ready_and_when_it_is_stopping() {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         l.local_addr().unwrap().port()
     };
-    let mut hub = Command::new(env!("CARGO_BIN_EXE_claudecord"))
+    let mut hub = Command::new(env!("CARGO_BIN_EXE_claudecord-hub"))
         .args(["hub", "--data"])
         .arg(&data)
         .args(["--bind", &format!("127.0.0.1:{port}")])
@@ -400,7 +400,7 @@ async fn the_hub_keeps_an_obsidian_vault_up_to_date_while_it_runs_and_once_more_
     let vault = data.join("vault");
     let tokens = data.join("tokens.json");
     assert!(
-        Command::new(env!("CARGO_BIN_EXE_claudecord"))
+        Command::new(env!("CARGO_BIN_EXE_claudecord-hub"))
             .args(["load-tokens", "--count", "1", "--prefix", "mac", "--out"])
             .arg(&tokens)
             .arg("--data")
@@ -420,7 +420,7 @@ async fn the_hub_keeps_an_obsidian_vault_up_to_date_while_it_runs_and_once_more_
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         l.local_addr().unwrap().port()
     };
-    let mut hub = Command::new(env!("CARGO_BIN_EXE_claudecord"))
+    let mut hub = Command::new(env!("CARGO_BIN_EXE_claudecord-hub"))
         .args(["hub", "--data"])
         .arg(&data)
         .args(["--bind", &format!("127.0.0.1:{port}"), "--vault"])

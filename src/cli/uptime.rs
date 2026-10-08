@@ -1,4 +1,4 @@
-//! `claudecord uptime` shows how much of the time each part was working; `claudecord probe` checks a hub from the outside
+//! `claudecord-hub uptime` shows how much of the time each part was working; `claudecord-hub probe` checks a hub from the outside
 //! (run it on a different machine) and keeps its own record of what it saw. See `crate::uptime` for how it is worked out.
 
 use crate::store::Store;

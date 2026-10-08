@@ -2,8 +2,8 @@
 // to each other through the hub at the same time.
 //
 // Prepare (on the hub's host):
-//   claudecord load-tokens --count 10000 --out tokens.json --data claudecord-hub
-//   claudecord hub --data claudecord-hub --bind 0.0.0.0:8787 --allow-plain     # or behind TLS
+//   claudecord-hub load-tokens --count 10000 --out tokens.json --data claudecord-hub
+//   claudecord-hub hub --data claudecord-hub --bind 0.0.0.0:8787 --allow-plain     # or behind TLS
 // Run (raise the file limit first: ulimit -n 65535):
 //   k6 run -e HUB=ws://HOST:8787 -e USERS=10000 -e TOKENS=tokens.json -e HOLD=120 scripts/load/hub.js
 //

@@ -49,7 +49,8 @@ def build(binaries, out):
         shutil.copy(src, d / exe)
         os.chmod(d / exe, 0o755)
         made.append(f"{plat}-{cpu}")
-    shutil.copy(ROOT / "README.md", main / "README.md")
+    # The package says nothing about running a hub: its README is the machine's own.
+    shutil.copy(ROOT / "scripts" / "npm" / "README.md", main / "README.md")
     # The license, and the notices for what is built in (the fonts), travel with the package.
     for f in ("LICENSE", "THIRD-PARTY-NOTICES.md"):
         shutil.copy(ROOT / f, main / f)

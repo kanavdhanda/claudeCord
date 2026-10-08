@@ -1,6 +1,6 @@
 //! The dashboard: a read-only web page that shows machines, agents, what is waiting on a person, tasks and the conversation,
 //! served by the hub itself (no separate program, nothing to install). The page and its script are fixed files that hold no
-//! data. The data comes from two endpoints that need a dashboard token (made with `claudecord web-token`), checked the same
+//! data. The data comes from two endpoints that need a dashboard token (made with `claudecord-hub web-token`), checked the same
 //! way a machine's token is. A machine's token never opens the dashboard and a dashboard token never connects a machine.
 //!
 //! Everything shown can be written by an agent, so the script draws it as text only, and the page is served with a strict

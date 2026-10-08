@@ -27,6 +27,30 @@ pub enum Wait {
     NotForeground,
 }
 
+/// How a message asks to be delivered. A person picks it with a reaction on their message in the chat; everything starts as `Queue`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Urgency {
+    /// Wait until the agent is idle and quiet (the default).
+    #[default]
+    Queue,
+    /// Paste straight through, even while the agent is working.
+    Now,
+    /// Stop what the agent is doing (Escape) and then paste: explicit human steering.
+    Steer,
+}
+
+impl Urgency {
+    /// From the word the hub sends in a `priority` frame.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "queue" => Some(Self::Queue),
+            "now" => Some(Self::Now),
+            "steer" => Some(Self::Steer),
+            _ => None,
+        }
+    }
+}
+
 /// Watches the terminal's traffic and answers whether a paste is safe.
 pub struct Guard {
     quiet_input: i64,
@@ -82,8 +106,18 @@ impl Guard {
     /// Whether a paste is safe right now, or what to wait for. `foreground` says whether the agent itself is the one
     /// reading the terminal.
     pub fn check(&self, now: i64, foreground: bool) -> Result<(), Wait> {
+        self.check_as(now, foreground, Urgency::Queue)
+    }
+
+    /// Like `check`, for a message that may not want to wait. `Now` does not wait for the agent's output to go quiet (its input box takes
+    /// the paste while it works, and queues it for its next turn); `Steer` is a person taking the wheel, so it waits for nothing but the
+    /// terminal being the agent's. Someone half-way through typing a line is only ever respected by `Queue` and `Now`.
+    pub fn check_as(&self, now: i64, foreground: bool, urgency: Urgency) -> Result<(), Wait> {
         if !foreground {
             return Err(Wait::NotForeground);
+        }
+        if urgency == Urgency::Steer {
+            return Ok(());
         }
         if self.partial {
             return Err(Wait::PartialLine);
@@ -91,7 +125,7 @@ impl Guard {
         if self.last_input.is_some_and(|t| now - t < self.quiet_input) {
             return Err(Wait::PersonTyping);
         }
-        if now - self.last_output < self.quiet_output {
+        if urgency == Urgency::Queue && now - self.last_output < self.quiet_output {
             return Err(Wait::AgentBusy);
         }
         Ok(())

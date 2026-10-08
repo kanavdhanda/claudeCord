@@ -6,7 +6,7 @@ const slug = /^[A-Za-z0-9][A-Za-z0-9._-]{0,49}$/
 
 /**
  * The startup commands of this account. A command is any shell line: setup steps and then the agent's launch. It is kept here, shown here, and
- * chosen when an agent is started (the Spawn button, the page `claudecord start` opens, or Discord's /spawn). A machine runs one only after its
+ * chosen when an agent is started (the Spawn button, the page `claudecord` opens, or Discord's /spawn). A machine runs one only after its
  * owner turned that on with `claudecord settings custom-commands on`.
  */
 export function Commands() {

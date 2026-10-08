@@ -69,7 +69,7 @@ jobs:
           targets: ${{ matrix.target }}
       - run: sudo apt-get update && sudo apt-get install -y musl-tools
         if: contains(matrix.target, 'musl')
-      - run: cargo build --release --target ${{ matrix.target }} --bin claudecord
+      - run: cargo build --release --target ${{ matrix.target }} --no-default-features --bin claudecord
       - run: cp target/${{ matrix.target }}/release/claudecord${{ matrix.ext }} claudecord-${{ matrix.name }}${{ matrix.ext }}
         shell: bash
       - uses: actions/upload-artifact@v4

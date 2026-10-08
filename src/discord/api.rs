@@ -211,7 +211,7 @@ impl Rest {
         content: &str,
         thread: Option<&str>,
     ) -> Result<String> {
-        self.webhook_send_to(id, token, username, content, thread, &[])
+        self.webhook_send_to(id, token, username, content, thread, (&[], &[]))
             .await
     }
 
@@ -223,9 +223,9 @@ impl Rest {
         username: &str,
         content: &str,
         thread: Option<&str>,
-        notify: &[String],
+        (notify, roles): (&[String], &[String]),
     ) -> Result<String> {
-        let allowed = json!({"parse": [], "users": notify});
+        let allowed = json!({"parse": [], "users": notify, "roles": roles});
         let mut path = format!("/webhooks/{id}/{token}?wait=true");
         if let Some(t) = thread {
             path.push_str(&format!("&thread_id={t}"));

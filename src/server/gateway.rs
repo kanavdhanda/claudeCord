@@ -194,6 +194,7 @@ pub(crate) fn router(gw: Gateway) -> Router {
         .route("/api/v1/pick/{code}", get(pick_view).post(pick_choose))
         .route("/api/device/code", post(device_code))
         .route("/api/device/token", post(device_token))
+        .route("/api/device/refresh", post(device_refresh))
         .route("/api/device/lookup", get(device_lookup))
         .route("/api/device/approve", post(device_approve))
         .route("/api/device/deny", post(device_deny))
@@ -261,7 +262,7 @@ async fn connect(
     let found = if token.is_empty() {
         None
     } else {
-        gw.control.machine_for_token(token).ok().flatten()
+        machine_of(&gw, token)
     };
     let Some((tenant, node)) = found else {
         crate::warn!(
@@ -278,7 +279,7 @@ async fn connect(
 }
 
 /// `GET /api/device/project/{name}`: asks, with a machine's own token, whether a project of its account has a Discord channel yet, so that
-/// `claudecord start` can send the person to the dashboard's setup page only when it is needed. It says nothing else about the account.
+/// `claudecord` can send the person to the dashboard's setup page only when it is needed. It says nothing else about the account.
 async fn device_project(
     State(gw): State<Gateway>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -303,6 +304,55 @@ async fn device_project(
     )
 }
 
+/// The machine a bearer token stands for: (account, machine name). An access token (JWT) this hub signed counts while it has not run out and
+/// the machine has not been revoked. A refresh token still opens the door too, so a machine that has not been updated yet keeps working.
+fn machine_of(gw: &Gateway, token: &str) -> Option<(String, String)> {
+    if crate::security::jwt::looks_like_jwt(token) {
+        let c = crate::security::jwt::verify(token, crate::now_ms() / 1000)?;
+        return gw
+            .control
+            .machine_exists(&c.tid, &c.sub)
+            .ok()?
+            .then_some((c.tid, c.sub));
+    }
+    gw.control.machine_for_token(token).ok().flatten()
+}
+
+/// `POST /api/device/refresh`: a machine shows its refresh token (as the bearer) and gets a short-lived access token for its connections and
+/// requests, together with a new refresh token to keep. The old refresh token works for another minute, in case this answer is lost.
+async fn device_refresh(
+    State(gw): State<Gateway>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    let (ip, now) = (ip_of(peer), crate::now_ms());
+    if gw.failures.locked().blocked(&ip, now as f64) {
+        return err(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many failed attempts, wait a minute",
+        );
+    }
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+    match gw.control.rotate_machine_token(token, now) {
+        Ok(Some((tenant, node, refresh))) => json_reply(
+            StatusCode::OK,
+            json!({
+                "access_token": crate::security::jwt::sign(&tenant, &node, now / 1000),
+                "expires_in": crate::security::jwt::ACCESS_SECS,
+                "refresh_token": refresh,
+            }),
+        ),
+        _ => {
+            gw.failures.locked().fail(&ip, now as f64);
+            err(StatusCode::UNAUTHORIZED, "this login is not recognised")
+        }
+    }
+}
+
 /// The machine behind a request's token: (account, machine name). A wrong or missing token counts against the caller's address.
 fn machine_auth(
     gw: &Gateway,
@@ -321,7 +371,7 @@ fn machine_auth(
     let found = if token.is_empty() {
         None
     } else {
-        gw.control.machine_for_token(token).ok().flatten()
+        machine_of(gw, token)
     };
     found.ok_or_else(|| {
         gw.failures.locked().fail(ip, now);
@@ -339,7 +389,7 @@ struct PickStart {
     role: Option<String>,
 }
 
-/// `POST /api/device/pick`: `claudecord start` in a folder that belongs to no project yet asks for a short code. The person opens
+/// `POST /api/device/pick`: `claudecord` in a folder that belongs to no project yet asks for a short code. The person opens
 /// `/pick?code=...` on the dashboard, chooses or names the project there, and the machine collects the answer (`pick_poll`). The choice is
 /// only ever made on the dashboard, by a signed-in person of the same account.
 async fn pick_start(
@@ -400,7 +450,7 @@ async fn pick_start(
             at: now,
         },
     );
-    // `spawns`: choosing on the page makes this hub ask the machine to start the agent, so a `claudecord start` can wait for it.
+    // `spawns`: choosing on the page makes this hub ask the machine to start the agent, so a `claudecord` can wait for it.
     json_reply(StatusCode::OK, json!({ "code": code, "spawns": true }))
 }
 
@@ -558,7 +608,7 @@ async fn pick_choose(
     {
         return err(
             StatusCode::CONFLICT,
-            "this one is already chosen: run claudecord start again for another agent",
+            "this one is already chosen: run claudecord again for another agent",
         );
     }
     // Nothing continues without a Discord bot that is really in a server with the permissions it needs. (A saved bot is one Discord confirmed the
@@ -609,7 +659,7 @@ async fn pick_choose(
             "that choice expired; run the command again",
         );
     };
-    // The hub asks the machine to start the agent (a `claudecord start` only ever asks; it never starts one itself). A machine too old to be
+    // The hub asks the machine to start the agent (a `claudecord` only ever asks; it never starts one itself). A machine too old to be
     // asked this way still collects the choice and starts the agent itself, as it always did.
     let Ok(t) = gw.registry.hub(&a) else {
         return err(StatusCode::SERVICE_UNAVAILABLE, "your hub could not start");
@@ -686,7 +736,7 @@ async fn pick_choose(
         Some(Outcome::Offline) => {
             return err(
                 StatusCode::CONFLICT,
-                "your machine is not connected right now. Is `claudecord start` still running there?",
+                "your machine is not connected right now. Is `claudecord` still running there?",
             );
         }
         Some(Outcome::Taken(n)) => {
@@ -1222,7 +1272,7 @@ async fn insights(
     )
 }
 
-/// The account's whole conversation as an Obsidian vault in a `.tar.gz` (the same notes `claudecord export` writes). Nobody else's history
+/// The account's whole conversation as an Obsidian vault in a `.tar.gz` (the same notes `claudecord-hub export` writes). Nobody else's history
 /// is in it: it reads this account's own database.
 // ponytail: the whole history is read into memory, so it refuses past 200,000 rows; stream per project when someone has more.
 async fn export(State(gw): State<Gateway>, headers: HeaderMap) -> Response {

@@ -73,6 +73,96 @@ impl Link {
     }
 }
 
+/// What a machine shows the hub. Its login is a refresh token, kept for long; what goes on each connection and request is an access token (a
+/// JWT) the hub gives in exchange, which runs out after minutes. The refresh token is replaced by the hub each time it is used, and the new one
+/// is saved in the machine's config straight away. A hub that has no such exchange (an older one) is given the refresh token itself, as before.
+pub struct Auth {
+    http: String,
+    /// Where the saved config is. The refresh token is read from it each time, so every process on this machine uses the newest one.
+    dir: Option<std::path::PathBuf>,
+    refresh: std::sync::Mutex<String>,
+    access: std::sync::Mutex<Option<(String, i64)>>,
+    legacy: std::sync::atomic::AtomicBool,
+}
+
+impl Auth {
+    /// For the hub at `hub_url` (any form of its address) with this refresh token. With a `dir`, the token is kept in (and read from) the
+    /// config saved there.
+    pub fn new(hub_url: &str, token: String, dir: Option<std::path::PathBuf>) -> Arc<Self> {
+        Arc::new(Self {
+            http: super::enroll::http_base(hub_url),
+            dir,
+            refresh: std::sync::Mutex::new(token),
+            access: std::sync::Mutex::new(None),
+            legacy: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    fn refresh_token(&self) -> String {
+        use crate::sync::Lock;
+        self.dir
+            .as_deref()
+            .and_then(super::config::Config::load)
+            .map(|c| c.token)
+            .unwrap_or_else(|| self.refresh.locked().clone())
+    }
+
+    /// The token to put in `Authorization: Bearer`: the cached access token while it has more than a minute left, else a new one.
+    pub async fn bearer(&self) -> Result<String, String> {
+        use crate::sync::Lock;
+        use std::sync::atomic::Ordering;
+        if self.legacy.load(Ordering::Relaxed) {
+            return Ok(self.refresh_token());
+        }
+        let now = crate::now_ms() / 1000;
+        if let Some((t, exp)) = self.access.locked().clone()
+            && exp - 60 > now
+        {
+            return Ok(t);
+        }
+        let old = self.refresh_token();
+        let answer = reqwest::Client::new()
+            .post(format!("{}/api/device/refresh", self.http))
+            .bearer_auth(&old)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| format!("cannot reach the hub: {}", super::enroll::why(&e)))?;
+        match answer.status().as_u16() {
+            404 | 405 => {
+                // A hub without the exchange: carry on the old way.
+                self.legacy.store(true, Ordering::Relaxed);
+                Ok(old)
+            }
+            // Either the login really is not known, or this is a hub that answers unknown paths with 401. The token itself is tried next, and
+            // the hub's refusal of that is what the person is told.
+            401 => Ok(old),
+            s if !(200..300).contains(&s) => Err(format!("the hub answered {s} to a refresh")),
+            _ => {
+                let v: serde_json::Value = answer.json().await.map_err(|e| e.to_string())?;
+                let (Some(access), Some(fresh)) =
+                    (v["access_token"].as_str(), v["refresh_token"].as_str())
+                else {
+                    return Err("the hub's refresh answer was not understood".into());
+                };
+                *self.refresh.locked() = fresh.to_string();
+                if let Some(dir) = &self.dir
+                    && let Some(mut cfg) = super::config::Config::load(dir)
+                {
+                    cfg.token = fresh.to_string();
+                    if let Err(e) = cfg.save(dir) {
+                        // The old token still works for a minute; if it cannot be replaced on disk the next refresh fails and the person logs in again.
+                        crate::warn!("link", "could not save the new login: {e}");
+                    }
+                }
+                let exp = crate::security::jwt::expires_at(access).unwrap_or(now + 600);
+                *self.access.locked() = Some((access.to_string(), exp));
+                Ok(access.to_string())
+            }
+        }
+    }
+}
+
 /// Starts the link in the background. Events arrive on `events`. The link runs until the receiver is dropped.
 pub fn spawn(
     url: String,
@@ -81,9 +171,20 @@ pub fn spawn(
     events: mpsc::Sender<LinkEvent>,
     opts: LinkOpts,
 ) -> Link {
+    spawn_with(Auth::new(&url, token, None), url, node, events, opts)
+}
+
+/// Like `spawn`, with the login handled by `auth`.
+pub fn spawn_with(
+    auth: Arc<Auth>,
+    url: String,
+    node: String,
+    events: mpsc::Sender<LinkEvent>,
+    opts: LinkOpts,
+) -> Link {
     let (out, outbox) = mpsc::channel(1024);
     let wake = Arc::new(Notify::new());
-    tokio::spawn(run(url, token, node, events, outbox, opts, wake.clone()));
+    tokio::spawn(run(auth, url, node, events, outbox, opts, wake.clone()));
     Link { out, wake }
 }
 
@@ -153,8 +254,8 @@ impl Unacked {
 
 /// The reconnect loop.
 async fn run(
+    auth: Arc<Auth>,
     url: String,
-    token: String,
     node: String,
     events: mpsc::Sender<LinkEvent>,
     mut outbox: mpsc::Receiver<NodeFrame>,
@@ -163,9 +264,29 @@ async fn run(
 ) {
     let mut failures = 0u32;
     let mut unacked = Unacked::new();
+    let mut said = String::new();
     loop {
         let started = tokio::time::Instant::now();
-        if let Some(ws) = connect(&url, &token, &opts).await {
+        let conn = match auth.bearer().await {
+            Ok(token) => connect_detailed(&url, &token, &opts).await,
+            Err(e) => Err(e),
+        };
+        // Say why once, not at every retry: a refused login would otherwise fail in silence for ever.
+        if let Err(e) = &conn
+            && *e != said
+        {
+            said = e.clone();
+            if e.contains("401") {
+                crate::error!(
+                    "link",
+                    "the hub does not recognise this machine's login (removed on the dashboard?). Run `claudecord` to sign in again"
+                );
+            } else {
+                crate::warn!("link", "cannot connect to the hub: {e}");
+            }
+        }
+        if let Ok(ws) = conn {
+            said.clear();
             let replaced = session(ws, &node, &events, &mut outbox, &mut unacked, &opts).await;
             if events.send(LinkEvent::Down).await.is_err() {
                 return;
@@ -397,7 +518,10 @@ async fn session(
     let mut last_seen = tokio::time::Instant::now();
     let mut replaced = false;
     loop {
+        // Biased, and in this order: what the hub sent is read first, so a long stretch of sending never makes a live hub look silent. The stall
+        // check comes before more sending for the same reason.
         tokio::select! {
+            biased;
             msg = rx.next() => match msg {
                 None | Some(Err(_)) => return replaced,
                 Some(Ok(m)) => {
@@ -411,6 +535,8 @@ async fn session(
                             Some(HubFrame::Error { message }) if message.contains("replaced") => replaced = true,
                             Some(f) => {
                                 if events.send(LinkEvent::Frame(f)).await.is_err() { return replaced; }
+                                // Time spent waiting for the owner to take the frame is ours, not the hub's silence.
+                                last_seen = tokio::time::Instant::now();
                             }
                             None => {}
                         },
@@ -419,6 +545,10 @@ async fn session(
                     }
                 }
             },
+            _ = ping.tick() => {
+                if last_seen.elapsed() > opts.ping_every * 2 { return replaced; }
+                if tx.send(Message::Ping(Vec::new().into())).await.is_err() { return replaced; }
+            }
             frame = outbox.recv() => match frame {
                 None => return replaced,
                 Some(f) => {
@@ -426,10 +556,6 @@ async fn session(
                     if tx.send(Message::Text(text.into())).await.is_err() { return replaced; }
                 }
             },
-            _ = ping.tick() => {
-                if last_seen.elapsed() > opts.ping_every * 2 { return replaced; }
-                if tx.send(Message::Ping(Vec::new().into())).await.is_err() { return replaced; }
-            }
             _ = watch.tick() => {
                 // The machine was asleep: the old connection is certainly dead, so do not wait to find out.
                 let now = SystemTime::now();

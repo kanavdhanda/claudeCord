@@ -75,6 +75,7 @@ fn fast(extra: Vec<PathBuf>, max_agents: usize, labels: Vec<String>) -> Options 
         backend: Backend::Pty,
         auto_startup: false,
         idle_exit: None,
+        idle_agents_exit: None,
     }
 }
 
@@ -192,6 +193,57 @@ async fn up(r: &Rig, name: &str) -> String {
     let resp = up_with(r, name, UpOpts::default()).await;
     assert!(resp.ok, "{}", resp.msg);
     resp.data.unwrap()["key"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn a_message_waiting_on_a_busy_agent_goes_straight_through_when_the_person_asks() {
+    // The agent never goes quiet for 60 seconds, as if it were in the middle of a long run.
+    let r = rig_tuned("hurry", NORMAL, 8, vec![], Backend::Pty, |o| {
+        o.quiet = (0, 60_000)
+    })
+    .await;
+    up(&r, "otter").await;
+    eventually("registered", async || {
+        r.hub
+            .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    r.hub
+        .call(|c, now| {
+            let r = c
+                .human_message(
+                    &kd(),
+                    "demo",
+                    "look at this now",
+                    &MessageOpts {
+                        reference: Some("c:7"),
+                        ..Default::default()
+                    },
+                    now,
+                )
+                .unwrap();
+            ((), r.1)
+        })
+        .await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(
+        std::fs::read_to_string(r.project.join("fake.log")).is_err(),
+        "queued: the agent is busy, so nothing was pasted"
+    );
+    r.hub
+        .call(|c, _| {
+            let mut fx = Vec::new();
+            let sent = c.prioritise(&kd(), "demo", "c:7", "now", &mut fx);
+            (sent, fx)
+        })
+        .await;
+    eventually("the message goes straight through", async || {
+        std::fs::read_to_string(r.project.join("fake.log"))
+            .is_ok_and(|s| s.contains("look at this now"))
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -399,13 +451,13 @@ async fn a_file_sent_from_chat_lands_in_the_agents_inbox_and_the_agent_is_told_w
         })
         .await;
     eventually("file saved", async || {
-        std::fs::read(r.project.join(".claudecord/files/demo/t1-plan.txt"))
+        std::fs::read(r.project.join(".claudecord/files/demo/plan.txt"))
             .is_ok_and(|b| b == b"the plan")
     })
     .await;
     eventually("agent told", async || {
         std::fs::read_to_string(r.project.join("fake.log"))
-            .is_ok_and(|s| s.contains(".claudecord/files/demo/t1-plan.txt"))
+            .is_ok_and(|s| s.contains(".claudecord/files/demo/plan.txt"))
     })
     .await;
     r.hub.shutdown().await;
@@ -1772,11 +1824,49 @@ async fn files_sent_to_an_agent_land_in_the_inbox_of_its_project_only() {
         })
         .await;
     eventually("saved in the project's own inbox", async || {
-        std::fs::read(r.project.join(".claudecord/files/demo/t9-a.txt")).is_ok_and(|b| b == b"mine")
+        std::fs::read(r.project.join(".claudecord/files/demo/a.txt")).is_ok_and(|b| b == b"mine")
     })
     .await;
     // Nothing is put loose in the shared folder, where another project's agent would find it.
-    assert!(!r.project.join(".claudecord/files/t9-a.txt").exists());
+    assert!(!r.project.join(".claudecord/files/a.txt").exists());
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_file_sent_again_under_the_same_name_replaces_the_old_one() {
+    let r = rig("resend").await;
+    up(&r, "otter").await;
+    eventually("registered", async || {
+        r.hub
+            .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    let path = r.project.join(".claudecord/files/demo/plan.md");
+    for (id, body) in [("t1", &b"first"[..]), ("t2", &b"second"[..])] {
+        r.hub
+            .call(move |c, _| {
+                let (_, fx) = c
+                    .send_file(&kd(), "demo", "x", "plan.md", body, None, id)
+                    .unwrap();
+                ((), fx)
+            })
+            .await;
+        eventually("saved", async || {
+            std::fs::read(&path).is_ok_and(|b| b == body)
+        })
+        .await;
+    }
+    let left: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        left,
+        vec!["plan.md"],
+        "one canonical file, no copies or leftovers"
+    );
     r.hub.shutdown().await;
 }
 
@@ -1820,7 +1910,7 @@ async fn a_moved_agent_is_filed_under_its_new_project_and_still_speaks_with_its_
         })
         .await;
     eventually("file in the new project's inbox", async || {
-        std::fs::read(r.project.join(".claudecord/files/other/t7-n.txt"))
+        std::fs::read(r.project.join(".claudecord/files/other/n.txt"))
             .is_ok_and(|b| b == b"new home")
     })
     .await;
@@ -1870,7 +1960,7 @@ async fn rig_hub_only(name: &str) -> Rig {
     .await
 }
 
-/// What a waiting `claudecord start` tells the daemon about where the agent goes.
+/// What a waiting `claudecord` tells the daemon about where the agent goes.
 fn expect(code: &str, cwd: &Path) -> Req {
     Req::Expect {
         code: code.into(),
@@ -1923,7 +2013,7 @@ async fn nothing_starts_an_agent_on_a_machine_but_the_hub() {
     );
     let list = ipc::call(&r.dir, &Req::List).await.unwrap().data.unwrap();
     assert_eq!(list.as_array().unwrap().len(), 0);
-    // The hub can: with a waiting `claudecord start`, in its folder, and the start is told.
+    // The hub can: with a waiting `claudecord`, in its folder, and the start is told.
     assert!(
         ipc::call(&r.dir, &expect("abc123", &r.project))
             .await
@@ -2110,5 +2200,346 @@ async fn a_start_that_is_waiting_for_the_hub_keeps_the_daemon_from_leaving() {
         ipc::call(&r.dir, &Req::Ping).await.is_ok(),
         "the daemon left while a start was waiting"
     );
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_daemon_whose_agents_all_sit_idle_closes_them_and_goes_away() {
+    let r = rig_tuned("idleagents", NORMAL, 8, vec![], Backend::Pty, |o| {
+        o.idle_exit = Some(Duration::from_millis(600));
+        o.idle_agents_exit = Some(Duration::from_millis(1500));
+    })
+    .await;
+    up(&r, "otter").await;
+    eventually("idle", async || {
+        r.hub
+            .call(|c, _| (c.status_of("demo/otter") == AgentStatus::Idle, vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    // Nothing is sent to it, and nobody touches its terminal: it is given up on.
+    eventually("the daemon to leave", async || {
+        ipc::call(&r.dir, &Req::Ping).await.is_err()
+    })
+    .await;
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_daemon_with_an_agent_that_keeps_getting_messages_stays() {
+    let r = rig_tuned("busyagents", NORMAL, 8, vec![], Backend::Pty, |o| {
+        o.idle_exit = Some(Duration::from_millis(600));
+        o.idle_agents_exit = Some(Duration::from_millis(2500));
+    })
+    .await;
+    up(&r, "otter").await;
+    eventually("idle", async || {
+        r.hub
+            .call(|c, _| (c.status_of("demo/otter") == AgentStatus::Idle, vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    // A message every second changes its screen, so it is never idle for the whole time.
+    for n in 0..5 {
+        r.hub
+            .call(move |c, now| {
+                let r = c
+                    .human_message(
+                        &kd(),
+                        "demo",
+                        &format!("ping {n}"),
+                        &MessageOpts::default(),
+                        now,
+                    )
+                    .unwrap();
+                ((), r.1)
+            })
+            .await;
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        assert!(
+            ipc::call(&r.dir, &Req::Ping).await.is_ok(),
+            "the daemon left while the agent was in use"
+        );
+    }
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn messages_waiting_in_different_threads_are_pasted_one_thread_at_a_time() {
+    let r = rig_tuned("threads", NORMAL, 8, vec![], Backend::Pty, |o| {
+        o.quiet = (0, 60_000)
+    })
+    .await;
+    up(&r, "otter").await;
+    eventually("registered", async || {
+        r.hub
+            .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    for (text, thread, reference) in [("alpha", "T1 one", "c:1"), ("beta", "T2 two", "c:2")] {
+        r.hub
+            .call(move |c, now| {
+                let r = c
+                    .human_message(
+                        &kd(),
+                        "demo",
+                        text,
+                        &MessageOpts {
+                            thread: Some(thread),
+                            reference: Some(reference),
+                            ..Default::default()
+                        },
+                        now,
+                    )
+                    .unwrap();
+                ((), r.1)
+            })
+            .await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    r.hub
+        .call(|c, _| {
+            let mut fx = Vec::new();
+            let _ = c.prioritise(&kd(), "demo", "c:1", "now", &mut fx);
+            ((), fx)
+        })
+        .await;
+    eventually("the first thread", async || {
+        std::fs::read_to_string(r.project.join("fake.log")).is_ok_and(|s| s.contains("alpha"))
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let log = std::fs::read_to_string(r.project.join("fake.log")).unwrap();
+    assert!(
+        !log.contains("beta"),
+        "the second thread was mixed in: {log}"
+    );
+}
+
+#[tokio::test]
+async fn a_say_to_a_peer_returns_delivered_once_the_peer_has_it_and_a_plain_say_returns_at_once() {
+    let r = rig("sayreceipt").await;
+    let key = up(&r, "otter").await;
+    // The peer works in a folder of its own: two agents never share one.
+    let other = r.project.parent().unwrap().join("demo2");
+    std::fs::create_dir_all(&other).unwrap();
+    let resp = ipc::call(
+        &r.dir,
+        &Req::Up {
+            project: "demo".into(),
+            name: Some("heron".into()),
+            adapter: "claude".into(),
+            model: None,
+            role: None,
+            cwd: other.to_string_lossy().into(),
+            policy: "autonomous".into(),
+            rows: 24,
+            cols: 80,
+            opts: UpOpts::default(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(resp.ok, "{}", resp.msg);
+    eventually("both registered", async || {
+        r.hub
+            .call(|c, _| {
+                (
+                    c.agent("demo/otter").is_some() && c.agent("demo/heron").is_some(),
+                    vec![],
+                )
+            })
+            .await
+            .unwrap()
+    })
+    .await;
+    let say = |text: &str| {
+        let (dir, key, text) = (r.dir.clone(), key.clone(), text.to_string());
+        async move {
+            let started = std::time::Instant::now();
+            let resp = ipc::call_as(
+                &dir,
+                Some(&key),
+                &Req::Say {
+                    agent: "demo/otter".into(),
+                    text,
+                    thread: None,
+                },
+            )
+            .await
+            .unwrap();
+            (resp, started.elapsed())
+        }
+    };
+    let (plain, took) = say("thinking aloud").await;
+    assert!(plain.ok && plain.msg == "sent", "{}", plain.msg);
+    assert!(took < Duration::from_secs(3), "a plain say waited {took:?}");
+    let (named, _) = say("@heron please look at this").await;
+    assert!(
+        named.ok && named.msg.starts_with("delivered"),
+        "{}",
+        named.msg
+    );
+    // It really is in the peer's terminal by then.
+    assert!(
+        std::fs::read_to_string(other.join("fake.log"))
+            .unwrap_or_default()
+            .contains("please look at this")
+    );
+    r.hub.shutdown().await;
+}
+
+/// Never shows its input box, so it stays "starting" and nothing can be pasted into it.
+const NEVER_READY: &str = "#!/bin/sh\nsleep 60\n";
+
+#[tokio::test]
+async fn a_say_to_a_peer_whose_terminal_cannot_take_it_fails_with_the_reason_and_is_not_a_success()
+{
+    let r = rig_with("sayfails", NEVER_READY).await;
+    let key = up(&r, "otter").await;
+    let other = r.project.parent().unwrap().join("demo2");
+    std::fs::create_dir_all(&other).unwrap();
+    let resp = ipc::call(
+        &r.dir,
+        &Req::Up {
+            project: "demo".into(),
+            name: Some("heron".into()),
+            adapter: "claude".into(),
+            model: None,
+            role: None,
+            cwd: other.to_string_lossy().into(),
+            policy: "autonomous".into(),
+            rows: 24,
+            cols: 80,
+            opts: UpOpts::default(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(resp.ok, "{}", resp.msg);
+    eventually("both registered", async || {
+        r.hub
+            .call(|c, _| {
+                (
+                    c.agent("demo/otter").is_some() && c.agent("demo/heron").is_some(),
+                    vec![],
+                )
+            })
+            .await
+            .unwrap()
+    })
+    .await;
+    let resp = ipc::call_as(
+        &r.dir,
+        Some(&key),
+        &Req::Say {
+            agent: "demo/otter".into(),
+            text: "@heron are you there".into(),
+            thread: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        !resp.ok,
+        "a failed say must not look like a success: {}",
+        resp.msg
+    );
+    assert!(
+        resp.msg.starts_with("NOT delivered") && resp.msg.contains("not ready for input"),
+        "{}",
+        resp.msg
+    );
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_large_file_in_many_pieces_arrives_byte_for_byte_and_leaves_no_part_file() {
+    let r = rig("bigfile").await;
+    up(&r, "otter").await;
+    eventually("registered", async || {
+        r.hub
+            .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    // Ten megabytes, near the size limit, of a pattern (a big burst in the test rig, whose heartbeat is very short: it must never cost the connection) that shows if a piece is lost, doubled or out of place.
+    let body: Vec<u8> = (0..10_000_000u32).map(|i| (i % 251) as u8).collect();
+    let sent = body.clone();
+    r.hub
+        .call(move |c, _| {
+            let (_, fx) = c
+                .send_file(&kd(), "demo", "x", "model.bin", &sent, None, "t1")
+                .unwrap();
+            ((), fx)
+        })
+        .await;
+    let path = r.project.join(".claudecord/files/demo/model.bin");
+    eventually("the whole file", async || {
+        std::fs::read(&path).is_ok_and(|b| b == body)
+    })
+    .await;
+    let left: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, vec!["model.bin"], "no .part file is left behind");
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_file_over_the_limit_is_refused_by_its_size_before_it_is_read() {
+    let r = rig("toobig").await;
+    let key = up(&r, "otter").await;
+    let big = r.project.join("big.bin");
+    // A sparse file: the size is there, the bytes are not, so reading it would be slow and large.
+    let f = std::fs::File::create(&big).unwrap();
+    f.set_len(1_000_000_000).unwrap();
+    let started = std::time::Instant::now();
+    let resp = ipc::call_as(
+        &r.dir,
+        Some(&key),
+        &Req::Send {
+            agent: "demo/otter".into(),
+            path: "big.bin".into(),
+            to: None,
+            caption: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(!resp.ok && resp.msg.contains("limit"), "{}", resp.msg);
+    assert!(started.elapsed() < Duration::from_secs(2));
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn threads_answers_in_the_same_call_with_where_the_agent_can_post() {
+    let r = rig("threadlist").await;
+    let key = up(&r, "otter").await;
+    eventually("registered", async || {
+        r.hub
+            .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    let started = std::time::Instant::now();
+    let resp = ipc::call_as(
+        &r.dir,
+        Some(&key),
+        &Req::Threads {
+            agent: "demo/otter".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(resp.ok && resp.msg.contains("main channel"), "{}", resp.msg);
+    assert!(started.elapsed() < Duration::from_secs(3));
     r.hub.shutdown().await;
 }

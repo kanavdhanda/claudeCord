@@ -1,5 +1,5 @@
 //! A machine joining a hub with no token typed by anyone: it asks the hub for a short code, shows the person a link, and waits while they
-//! sign in with Discord in a browser and approve it. This is what the very first `claudecord start` (or `npx claudecord`) does on a new
+//! sign in with Discord in a browser and approve it. This is what the very first `claudecord` (or `npx claudecord`) does on a new
 //! machine. The token it gets back never appears on screen or in a shell history; it goes straight into the machine's private config.
 
 use super::config::Config;
@@ -18,6 +18,18 @@ pub const DEFAULT_HUB: &str = match option_env!("CLAUDECORD_HUB") {
 /// (the release check does exactly that). Passing it through `black_box` keeps it a string.
 pub fn default_hub() -> &'static str {
     std::hint::black_box(DEFAULT_HUB)
+}
+
+/// What to tell a person when the hub answers a machine's request with `status`. A 401 is the hub saying it does not know this machine's login
+/// (it was removed on the dashboard's Machines page, or its login was made for another hub): the fix is to approve it again, so say so.
+pub fn refusal(base: &str, status: u16) -> String {
+    if status == 401 {
+        format!(
+            "{base} does not recognise this machine's login (was it removed on the dashboard's Machines page?). Approve it again with: claudecord login"
+        )
+    } else {
+        format!("{base} refused the request ({status})")
+    }
 }
 
 /// An error with every cause under it ("error sending request: connection error: invalid peer certificate: UnknownIssuer"), because the top
@@ -159,7 +171,7 @@ pub async fn enroll(hub: &str, node: &str, show: impl Fn(&str, &str)) -> Result<
         .await
         .map_err(|e| format!("cannot reach {base}: {}", why(&e)))?;
     if !r.status().is_success() {
-        return Err(format!("{base} refused the request ({})", r.status()));
+        return Err(refusal(&base, r.status().as_u16()));
     }
     let c: Value = r.json().await.map_err(|e| e.to_string())?;
     let (device, user, link) = (
@@ -235,5 +247,19 @@ mod hub_address_tests {
         ] {
             assert!(check_hub(bad).is_err(), "{bad}");
         }
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::refusal;
+
+    #[test]
+    fn an_unknown_login_says_how_to_approve_the_machine_again() {
+        assert!(refusal("https://h", 401).contains("claudecord login"));
+        assert_eq!(
+            refusal("https://h", 500),
+            "https://h refused the request (500)"
+        );
     }
 }

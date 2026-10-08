@@ -1,5 +1,5 @@
-//! The server commands: `claudecord hub` runs the central hub, `claudecord token` makes a token for a machine, and
-//! `claudecord load-tokens` makes many at once into a private file for the k6 load test.
+//! The server commands: `claudecord-hub hub` runs the central hub, `claudecord-hub token` makes a token for a machine, and
+//! `claudecord-hub load-tokens` makes many at once into a private file for the k6 load test.
 
 use crate::hub::HubCore;
 use crate::server::{self, Config};
@@ -19,7 +19,7 @@ pub struct HubArgs {
     #[arg(long = "owner")]
     pub owners: Vec<String>,
     /// Keep an Obsidian vault of the conversation up to date in this folder while the hub runs (open it in Obsidian), and once more when
-    /// the hub stops. The same thing `claudecord export` writes.
+    /// the hub stops. The same thing `claudecord-hub export` writes.
     #[arg(long)]
     pub vault: Option<PathBuf>,
     /// How often the vault is refreshed, in seconds.
@@ -109,7 +109,7 @@ pub async fn run_hub(a: HubArgs) -> Result<(), String> {
     preflight(&a.data)?;
     let mut store = Store::open(&a.data.join("hub.db"), Some(&a.data.join("history")))
         .map_err(|e| e.to_string())?;
-    // Old history and backups go to the bucket chosen with `claudecord storage`, if there is one.
+    // Old history and backups go to the bucket chosen with `claudecord-hub storage`, if there is one.
     if a.data.join("storage.json").exists() {
         store.set_bucket(Some(super::storage::load(&a.data.join("storage.json"))?));
     }
@@ -117,14 +117,11 @@ pub async fn run_hub(a: HubArgs) -> Result<(), String> {
     for o in &a.owners {
         core.add_owner(o);
     }
-    let oauth = super::discord::oauth_config(&a.data)?;
-    let discord = super::discord::bridge_config(&a.data)?;
+    // No Discord here: bot tokens are only ever saved through the hosted service, sealed (`claudecord-hub serve`). This hub is for tests and development.
     let hub = server::start(
         Config {
             bind,
-            oauth,
             log_path: Some(a.data.join("hub.log")),
-            discord_expected: discord.is_some(),
             ..Config::default()
         },
         core,
@@ -136,18 +133,6 @@ pub async fn run_hub(a: HubArgs) -> Result<(), String> {
         std::io::ErrorKind::PermissionDenied => format!("not allowed to listen on {bind} (ports below 1024 need extra permission; use a higher port behind a TLS proxy)"),
         _ => e.to_string(),
     })?;
-    // Discord is part of the hub: once `claudecord discord set` has been run, starting the hub starts the bridge too.
-    match discord {
-        Some(mut cfg) => {
-            cfg.owners = a.owners.clone();
-            crate::discord::bridge::spawn(hub.handle(), hub.chat(), cfg);
-            crate::info!("hub", "the Discord bridge is starting");
-        }
-        None => crate::warn!(
-            "hub",
-            "Discord is not set up (claudecord discord set), so only the dashboard and machines are served"
-        ),
-    }
     crate::info!(
         "hub",
         "listening on {}  (data in {}, log in hub.log)",
@@ -191,7 +176,7 @@ pub fn preflight(data: &std::path::Path) -> Result<(), String> {
             .map_err(|e| format!("the database {} cannot be opened: {e}", db.display()))?;
         store.integrity().map_err(|found| {
             format!(
-                "the database {} is damaged ({found}). Bring back the last copy with `claudecord storage restore`, or move the file aside to start fresh",
+                "the database {} is damaged ({found}). Bring back the last copy with `claudecord-hub storage restore`, or move the file aside to start fresh",
                 db.display()
             )
         })?;
@@ -394,7 +379,7 @@ pub async fn run_serve(a: ServeArgs) -> Result<(), String> {
     let stop = crate::task::stop_listener();
     std::fs::create_dir_all(&a.data).map_err(|e| e.to_string())?;
     crate::log::init(Some(a.data.join("hub.log")));
-    // The operator's bucket (`claudecord storage oracle ...` with this --data) holds old history and backups for every account.
+    // The operator's bucket (`claudecord-hub storage oracle ...` with this --data) holds old history and backups for every account.
     let bucket = if a.data.join("storage.json").exists() {
         Some(super::storage::load(&a.data.join("storage.json"))?)
     } else {

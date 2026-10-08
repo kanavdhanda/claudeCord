@@ -238,6 +238,7 @@ async fn an_agents_words_appear_under_its_own_name_in_a_channel_and_in_a_thread(
             agent_id: "demo/otter".into(),
             text: "hello team".into(),
             thread: None,
+            say_id: None,
         })
         .await;
     let post = r
@@ -255,6 +256,7 @@ async fn an_agents_words_appear_under_its_own_name_in_a_channel_and_in_a_thread(
             agent_id: "demo/otter".into(),
             text: "in a thread".into(),
             thread: Some("T1".into()),
+            say_id: None,
         })
         .await;
     let post = r
@@ -682,6 +684,7 @@ async fn a_long_reply_is_attached_as_a_file_instead_of_being_cut() {
             agent_id: "demo/otter".into(),
             text: long,
             thread: None,
+            say_id: None,
         })
         .await;
     let post = r
@@ -943,6 +946,7 @@ async fn an_agent_can_really_tag_a_person_and_a_reply_to_an_agents_message_goes_
             agent_id: "demo/heron".into(),
             text: "@user1 the build is done".into(),
             thread: None,
+            say_id: None,
         })
         .await;
     let post = r
@@ -960,6 +964,38 @@ async fn an_agent_can_really_tag_a_person_and_a_reply_to_an_agents_message_goes_
         .await;
     assert_eq!(post["content"], "<@1> the build is done", "{post}");
     assert_eq!(post["notify"], json!(["1"]), "{post}");
+    // An agent addressed by name is tagged with its role, and that role is allowed to be pinged.
+    let role_id = r
+        .until("otter's role", |l| {
+            l.roles
+                .iter()
+                .find(|x| x["name"] == "otter (agent)")
+                .map(|x| x["id"].clone())
+        })
+        .await;
+    r.link
+        .send(NodeFrame::AgentSay {
+            agent_id: "demo/heron".into(),
+            text: "@otter please check".into(),
+            thread: None,
+            say_id: None,
+        })
+        .await;
+    let ping = r
+        .until("the role ping", |l| {
+            l.posts
+                .iter()
+                .find(|p| {
+                    p["content"]
+                        .as_str()
+                        .is_some_and(|c| c.ends_with("please check"))
+                })
+                .cloned()
+        })
+        .await;
+    let id = role_id.as_str().unwrap();
+    assert_eq!(ping["content"], format!("<@&{id}> please check"), "{ping}");
+    assert_eq!(ping["notify_roles"], json!([id]), "{ping}");
     // Replying to that message, with no name in the reply, goes to heron and not to the lead (otter).
     let mut reply = message(&ch, "m2", "1", "thanks, ship it");
     reply["message_reference"] = json!({"message_id": post["id"]});

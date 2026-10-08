@@ -723,6 +723,7 @@ async fn an_agents_words_reach_the_channel_chosen_in_the_chosen_server() {
             agent_id: "alpha/otter".into(),
             text: "hello from otter".into(),
             thread: None,
+            say_id: None,
         },
     ] {
         ws.send(Message::Text(serde_json::to_string(&f).unwrap().into()))
@@ -799,6 +800,7 @@ async fn an_agents_words_reach_the_channel_chosen_in_the_chosen_server() {
             agent_id: "alpha/otter".into(),
             text: "now in beta".into(),
             thread: None,
+            say_id: None,
         })
         .unwrap()
         .into(),
@@ -1563,7 +1565,7 @@ async fn pressing_start_makes_the_hub_ask_the_machine_to_start_the_agent_with_th
     )
     .await;
     assert_eq!(st, 200, "{body}");
-    // The machine is asked, with the command's text, the code of the waiting `claudecord start`, and the page's choices.
+    // The machine is asked, with the command's text, the code of the waiting `claudecord`, and the page's choices.
     let mut asked = None;
     for _ in 0..80 {
         if let Ok(Some(Ok(Message::Text(t)))) =
@@ -1775,7 +1777,7 @@ async fn discord_spawn_can_name_a_saved_startup_command_with_autocomplete_and_re
     );
     assert!(
         pick.is_none(),
-        "a Discord spawn is not for a waiting claudecord start"
+        "a Discord spawn is not for a waiting claudecord"
     );
     gw.shutdown().await;
 }
@@ -1858,4 +1860,111 @@ async fn tenants_cost() {
         (after.1 - before.1) as f64 / n as f64,
         (after.2 - before.2) as f64 / n as f64
     );
+}
+
+/// Asks the hub to exchange a refresh token (as the bearer): the status and the answer.
+async fn refresh(base: &str, token: &str) -> (u16, Value) {
+    let r = client()
+        .post(format!("{base}/api/device/refresh"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    let status = r.status().as_u16();
+    (status, r.json().await.unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn a_machine_trades_its_refresh_token_for_short_lived_access_tokens() {
+    let (gw, base) = rig().await;
+    let s = sign_in(&base, "111").await;
+    let login = enroll(&base, &s, "mac").await;
+    let (status, first) = refresh(&base, &login).await;
+    assert_eq!(status, 200, "{first}");
+    let access = first["access_token"].as_str().unwrap();
+    let next = first["refresh_token"].as_str().unwrap();
+    assert!(access.starts_with("eyJ") && next.starts_with("ccn1.") && next != login);
+    assert_eq!(first["expires_in"], 900);
+    // The access token opens the door, and so does the new refresh token.
+    let mut ws = connect(&base, access).await.unwrap();
+    assert_eq!(welcomed(&mut ws).await.as_deref(), Some("mac"));
+    // The replaced one still works for a minute, so an answer lost on the way does not lock the machine out.
+    assert_eq!(refresh(&base, &login).await.0, 200);
+    assert_eq!(refresh(&base, next).await.0, 200);
+    // A forged or made-up token never does.
+    assert_eq!(refresh(&base, "ccn1.nothing").await.0, 401);
+    assert_eq!(refresh(&base, &format!("{access}x")).await.0, 401);
+    assert!(connect(&base, &format!("{access}x")).await.is_err());
+    // Revoking the machine ends its access token at once, not when it runs out.
+    post_json(
+        &base,
+        "/api/v1/machines/revoke",
+        Some(&s),
+        json!({"node": "mac"}),
+    )
+    .await;
+    assert!(connect(&base, access).await.is_err());
+    assert_eq!(refresh(&base, next).await.0, 401);
+    gw.shutdown().await;
+}
+
+#[test]
+fn a_replaced_refresh_token_stops_working_after_its_grace_time() {
+    let c = Control::open_memory().unwrap();
+    let a = c.sign_in_discord("1", "ann", 0).unwrap();
+    let (device, user) = c.device_start("mac", 0).unwrap();
+    assert!(c.device_approve(&user, &a.id, "mac", 1).unwrap());
+    let claudecord::control::Poll::Approved { token, .. } = c.device_poll(&device, 2).unwrap()
+    else {
+        panic!("not approved")
+    };
+    let (_, _, fresh) = c.rotate_machine_token(&token, 1_000).unwrap().unwrap();
+    assert!(
+        c.rotate_machine_token(&token, 1_000 + 59_000)
+            .unwrap()
+            .is_some(),
+        "inside the grace time"
+    );
+    assert!(
+        c.rotate_machine_token(&token, 1_000 + claudecord::control::REFRESH_GRACE_MS + 1)
+            .unwrap()
+            .is_none(),
+        "after it"
+    );
+    assert!(
+        c.rotate_machine_token(&fresh, 1_000 + 120_000)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn the_machine_side_asks_for_an_access_token_once_and_keeps_it_until_it_is_nearly_out() {
+    let (gw, base) = rig().await;
+    let s = sign_in(&base, "111").await;
+    let login = enroll(&base, &s, "mac").await;
+    let dir = std::env::temp_dir().join(format!("cc-auth-{}", std::process::id()));
+    let cfg = claudecord::device::config::Config {
+        hub_url: base.clone(),
+        token: login.clone(),
+        node_name: "mac".into(),
+    };
+    cfg.save(&dir).unwrap();
+    let auth = claudecord::device::link::Auth::new(&base, login.clone(), Some(dir.clone()));
+    let first = auth.bearer().await.unwrap();
+    assert!(
+        first.starts_with("eyJ"),
+        "an access token, not the login: {first}"
+    );
+    assert_eq!(
+        auth.bearer().await.unwrap(),
+        first,
+        "kept, not asked for again"
+    );
+    // The new refresh token was saved in the config, in place of the one the person logged in with.
+    let saved = claudecord::device::config::Config::load(&dir).unwrap();
+    assert!(saved.token.starts_with("ccn1.") && saved.token != login);
+    assert!(connect(&base, &first).await.is_ok());
+    std::fs::remove_dir_all(&dir).ok();
+    gw.shutdown().await;
 }

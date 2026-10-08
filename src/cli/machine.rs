@@ -83,7 +83,7 @@ pub async fn login(a: LoginArgs) -> Result<(), String> {
     };
     cfg.save(&home_dir()).map_err(|e| e.to_string())?;
     println!(
-        "saved. This machine is connected. Next: {} start, in the folder of a project.",
+        "saved. This machine is connected. Next: run {} in the folder of a project.",
         me()
     );
     Ok(())
@@ -110,7 +110,7 @@ pub async fn home() -> Result<(), String> {
                     a["cwd"].as_str().unwrap_or("")
                 );
             }
-            println!("Start an agent in a project folder:  {} start", me());
+            println!("Start an agent in a project folder:  {}", me());
             return Ok(());
         }
         return pick_and_attach(&rows, true).await;
@@ -122,7 +122,7 @@ pub async fn home() -> Result<(), String> {
     })
     .await?;
     println!(
-        "Connected. Start an agent with `{} start` in a project folder.",
+        "Connected. Start an agent by running `{}` in a project folder.",
         me()
     );
     Ok(())
@@ -140,17 +140,21 @@ async fn browser_login(hub: &str, name: &str) -> Result<Config, String> {
     .await
 }
 
+/// How long every agent may sit idle before the daemon closes them and itself.
+const IDLE_AGENTS_MINUTES: u64 = 30;
+
 /// Runs the daemon in the foreground.
 pub async fn run_daemon() -> Result<(), String> {
     let dir = home_dir();
     let cfg =
         Config::load(&dir).ok_or_else(|| format!("not logged in: run {} login first", me()))?;
-    // The daemon logs to the terminal, which `claudecord start` points at daemon.log when it starts the daemon for you.
+    // The daemon logs to the terminal, which `claudecord` points at daemon.log when it starts the daemon for you.
     crate::log::init(None);
-    // Gone by itself 20 seconds after the last agent ends, unless the person turned on keep-running.
+    // Gone by itself 20 seconds after the last agent ends, or when every agent has sat idle for half an hour, unless the person turned on keep-running.
     let opts = Options {
         dev_spawn: dev_spawn(),
         idle_exit: Some(Duration::from_secs(20)),
+        idle_agents_exit: Some(Duration::from_secs(IDLE_AGENTS_MINUTES * 60)),
         ..Options::default()
     };
     // The daemon is started from a terminal. Closing that terminal sends it a hangup, whose default is to end it (and with it every agent's
@@ -262,7 +266,7 @@ fn expect_ok(r: Resp) -> Result<Resp, String> {
     if r.ok { Ok(r) } else { Err(r.msg) }
 }
 
-/// `claudecord start`: asks for an agent in this folder, and waits. Agents are started by the hub alone, never from here: this opens a page on the
+/// `claudecord`: asks for an agent in this folder, and waits. Agents are started by the hub alone, never from here: this opens a page on the
 /// dashboard (where the project, the agent's name, its program or saved command, and its role are chosen), tells the daemon here where the agent
 /// will go, and waits until the hub has had it started. Then it writes the team guide into AGENTS.md and opens the agent's terminal unless asked
 /// not to. The project, name, program and role given on the command line are only what the page starts with.
@@ -302,8 +306,28 @@ pub async fn start(a: StartArgs) -> Result<(), String> {
         adapter: (a.adapter != "claude").then(|| a.adapter.clone()),
         role: a.role.clone(),
     };
-    let (code, url) = match request_pick(&cwd, &prefill).await {
+    let mut picked = request_pick(&cwd, &prefill).await;
+    if matches!(picked, Err(PickError::Unrecognised)) {
+        // The hub forgot this machine: sign in again in the browser and retry once, rather than telling the person to.
+        eprintln!("The hub does not recognise this machine's login. Signing in again...");
+        login(LoginArgs {
+            hub: None,
+            token: None,
+            name: None,
+        })
+        .await?;
+        picked = request_pick(&cwd, &prefill).await;
+    }
+    let (code, url) = match picked {
         Ok(p) => p,
+        Err(PickError::Unrecognised) => {
+            return Err(enroll::refusal(
+                &Config::load(&home_dir())
+                    .map(|c| c.hub_url)
+                    .unwrap_or_default(),
+                401,
+            ));
+        }
         Err(PickError::NoPage) if dev_spawn() => return start_local(a).await,
         Err(PickError::NoPage) => {
             return Err("this hub has no dashboard to start agents from. Agents are started by the hub: from Discord with /spawn, or on a hub that serves the dashboard".into());
@@ -408,17 +432,14 @@ async fn wait_for_spawn(
             _ => {}
         }
     }
-    Err(format!(
-        "no choice was made in an hour: run {} start again",
-        me()
-    ))
+    Err(format!("no choice was made in an hour: run {} again", me()))
 }
 
 /// Development and tests (`CLAUDECORD_DEV_SPAWN=1` on both this and the daemon): starts a program of your own in this folder through the local
 /// socket, with no dashboard and no hub involved in the starting, as the first versions did. Refused otherwise.
 async fn start_local(a: StartArgs) -> Result<(), String> {
     if !dev_spawn() {
-        return Err("a command of your own after `--` is for development only: agents are started by the hub, so use `claudecord start` and the dashboard (or set CLAUDECORD_DEV_SPAWN=1, here and for the daemon)".into());
+        return Err("a command of your own after `--` is for development only: agents are started by the hub, so use `claudecord` and the dashboard (or set CLAUDECORD_DEV_SPAWN=1, here and for the daemon)".into());
     }
     ensure_login().await?;
     let dir = home_dir();
@@ -474,6 +495,8 @@ struct Prefill {
 enum PickError {
     /// This hub has no such page (a single-team hub), or is too old to start agents when asked.
     NoPage,
+    /// The hub does not know this machine's login (removed on the dashboard, or made for another hub).
+    Unrecognised,
     Other(String),
 }
 
@@ -489,9 +512,17 @@ async fn request_pick(
         .unwrap_or_else(|| "project".into());
     let cfg = Config::load(&home_dir()).ok_or(PickError::Other("not logged in".into()))?;
     let base = enroll::http_base(&cfg.hub_url);
+    let bearer =
+        match crate::device::link::Auth::new(&cfg.hub_url, cfg.token.clone(), Some(home_dir()))
+            .bearer()
+            .await
+        {
+            Ok(t) => t,
+            Err(e) => return Err(PickError::Other(e)),
+        };
     let asked = reqwest::Client::new()
         .post(format!("{base}/api/device/pick"))
-        .bearer_auth(&cfg.token)
+        .bearer_auth(&bearer)
         .json(&serde_json::json!({
             "folder": folder,
             "project": prefill.project,
@@ -506,10 +537,13 @@ async fn request_pick(
     if matches!(asked.status().as_u16(), 404 | 405) {
         return Err(PickError::NoPage);
     }
+    if asked.status().as_u16() == 401 {
+        return Err(PickError::Unrecognised);
+    }
     if !asked.status().is_success() {
-        return Err(PickError::Other(format!(
-            "{base} refused the request ({})",
-            asked.status()
+        return Err(PickError::Other(enroll::refusal(
+            &base,
+            asked.status().as_u16(),
         )));
     }
     let v: serde_json::Value = asked
@@ -529,12 +563,19 @@ async fn report_pick(code: &str, ok: bool, what: &str) {
     let Some(cfg) = Config::load(&home_dir()) else {
         return;
     };
+    let Ok(bearer) =
+        crate::device::link::Auth::new(&cfg.hub_url, cfg.token.clone(), Some(home_dir()))
+            .bearer()
+            .await
+    else {
+        return;
+    };
     let _ = reqwest::Client::new()
         .post(format!(
             "{}/api/device/pick/{code}/result",
             enroll::http_base(&cfg.hub_url)
         ))
-        .bearer_auth(&cfg.token)
+        .bearer_auth(&bearer)
         .json(&serde_json::json!({ "ok": ok, "message": what }))
         .timeout(Duration::from_secs(5))
         .send()
@@ -893,14 +934,14 @@ pub async fn attach_or_pick(agent: Option<String>) -> Result<(), String> {
     pick_and_attach(&rows, false).await
 }
 
-/// `claudecord start` with nothing typed after it: every option at its default.
+/// `claudecord` with nothing typed after it: every option at its default.
 fn default_start_args() -> StartArgs {
     #[derive(clap::Parser)]
     struct Defaults {
         #[command(flatten)]
         a: StartArgs,
     }
-    <Defaults as clap::Parser>::parse_from(["start"]).a
+    <Defaults as clap::Parser>::parse_from(["claudecord"]).a
 }
 
 /// The agents the daemon here has (none if it is off). The daemon is never started for this.
@@ -955,7 +996,7 @@ async fn pick_and_attach(rows: &[serde_json::Value], with_new: bool) -> Result<(
         .collect();
     if with_new {
         labels.push(format!(
-            "{:56} start --pick",
+            "{:56} claudecord",
             "+ new agent (choose project, name, program on the dashboard)"
         ));
     }

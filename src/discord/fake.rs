@@ -1,4 +1,4 @@
-//! A stand-in Discord for tests and for `claudecord selftest`: the small part of Discord's REST API and live gateway that the
+//! A stand-in Discord for tests and for `claudecord-hub selftest`: the small part of Discord's REST API and live gateway that the
 //! bridge uses, kept in memory. It records everything the bridge asks it to do (in `Log`) and lets a test inject gateway events.
 //! It is not Discord and checks nothing about permissions, rate limits or message formats beyond what the bridge needs.
 
@@ -220,6 +220,10 @@ pub async fn start_fake() -> (Fake, String) {
             .ok()
             .map(|v| v["allowed_mentions"]["users"].clone())
             .unwrap_or(Value::Null);
+        let notify_roles = serde_json::from_slice::<Value>(&body)
+            .ok()
+            .map(|v| v["allowed_mentions"]["roles"].clone())
+            .unwrap_or(Value::Null);
         let (username, content, file) = if multipart {
             let payload = text
                 .split("name=\"payload_json\"")
@@ -249,7 +253,7 @@ pub async fn start_fake() -> (Fake, String) {
         };
         let mut l = f.log.lock().unwrap();
         let channel = l.webhooks.get(&id).cloned().unwrap_or_default();
-        l.posts.push(json!({"username": username, "content": content, "thread_id": q.get("thread_id"), "channel": channel, "file": file, "id": mid, "notify": notify}));
+        l.posts.push(json!({"username": username, "content": content, "thread_id": q.get("thread_id"), "channel": channel, "file": file, "id": mid, "notify": notify, "notify_roles": notify_roles}));
         Json(json!({"id": mid}))
     }
     async fn mk_thread(State(f): State<Fake>, Json(b): Json<Value>) -> Json<Value> {

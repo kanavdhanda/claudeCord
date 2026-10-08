@@ -455,6 +455,7 @@ async fn a_real_conversation_including_the_agents_report_becomes_a_readable_vaul
                 agent_id: "demo/otter".into(),
                 text: "plan: heron takes the api, I take the ui".into(),
                 thread: None,
+                say_id: None,
             },
             NodeFrame::AgentAsk {
                 agent_id: "demo/heron".into(),

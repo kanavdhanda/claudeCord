@@ -36,13 +36,7 @@ pub(super) fn status_name(s: AgentStatus) -> &'static str {
     }
 }
 
-/// Where on the device attached files are placed, relative to the folder an agent works in.
-pub const INBOX_DIR: &str = ".claudecord/files";
-
-/// The inbox of one project inside a folder. A folder may serve several projects, and what one project's people sent never lands among another's.
-pub fn inbox_dir(project: &str) -> String {
-    format!("{INBOX_DIR}/{project}")
-}
+pub use crate::protocol::{INBOX_DIR, inbox_dir};
 
 /// One short line telling an agent a file arrived: its kind, name, size and where to find it. The content is never
 /// put in the agent's context, so an image or a PDF costs tokens only if and when the agent opens it.
@@ -100,6 +94,110 @@ impl HubCore {
         list.push(q);
     }
 
+    /// What an agent must be told before its next message: its brief, once, or a changed roster. Sent as its own input from the system.
+    fn send_preface(&mut self, a: &AgentRow, fx: &mut Vec<Effect>) {
+        let mut preface: Vec<String> = Vec::new();
+        if self.briefed.insert(a.agent_id.clone()) {
+            let b = self.brief_for(a);
+            if !b.is_empty() {
+                preface.push(b);
+            }
+            self.roster_dirty.remove(&a.agent_id);
+        } else if self.roster_dirty.remove(&a.agent_id) {
+            let all = self.agents_of_project(&a.project);
+            preface.push(briefs::roster(a, &all));
+        }
+        if !preface.is_empty() {
+            self.send_to(
+                a,
+                HubFrame::Deliver {
+                    agent_id: a.agent_id.clone(),
+                    from: "system".into(),
+                    text: preface.join(" "),
+                    thread: None,
+                    msg_id: None,
+                },
+                fx,
+            );
+        }
+    }
+
+    /// One message from another agent, sent to the device to be pasted at once and never queued: the device tries for a few seconds and then
+    /// says it could not (`NodeFrame::AgentDeliveryFailed`). The sender hears either way (`say.receipt`).
+    fn deliver_direct(&mut self, a: &AgentRow, q: Queued, now: i64, fx: &mut Vec<Effect>) {
+        self.send_preface(a, fx);
+        self.seq += 1;
+        let msg_id = format!("m{}", self.seq);
+        Self::event(
+            &a.project,
+            "turn",
+            &a.name,
+            "",
+            q.text.chars().count() as f64,
+            now,
+            fx,
+        );
+        Self::event(&a.project, "edge", &q.from, &a.name, 1.0, now, fx);
+        self.send_to(
+            a,
+            HubFrame::Deliver {
+                agent_id: a.agent_id.clone(),
+                from: q.from.clone(),
+                text: q.text.clone(),
+                thread: q.thread.clone(),
+                msg_id: Some(msg_id.clone()),
+            },
+            fx,
+        );
+        self.send_to(
+            a,
+            HubFrame::Priority {
+                agent_id: a.agent_id.clone(),
+                msg_id: msg_id.clone(),
+                mode: "direct".into(),
+            },
+            fx,
+        );
+        self.pending.insert(
+            msg_id,
+            Pending {
+                project: a.project.clone(),
+                agent_id: a.agent_id.clone(),
+                references: vec![],
+                task_ids: vec![],
+                handoffs: vec![],
+                items: vec![q],
+                at: now,
+            },
+        );
+    }
+
+    /// The device could not paste a direct message in time: the sender is told, and the message is gone (a message between agents is not queued).
+    pub(super) fn on_delivery_failed(
+        &mut self,
+        agent_id: &str,
+        msg_ids: &[String],
+        reason: &str,
+        fx: &mut Vec<Effect>,
+    ) {
+        let name = self.agents.get(agent_id).map(|a| a.name.clone());
+        for id in msg_ids {
+            if self.pending.get(id).is_none_or(|p| p.agent_id != agent_id) {
+                continue;
+            }
+            let p = self.pending.remove(id).expect("checked above");
+            for (sender, say_id) in p.items.iter().filter_map(|q| q.say.clone()) {
+                if let Some(s) = self.agents.get(&sender).cloned() {
+                    let why = format!(
+                        "{} could not take it: {reason}",
+                        name.as_deref().unwrap_or("the agent")
+                    );
+                    self.say_receipt(&s, Some(&say_id), "failed", Some(&why), fx);
+                }
+            }
+        }
+    }
+
     /// Releases an agent's queue as one input if the agent can take it now. Anything the agent needs to know first
     /// (its brief once, a changed roster) rides along in the same input. Does nothing if there is nothing to send, the
     /// agent is on hold, or its device is not connected, in which case the messages simply keep waiting.
@@ -121,30 +219,7 @@ impl HubCore {
             return;
         }
         let items = self.queues.remove(agent_id).unwrap_or_default();
-        let mut preface: Vec<String> = Vec::new();
-        if self.briefed.insert(agent_id.to_string()) {
-            let b = self.brief_for(&a);
-            if !b.is_empty() {
-                preface.push(b);
-            }
-            self.roster_dirty.remove(agent_id);
-        } else if self.roster_dirty.remove(agent_id) {
-            let all = self.agents_of_project(&a.project);
-            preface.push(briefs::roster(&a, &all));
-        }
-        if !preface.is_empty() {
-            self.send_to(
-                &a,
-                HubFrame::Deliver {
-                    agent_id: a.agent_id.clone(),
-                    from: "system".into(),
-                    text: preface.join(" "),
-                    thread: None,
-                    msg_id: None,
-                },
-                fx,
-            );
-        }
+        self.send_preface(&a, fx);
         self.seq += 1;
         let msg_id = format!("m{}", self.seq);
         let last = items.len() - 1;
@@ -204,6 +279,18 @@ impl HubCore {
             }
             let p = self.pending.remove(id).expect("checked above");
             self.metrics.accepted((now - p.at) as f64, now);
+            // The agent that said it is told once everyone it named has it in their terminal.
+            for (sender, say_id) in p.items.iter().filter_map(|q| q.say.clone()) {
+                let others = self
+                    .pending
+                    .values()
+                    .flat_map(|x| x.items.iter())
+                    .chain(self.queues.values().flatten())
+                    .any(|q| q.say.as_ref().is_some_and(|(_, i)| *i == say_id));
+                if let (false, Some(s)) = (others, self.agents.get(&sender).cloned()) {
+                    self.say_receipt(&s, Some(&say_id), "delivered", None, fx);
+                }
+            }
             for reference in p.references {
                 fx.push(Effect::Chat(super::effects::Chat::Confirm {
                     project: p.project.clone(),
@@ -227,6 +314,39 @@ impl HubCore {
                 );
             }
         }
+    }
+
+    /// A person reacted to their own message asking for it to go through sooner (`"now"`, or `"steer"` to stop the agent first). It only
+    /// does something while that message is delivered but not yet picked up; returns whether a request was sent to the agent's device.
+    pub fn prioritise(
+        &mut self,
+        by: &Human,
+        project: &str,
+        reference: &str,
+        mode: &str,
+        fx: &mut Vec<Effect>,
+    ) -> Result<bool, Denied> {
+        self.require(project, &by.id, Role::Operator)?;
+        let Some((msg_id, agent_id)) = self
+            .pending
+            .iter()
+            .find(|(_, p)| p.project == project && p.references.iter().any(|r| r == reference))
+            .map(|(id, p)| (id.clone(), p.agent_id.clone()))
+        else {
+            return Ok(false);
+        };
+        let Some(a) = self.agents.get(&agent_id).cloned() else {
+            return Ok(false);
+        };
+        Ok(self.send_to(
+            &a,
+            HubFrame::Priority {
+                agent_id,
+                msg_id,
+                mode: mode.to_string(),
+            },
+            fx,
+        ))
     }
 
     /// The agents a human message should go to: those it mentions, otherwise the lead (or the first agent).
@@ -366,6 +486,7 @@ impl HubCore {
                     handoff: None,
                     wake: true,
                     at: now,
+                    say: None,
                 },
             );
             if !self.conns.contains_key(&t.node_name) {
@@ -464,6 +585,7 @@ impl HubCore {
         from: &AgentRow,
         text: &str,
         thread: Option<String>,
+        say_id: Option<String>,
         now: i64,
         fx: &mut Vec<Effect>,
     ) {
@@ -474,9 +596,9 @@ impl HubCore {
             .cloned()
             .collect();
         if peers.is_empty() {
+            self.say_receipt(from, say_id.as_deref(), "posted", None, fx);
             return;
         }
-        let to_human = self.addresses_human(&from.project, text);
         let mentioned = self.mentioned(&from.project, text, Some(&from.agent_id));
         let n = self.streak.get(&from.agent_id).copied().unwrap_or(0) + 1;
         self.streak.insert(from.agent_id.clone(), n);
@@ -491,17 +613,36 @@ impl HubCore {
                 fx,
             );
         }
-        if n >= self.streak_limit || to_human {
+        if n >= self.streak_limit {
+            let (state, why) = if mentioned.is_empty() {
+                ("posted", None)
+            } else {
+                (
+                    "failed",
+                    Some(
+                        "forwarding is paused after many messages without a reply; a person has to reply first",
+                    ),
+                )
+            };
+            self.say_receipt(from, say_id.as_deref(), state, why, fx);
             return;
         }
         // Only naming someone sends a message to an agent. A plain say is for the chat, and nobody else's turn is spent on it.
         let wake = !mentioned.is_empty();
         let targets: Vec<AgentRow> = mentioned;
         let _ = peers;
+        if targets.is_empty() {
+            self.say_receipt(from, say_id.as_deref(), "posted", None, fx);
+        }
+        // A message between agents is not queued: each named agent either can take it now or the sender is told it could not.
+        let mut failed: Vec<String> = Vec::new();
         for t in targets {
-            self.enqueue(
-                &t.agent_id,
-                Queued {
+            if !self.conns.contains_key(&t.node_name) {
+                failed.push(format!("{} is offline", t.name));
+            } else if let Some(why) = hold_reason(self.status_of(&t.agent_id)) {
+                failed.push(format!("{} is {why}", t.name));
+            } else {
+                let q = Queued {
                     from: from.name.clone(),
                     text: text.into(),
                     thread: thread.clone(),
@@ -510,10 +651,42 @@ impl HubCore {
                     handoff: None,
                     wake,
                     at: now,
-                },
-            );
-            self.flush(&t.agent_id, now, fx);
+                    say: say_id.clone().map(|id| (from.agent_id.clone(), id)),
+                };
+                self.deliver_direct(&t, q, now, fx);
+            }
         }
+        if !failed.is_empty() {
+            self.say_receipt(
+                from,
+                say_id.as_deref(),
+                "failed",
+                Some(&failed.join("; ")),
+                fx,
+            );
+        }
+    }
+
+    /// Tells the agent that said something how it went (see `HubFrame::SayReceipt`). Nothing to say when it did not ask.
+    pub(super) fn say_receipt(
+        &self,
+        to: &AgentRow,
+        say_id: Option<&str>,
+        state: &str,
+        detail: Option<&str>,
+        fx: &mut Vec<Effect>,
+    ) {
+        let Some(say_id) = say_id else { return };
+        self.send_to(
+            to,
+            HubFrame::SayReceipt {
+                agent_id: to.agent_id.clone(),
+                say_id: say_id.to_string(),
+                state: state.to_string(),
+                detail: detail.map(String::from),
+            },
+            fx,
+        );
     }
 }
 
@@ -545,6 +718,7 @@ impl HubCore {
                 handoff: None,
                 wake: true,
                 at: now,
+                say: None,
             });
         self.flush(agent_id, now, fx);
     }

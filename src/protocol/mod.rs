@@ -185,6 +185,13 @@ pub enum NodeFrame {
             skip_serializing_if = "Option::is_none"
         )]
         thread: Option<String>,
+        /// Asks the hub for a `say.receipt` about this message, so `claudecord say` can tell the agent whether the peer it named has it.
+        #[serde(
+            default,
+            deserialize_with = "opt::de",
+            skip_serializing_if = "Option::is_none"
+        )]
+        say_id: Option<String>,
     },
     #[serde(rename = "agent.ask", rename_all = "camelCase")]
     AgentAsk {
@@ -240,6 +247,13 @@ pub enum NodeFrame {
     /// agents the hub still lists are gone.
     #[serde(rename = "agents.here", rename_all = "camelCase")]
     AgentsHere { agent_ids: Vec<String> },
+    /// A message another agent sent (`priority` mode `direct`) could not be pasted in time, for `reason`. It is dropped, not queued.
+    #[serde(rename = "agent.delivery_failed", rename_all = "camelCase")]
+    AgentDeliveryFailed {
+        agent_id: String,
+        msg_ids: Vec<String>,
+        reason: String,
+    },
     #[serde(rename = "agent.accepted", rename_all = "camelCase")]
     AgentAccepted {
         agent_id: String,
@@ -300,7 +314,7 @@ pub enum NodeFrame {
         #[serde(deserialize_with = "uint")]
         pct: u64,
     },
-    /// The agent's saved state, written so a fresh session can carry on (the `context_dump` verb).
+    /// The agent's saved state, written so a fresh session can carry on (the `claudecord dump` verb).
     #[serde(rename = "agent.handoff", rename_all = "camelCase")]
     AgentHandoff { agent_id: String, text: String },
     /// An agent answers another agent's question (never a permission request).
@@ -316,6 +330,9 @@ pub enum NodeFrame {
     /// An agent asking who else is in its project and whether they can be reached now (the `team` verb).
     #[serde(rename = "agent.team", rename_all = "camelCase")]
     AgentTeam { agent_id: String },
+    /// An agent asking which threads it can post in (the `threads` verb). The answer comes back at once as a `say.receipt` of state `info`.
+    #[serde(rename = "agent.threads", rename_all = "camelCase")]
+    AgentThreads { agent_id: String, say_id: String },
     /// A machine could not start an agent the hub asked it to, so the people who asked can be told why.
     #[serde(rename = "spawn.failed", rename_all = "camelCase")]
     SpawnFailed {
@@ -413,6 +430,11 @@ impl NodeFrame {
             AgentAccepted { msg_ids, .. } => {
                 msg_ids.len() <= 200 && msg_ids.iter().all(|s| within(s, 40))
             }
+            AgentDeliveryFailed {
+                msg_ids, reason, ..
+            } => {
+                msg_ids.len() <= 200 && msg_ids.iter().all(|s| within(s, 40)) && within(reason, 500)
+            }
             AgentAssign {
                 to, task, thread, ..
             } => within(to, 64) && within(task, 4000) && within_opt(thread, 90),
@@ -439,6 +461,7 @@ impl NodeFrame {
             AgentHandoff { text, .. } => within(text, 8000),
             AgentAnswer { ask, text, .. } => within(ask, 300) && within(text, 4000),
             AgentPickup { .. } | AgentTeam { .. } => true,
+            AgentThreads { say_id, .. } => within(say_id, 40),
             AgentScreen { why, text, .. } => within(why, 200) && within(text, 4000),
             AgentsHere { agent_ids } => {
                 agent_ids.len() <= 1000 && agent_ids.iter().all(|i| within(i, 200))
@@ -520,6 +543,27 @@ pub enum HubFrame {
         )]
         msg_id: Option<String>,
     },
+    /// A person asked, with a reaction on their message, for a delivery that has already been sent to go through sooner: `"now"` or `"steer"`.
+    #[serde(rename = "priority", rename_all = "camelCase")]
+    Priority {
+        agent_id: String,
+        msg_id: String,
+        mode: String,
+    },
+    /// What became of a `say`: `posted` (in the chat, nobody to wait for), `delivered` (every agent it named has it in its terminal), `pending`
+    /// (one of them is offline or on hold, it will get it when it can) or `failed` (the hub could not send it, `detail` says why).
+    #[serde(rename = "say.receipt", rename_all = "camelCase")]
+    SayReceipt {
+        agent_id: String,
+        say_id: String,
+        state: String,
+        #[serde(
+            default,
+            deserialize_with = "opt::de",
+            skip_serializing_if = "Option::is_none"
+        )]
+        detail: Option<String>,
+    },
     #[serde(rename = "answer", rename_all = "camelCase")]
     Answer {
         agent_id: String,
@@ -575,7 +619,7 @@ pub enum HubFrame {
         /// if its owner allowed that (`claudecord settings custom-commands on`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         command: Option<String>,
-        /// The code of a `claudecord start` waiting on this machine: the agent goes in the folder that command was run in.
+        /// The code of a `claudecord` waiting on this machine: the agent goes in the folder that command was run in.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pick: Option<String>,
     },
@@ -703,4 +747,12 @@ pub fn auto_name(
         }
     }
     format!("agent-{:04x}", rand(0x10000))
+}
+
+/// Where on the device attached files are placed, relative to the folder an agent works in.
+pub const INBOX_DIR: &str = ".claudecord/files";
+
+/// The inbox of one project inside a folder. A folder may serve several projects, and what one project's people sent never lands among another's.
+pub fn inbox_dir(project: &str) -> String {
+    format!("{INBOX_DIR}/{project}")
 }

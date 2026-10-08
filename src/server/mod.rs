@@ -103,6 +103,8 @@ impl Default for Config {
 /// What a device connection is sent: a frame, or an order to close.
 pub(crate) enum Out {
     Frame(String),
+    /// A piece of a file: counted against its own backlog budget, so a file does not use up the room that messages need (see `send` in the actor).
+    Chunk(String),
     Close(u16, &'static str),
 }
 
@@ -129,6 +131,8 @@ pub(crate) enum Input {
         conn: u64,
         tx: mpsc::Sender<Out>,
         queued: Arc<std::sync::atomic::AtomicUsize>,
+        /// Bytes of file pieces waiting, counted apart from `queued`.
+        queued_files: Arc<std::sync::atomic::AtomicUsize>,
         /// Fired by the actor to end the connection at once, even while the session is stuck writing to a device that stopped reading.
         kill: Arc<tokio::sync::Notify>,
     },

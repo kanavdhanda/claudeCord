@@ -17,7 +17,7 @@ esac
 work=$(mktemp -d); trap 'docker rm -f cc-load >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
 mkdir -p "$work/data"; chmod 777 "$work/data"
 # Tokens are made with the same image so the hub's database and the token file agree.
-docker run --rm -v "$work/data:/data" --entrypoint /claudecord claudecord \
+docker run --rm -v "$work/data:/data" --entrypoint /claudecord-hub claudecord \
   load-tokens --count "$users" --out /data/tokens.json --data /data >/dev/null
 docker run -d --name cc-load --cpus "$cpus" --memory "$mem" -p 18787:8787 -v "$work/data:/data" claudecord >/dev/null
 for _ in $(seq 30); do curl -fs http://127.0.0.1:18787/healthz >/dev/null && break; sleep 1; done

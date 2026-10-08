@@ -38,8 +38,9 @@ jobs:
       - run: 'for i in $(seq 20); do cargo test --test it races:: -q || exit 1; done'
       - run: python3 scripts/codemap.py --check
       # Health checks last: every feature alive, then the shipped binary used the way a person would.
-      - run: cargo run -q -- selftest
+      - run: cargo run -q --bin claudecord-hub -- selftest
       - run: scripts/smoke.sh
+      - run: scripts/check_machine_binary.sh
 
   # Windows is built and tested natively. The stand-in-agent tests need a Unix shell and skip themselves there; the lints run
   # on Linux and macOS, and the Windows-only code is compiled by the test build.
@@ -52,7 +53,7 @@ jobs:
         with:
           cache-on-failure: true
       - run: cargo test
-      - run: cargo run -q -- selftest
+      - run: cargo run -q --bin claudecord-hub -- selftest
 
   # A small k6 run (200 users with three bots each, under a minute). The big runs are in load.yml and wait for approval.
   load-smoke:
@@ -64,8 +65,8 @@ jobs:
         with:
           cache-on-failure: true
       - uses: grafana/setup-k6-action@v1
-      - run: cargo build --release --bin claudecord
-      - run: scripts/load/smoke.sh 200 target/release/claudecord
+      - run: cargo build --release --bin claudecord-hub
+      - run: scripts/load/smoke.sh 200 target/release/claudecord-hub
 
   # Only once everything above has passed. macOS and Windows packaging are checked by release.yml before anything is published.
   packaging:

@@ -14,10 +14,14 @@ use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 
 /// A connected device, as the actor sees it.
+/// Most bytes of file pieces that may wait for one device: two files at the size limit (they are sent in base64, a third larger).
+const FILE_BACKLOG_BYTES: usize = 2 * (crate::protocol::MAX_FILE_BYTES / 3 * 4 + (1 << 20));
+
 struct Conn {
     node: String,
     tx: mpsc::Sender<Out>,
     queued: Arc<AtomicUsize>,
+    queued_files: Arc<AtomicUsize>,
     kill: Arc<tokio::sync::Notify>,
 }
 
@@ -181,9 +185,9 @@ pub(crate) async fn run(
                         Input::Auth { token, reply } => {
                             let _ = reply.send(disk.reader().node_for_token(&token).ok().flatten());
                         }
-                        Input::Connected { node, conn, tx, queued, kill } => {
+                        Input::Connected { node, conn, tx, queued, queued_files, kill } => {
                             core.touch(&node, now);
-                            conns.insert(conn, Conn { node: node.clone(), tx, queued, kill });
+                            conns.insert(conn, Conn { node: node.clone(), tx, queued, queued_files, kill });
                             // The welcome acknowledges nothing and promises nothing, so it is not held for the disk: a slow write must not make
                             // a machine think the hub did not answer.
                             carry_out(vec![Effect::Send { conn, frame: HubFrame::Welcome { node_id: node.clone() } }], &mut conns, &chat, cfg.max_out_bytes);
@@ -378,15 +382,28 @@ fn send(conns: &mut HashMap<u64, Conn>, conn: u64, frame: &HubFrame, max_out: us
     let Some(c) = conns.get(&conn) else { return };
     let text = serde_json::to_string(frame).expect("plain data");
     let n = text.len();
-    if c.queued.load(Ordering::Relaxed) + n > max_out {
+    // A file is sent as many pieces at once, far more than the limit on messages: pieces have a budget of their own (room for a few files at
+    // the size limit), and what a file takes does not count against the room messages need. Past it, the device is dropped as before.
+    let chunk = matches!(frame, HubFrame::FileChunk { .. });
+    let (counter, limit) = if chunk {
+        (&c.queued_files, FILE_BACKLOG_BYTES)
+    } else {
+        (&c.queued, max_out)
+    };
+    if counter.load(Ordering::Relaxed) + n > limit {
         // The close order would queue behind the very backlog that is stuck, so the session is also told directly.
         let _ = c.tx.try_send(Out::Close(1013, "not reading fast enough"));
         c.kill.notify_one();
         conns.remove(&conn);
         return;
     }
-    c.queued.fetch_add(n, Ordering::Relaxed);
-    if c.tx.try_send(Out::Frame(text)).is_err() {
+    counter.fetch_add(n, Ordering::Relaxed);
+    let out = if chunk {
+        Out::Chunk(text)
+    } else {
+        Out::Frame(text)
+    };
+    if c.tx.try_send(out).is_err() {
         conns.remove(&conn);
     }
 }

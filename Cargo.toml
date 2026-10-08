@@ -6,14 +6,30 @@ description = "Run Claude Code, agy and Codex agents on any machine as a Discord
 license = "MIT"
 repository = "https://github.com/kanavdhanda/claudeCord"
 
+# Two programs share this crate. `claudecord` (a machine and its agents) is built without the `hub` feature, so it holds none of the server, the
+# database, the Discord bridge or their dependencies. `claudecord-hub` (what the Docker image runs) needs it. Packaging builds `claudecord` with
+# `--no-default-features`; the feature is on by default only so that `cargo test` covers both.
+[features]
+default = ["hub"]
+hub = ["dep:axum", "dep:rusqlite", "dep:aes-gcm", "dep:flate2"]
+
+[[bin]]
+name = "claudecord"
+path = "src/main.rs"
+
+[[bin]]
+name = "claudecord-hub"
+path = "src/bin/claudecord-hub.rs"
+required-features = ["hub"]
+
 [dependencies]
 ab_glyph = "0.2.32"
-aes-gcm = "0.11.1"
-axum = { version = "0.8.9", features = ["ws"] }
+aes-gcm = { version = "0.11.1", optional = true }
+axum = { version = "0.8.9", features = ["ws"], optional = true }
 base64 = "0.22"
 clap = { version = "4.6.7", features = ["derive"] }
 crossterm = "0.29.0"
-flate2 = "1.1.10"
+flate2 = { version = "1.1.10", optional = true }
 futures-util = "0.3.34"
 getrandom = "0.4.3"
 hmac = "0.13.0"
@@ -22,11 +38,11 @@ png = "0.18.1"
 portable-pty = "0.9.0"
 regex = "1"
 reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "json", "multipart", "rustls"] }
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.40.2", features = ["bundled"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11.0"
-tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "signal", "io-std", "process"] }
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "signal", "io-std", "process", "fs"] }
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 vt100 = "0.16.2"
 # Already in the build through vt100: how many terminal columns a character takes (a wide character takes two), to cut a list line to the window.
@@ -35,6 +51,14 @@ unicode-width = "0.2.2"
 [profile.release]
 lto = "thin"
 strip = true
+
+# The hub's Docker image: built for size (about 11 MB instead of 19). Panics are still caught (no `panic = "abort"`): the hub and the daemon rely on
+# that to lose one step instead of the whole process.
+[profile.release-hub]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+opt-level = "s"
 
 # Debug builds keep line numbers for panics but skip full debug info: much faster to link, which matters most on Windows CI.
 [profile.dev]

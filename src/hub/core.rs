@@ -38,6 +38,9 @@ pub(super) struct Queued {
     pub wake: bool,
     /// When it was queued, so an informing item that waits too long is still delivered.
     pub at: i64,
+    /// Set when an agent's `say` put this here: (the sender, its `say_id`). The sender is told once every agent it named has the message.
+    #[serde(default)]
+    pub say: Option<(String, String)>,
 }
 
 /// How long informing-only items may wait for a reason to wake the agent before they are delivered anyway.
@@ -680,6 +683,7 @@ impl HubCore {
             | NodeFrame::AgentGone { agent_id }
             | NodeFrame::AgentScreen { agent_id, .. }
             | NodeFrame::AgentAccepted { agent_id, .. }
+            | NodeFrame::AgentDeliveryFailed { agent_id, .. }
             | NodeFrame::AgentAssign { agent_id, .. }
             | NodeFrame::AgentTaskDone { agent_id, .. }
             | NodeFrame::AgentPermission { agent_id, .. }
@@ -688,6 +692,7 @@ impl HubCore {
             | NodeFrame::AgentHandoff { agent_id, .. }
             | NodeFrame::AgentPickup { agent_id }
             | NodeFrame::AgentTeam { agent_id }
+            | NodeFrame::AgentThreads { agent_id, .. }
             | NodeFrame::AgentAnswer { agent_id, .. }
             | NodeFrame::FileChunk { agent_id, .. } => Some(agent_id.as_str()),
             NodeFrame::Hello { .. }
@@ -745,7 +750,8 @@ impl HubCore {
                 agent_id,
                 text,
                 thread,
-            } => self.on_say(&agent_id, &text, thread, now, &mut fx),
+                say_id,
+            } => self.on_say(&agent_id, &text, thread, say_id, now, &mut fx),
             NodeFrame::AgentAsk {
                 agent_id,
                 ask_id,
@@ -810,6 +816,11 @@ impl HubCore {
                 );
                 Self::refresh(&a.project, &mut fx);
             }
+            NodeFrame::AgentDeliveryFailed {
+                agent_id,
+                msg_ids,
+                reason,
+            } => self.on_delivery_failed(&agent_id, &msg_ids, &reason, &mut fx),
             NodeFrame::AgentAccepted { agent_id, msg_ids } => {
                 self.on_accepted(&agent_id, &msg_ids, now, &mut fx)
             }
@@ -841,6 +852,9 @@ impl HubCore {
             }
             NodeFrame::AgentPickup { agent_id } => self.on_pickup(&agent_id, now, &mut fx),
             NodeFrame::AgentTeam { agent_id } => self.on_team(&agent_id, now, &mut fx),
+            NodeFrame::AgentThreads { agent_id, say_id } => {
+                self.on_threads(&agent_id, &say_id, &mut fx)
+            }
             NodeFrame::SpawnFailed {
                 project,
                 name,
@@ -976,6 +990,7 @@ impl HubCore {
         agent_id: &str,
         text: &str,
         thread: Option<String>,
+        say_id: Option<String>,
         now: i64,
         fx: &mut Vec<Effect>,
     ) {
@@ -983,8 +998,16 @@ impl HubCore {
             return;
         };
         self.metrics.inc("msg_agent", 1.0, now);
-        let thread = thread.or_else(|| self.open_task_thread(agent_id, &a.project));
+        // `--thread T2` is enough: the id of a task of this project stands for its thread's whole name.
+        let thread = thread.map(|t| self.resolve_thread(&a.project, t));
         let text = strip_mention(text, &a.name);
+        // What is said to a person stays in the channel they are in; the task thread is only the default for work talk.
+        let thread = match thread {
+            None if !self.addresses_human(&a.project, &text) => {
+                self.open_task_thread(agent_id, &a.project)
+            }
+            t => t,
+        };
         // Agents talking to each other (and not to a person) do it in a thread of their own, named after the pair, so the main channel stays for
         // the people and the results. Nothing is asked of the agents: it is where the hub puts the message.
         let thread = match thread {
@@ -1020,7 +1043,14 @@ impl HubCore {
             text: clean.clone(),
             thread: thread.clone(),
         }));
-        self.route_agent_message(&a, &clean, thread, now, fx);
+        self.route_agent_message(
+            &a,
+            &clean,
+            thread.as_deref().map(super::tasks::short_thread),
+            say_id,
+            now,
+            fx,
+        );
     }
 
     /// Whether any word in an action looks like a path the project must never expose.

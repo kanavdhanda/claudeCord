@@ -427,6 +427,7 @@ async fn rig(
         backend: crate::device::terminal::Backend::Pty,
         auto_startup: false,
         idle_exit: None,
+        idle_agents_exit: None,
     };
     let d = dir.clone();
     tokio::spawn(async move {
@@ -600,7 +601,7 @@ fn daemon_flow() -> Probe {
         .await;
         ensure!(
             eventually(
-                async || std::fs::read(project.join(".claudecord/files/demo/t1-plan.txt"))
+                async || std::fs::read(project.join(".claudecord/files/demo/plan.txt"))
                     .is_ok_and(|b| b == b"the plan")
             )
             .await,
@@ -656,30 +657,42 @@ fn command_line() -> Probe {
     boxed(async {
         use clap::Parser;
         for args in [
-            vec!["claudecord", "hub"],
-            vec!["claudecord", "start", "--detach"],
+            vec!["claudecord", "--detach"],
+            vec!["claudecord", "login", "--hub", "https://hub.example.com"],
             vec!["claudecord", "logs", "otter"],
             vec!["claudecord", "handoff", "otter"],
             vec!["claudecord", "say", "hi"],
             vec!["claudecord", "done", "T1", "ok"],
             vec!["claudecord", "doctor"],
-            vec!["claudecord", "uptime", "--target", "99.9"],
-            vec!["claudecord", "probe", "https://hub.example.com", "--once"],
+        ] {
+            ensure!(
+                crate::cli::Cli::try_parse_from(&args).is_ok(),
+                "the command {args:?} does not parse"
+            );
+        }
+        for args in [
+            vec!["claudecord-hub", "hub"],
+            vec!["claudecord-hub", "uptime", "--target", "99.9"],
             vec![
-                "claudecord",
+                "claudecord-hub",
+                "probe",
+                "https://hub.example.com",
+                "--once",
+            ],
+            vec![
+                "claudecord-hub",
                 "load-tokens",
                 "--count",
                 "2",
                 "--out",
                 "t.json",
             ],
-            vec!["claudecord", "selftest"],
-            vec!["claudecord", "storage", "show"],
-            vec!["claudecord", "discord", "show"],
-            vec!["claudecord", "export", "--out", "v"],
+            vec!["claudecord-hub", "selftest"],
+            vec!["claudecord-hub", "storage", "show"],
+            vec!["claudecord-hub", "export", "--out", "v"],
         ] {
             ensure!(
-                crate::cli::Cli::try_parse_from(&args).is_ok(),
+                crate::cli::HubCli::try_parse_from(&args).is_ok(),
                 "the command {args:?} does not parse"
             );
         }
@@ -687,6 +700,21 @@ fn command_line() -> Probe {
             crate::cli::Cli::try_parse_from(["claudecord", "nonsense"]).is_err(),
             "an unknown command was accepted"
         );
+        // The two programs share no commands.
+        for hub_only in [
+            "serve",
+            "storage",
+            "token",
+            "web-token",
+            "uptime",
+            "probe",
+            "selftest",
+        ] {
+            ensure!(
+                crate::cli::Cli::try_parse_from(["claudecord", hub_only]).is_err(),
+                "claudecord accepted the hub command {hub_only}"
+            );
+        }
         Ok("every command parses, unknown commands refused".into())
     })
 }
@@ -981,6 +1009,7 @@ fn discord_probe() -> Probe {
             agent_id: "demo/otter".into(),
             text: "hello team".into(),
             thread: None,
+            say_id: None,
         })
         .await;
         ensure!(

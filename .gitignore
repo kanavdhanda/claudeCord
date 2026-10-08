@@ -19,3 +19,5 @@ __pycache__/
 deploy/oauth-secret
 deploy/data/
 .claude/worktrees/
+review/
+problems.pdf

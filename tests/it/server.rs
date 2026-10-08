@@ -370,8 +370,8 @@ async fn a_device_that_stops_reading_is_cut_off_instead_of_filling_the_hub() {
             .unwrap()
     })
     .await;
-    // Never read again. Push well past the hub's cap for one device.
-    for i in 0..8 {
+    // Never read again. Push well past the hub's cap for one device (messages and file pieces have separate caps; this fills the file one).
+    for i in 0..16 {
         hub.call(move |c, _| {
             let (_, fx) = c
                 .send_file(

@@ -1,15 +1,18 @@
-//! The command line: what each command is, and where it is handled. Commands fall in three groups:
-//! - running things: `hub` (the central server), `daemon` (the program on a machine)
-//! - working with agents: `login`, `up`, `ls`, `attach`, `stop`, `down`, `doctor`
-//! - what an agent runs in its own shell: `say`, `ask`, `assign`, `done`, `report`, `dump`, `pickup`, `team`, `send`
+//! The command lines: what each command is, and where it is handled. There are two programs, kept completely apart:
+//! - `claudecord` (`Cli`), for a machine and its agents: `login` (the only place a hub's address is given, with --hub), `daemon`, `ls`, `attach`,
+//!   `stop`, `down`, `doctor`, and what an agent runs in its own shell: `say`, `ask`, `assign`, `done`, `report`, `dump`, `pickup`, `team`, `send`
+//! - `claudecord-hub` (`HubCli`), for whoever runs the hub: `serve`, `storage`, `export`, `token`, `web-token`, `uptime`, `probe`, `selftest`
 //!
-//! Files: `hub` (server commands), `discord` (connect to Discord), `storage` (where old history goes), `machine` (daemon, login, up, attach and friends), `verbs` (the agent's commands).
+//! Files: `hub`, `storage`, `export`, `uptime` (the hub program's commands), `machine` (daemon, login, attach and friends), `verbs` (the agent's commands).
 
-pub mod discord;
+#[cfg(feature = "hub")]
 pub mod export;
+#[cfg(feature = "hub")]
 pub mod hub;
 pub mod machine;
+#[cfg(feature = "hub")]
 pub mod storage;
+#[cfg(feature = "hub")]
 pub mod uptime;
 pub mod verbs;
 
@@ -17,35 +20,23 @@ use clap::{Parser, Subcommand};
 
 /// Run coding agents on any machine and talk to them like a team.
 #[derive(Parser)]
-#[command(name = "claudecord", version, about)]
+#[command(
+    name = "claudecord",
+    version,
+    about,
+    args_conflicts_with_subcommands = true
+)]
 pub struct Cli {
-    /// With no command: on a new machine, open the browser to sign in and approve it; afterwards, open the agent running here, or start one.
+    /// With no command, `claudecord` starts an agent in the current folder and opens its terminal: on a new machine it first opens the
+    /// browser to sign in and approve it, and the dashboard page asks which project, name and program. The options below are for that.
     #[command(subcommand)]
     pub command: Option<Cmd>,
+    #[command(flatten)]
+    pub start: machine::StartArgs,
 }
 
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// Run the central hub (one per team).
-    Hub(hub::HubArgs),
-    /// Run the hosted service: many accounts sign in with Discord, join machines by code, and each gets its own hub.
-    Serve(hub::ServeArgs),
-    /// Connect the hub to your Discord server (token, server id, invite link).
-    Discord(discord::DiscordArgs),
-    /// Choose, test and change where old history files are kept (Oracle Cloud, Cloudflare R2, ...).
-    Storage(storage::StorageArgs),
-    /// Write the conversation history as Obsidian notes you can browse and graph.
-    Export(export::ExportArgs),
-    /// Make a token for a machine (run on the hub's host).
-    Token(hub::TokenArgs),
-    /// Show how much of the time the hub and Discord were working, and the error budget left.
-    Uptime(uptime::UptimeArgs),
-    /// Check a hub from the outside (run on another machine) and keep a record of what was seen.
-    Probe(uptime::ProbeArgs),
-    /// Make many machine tokens at once into a private file, for the k6 load test.
-    LoadTokens(hub::LoadTokensArgs),
-    /// Make a token that opens the dashboard in a browser (run on the hub's host).
-    WebToken(hub::TokenArgs),
     /// Run the daemon on this machine (started for you by `up`).
     Daemon,
     /// Save which hub this machine talks to.
@@ -61,8 +52,6 @@ pub enum Cmd {
         name: Option<String>,
         value: Option<String>,
     },
-    /// Start an agent in the current folder and open its terminal (starting the daemon if needed, and saying so).
-    Start(machine::StartArgs),
     /// Show the tail of an agent's log: what it was sent and did, or what its terminal showed.
     Logs {
         agent: String,
@@ -96,12 +85,6 @@ pub enum Cmd {
     Down,
     /// Check whether this machine can reach the hub, and where it stops.
     Doctor,
-    /// Check that every feature is alive (starts real servers on this machine; changes nothing).
-    Selftest {
-        /// Print the result as JSON.
-        #[arg(long)]
-        json: bool,
-    },
     /// Post a message to the team (plain say is information; @name someone to need a reply).
     Say {
         /// The message. `-` (or nothing, when something is piped in) reads it from standard input, which keeps real line breaks for multi-line text.
@@ -125,6 +108,8 @@ pub enum Cmd {
     Pickup,
     /// Ask who else is in this project, what they do and whether they can be reached. The answer arrives as your next input.
     Team,
+    /// List where you can post: the main channel and your open tasks, each with the id to use in `say --thread`. Answered at once.
+    Threads,
     /// Print the short rules for using the team chat (what to run, and when).
     Guide,
     /// Send a file to the chat, or to a peer with --to.
@@ -140,22 +125,16 @@ pub enum Cmd {
 /// Runs a parsed command.
 pub async fn run(cli: Cli) -> Result<(), String> {
     let Some(command) = cli.command else {
-        return machine::home().await;
+        use std::io::IsTerminal;
+        // Without a terminal there is nobody to choose on the dashboard: only say what is running here.
+        if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+            return machine::home().await;
+        }
+        return machine::start(cli.start).await;
     };
     match command {
-        Cmd::Hub(a) => hub::run_hub(a).await,
-        Cmd::Serve(a) => hub::run_serve(a).await,
-        Cmd::Token(a) => hub::make_token(a),
-        Cmd::WebToken(a) => hub::make_web_token(a),
-        Cmd::LoadTokens(a) => hub::make_load_tokens(a),
-        Cmd::Uptime(a) => uptime::show(a),
-        Cmd::Probe(a) => uptime::probe(a).await,
-        Cmd::Discord(a) => discord::run(a),
-        Cmd::Storage(a) => storage::run(a),
-        Cmd::Export(a) => export::run(a),
         Cmd::Daemon => machine::run_daemon().await,
         Cmd::Login(a) => machine::login(a).await,
-        Cmd::Start(a) => machine::start(a).await,
         Cmd::Logs {
             agent,
             lines,
@@ -170,7 +149,6 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         Cmd::Restart { agent } => machine::restart(agent).await,
         Cmd::Down => machine::down().await,
         Cmd::Doctor => machine::doctor().await,
-        Cmd::Selftest { json } => selftest(json).await,
         Cmd::Say { text, thread } => verbs::say(text, thread).await,
         Cmd::Ask { question } => verbs::ask(question).await,
         Cmd::Assign { to, task } => verbs::assign(to, task).await,
@@ -180,6 +158,7 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         Cmd::Dump { text } => verbs::dump(text).await,
         Cmd::Pickup => verbs::pickup().await,
         Cmd::Team => verbs::team().await,
+        Cmd::Threads => verbs::threads().await,
         Cmd::Guide => {
             println!("{}", crate::device::daemon::RULES);
             Ok(())
@@ -188,33 +167,7 @@ pub async fn run(cli: Cli) -> Result<(), String> {
     }
 }
 
-/// Runs the health check and prints a line per feature. Fails if any feature is not working.
-async fn selftest(json: bool) -> Result<(), String> {
-    let outcomes = crate::health::run_all().await;
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&outcomes).expect("plain data")
-        );
-    } else {
-        for o in &outcomes {
-            println!(
-                "{:5} {:44} {}",
-                if o.ok { "PASS" } else { "FAIL" },
-                o.name,
-                o.detail
-            );
-        }
-    }
-    let failed = outcomes.iter().filter(|o| !o.ok).count();
-    if failed > 0 {
-        return Err(format!(
-            "{failed} of {} features are not working",
-            outcomes.len()
-        ));
-    }
-    if !json {
-        println!("all {} features alive", outcomes.len());
-    }
-    Ok(())
-}
+#[cfg(feature = "hub")]
+mod hub_cli;
+#[cfg(feature = "hub")]
+pub use hub_cli::{HubCli, HubCmd, run_hub_cli};

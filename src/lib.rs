@@ -5,25 +5,35 @@
 
 pub mod agents;
 pub mod cli;
+#[cfg(feature = "hub")]
 pub mod control;
 pub mod device;
+#[cfg(feature = "hub")]
 pub mod discord;
+#[cfg(feature = "hub")]
 pub mod export;
+#[cfg(feature = "hub")]
 pub mod health;
+#[cfg(feature = "hub")]
 pub mod hub;
 pub mod log;
+#[cfg(feature = "hub")]
 pub mod metrics;
 pub mod notify;
 pub mod protocol;
 pub mod security;
+#[cfg(feature = "hub")]
 pub mod server;
+#[cfg(feature = "hub")]
 pub mod store;
 pub mod sync;
 pub mod task;
+#[cfg(feature = "hub")]
 pub mod uptime;
 
 // Short paths kept so callers and the conformance tests can say `claudecord::redact` instead of the folder path.
 pub use agents::{adapters, text};
+#[cfg(feature = "hub")]
 pub use discord::perms;
 pub use security::{codes, env, limits, redact};
 

@@ -50,7 +50,7 @@ def test_npm(binary, tmp):
     run("npm", "install", "--no-audit", "--no-fund", *map(str, sorted(tars.glob("*.tgz"))), cwd=site)
     launcher = site / "node_modules/.bin" / ("claudecord.cmd" if platform.system() == "Windows" else "claudecord")
     out = run(str(launcher), "--help")
-    assert "hub" in out and "start" in out, out
+    assert "hub" in out and "--detach" in out, out
     # The exit code of the program comes through the launcher.
     bad = subprocess.run([str(launcher), "no-such-command"], capture_output=True)
     assert bad.returncode != 0
@@ -85,7 +85,7 @@ def test_pip(tmp):
     run("uv", "pip", "install", "--python", str(py), str(wheel))
     cmd = venv / ("Scripts/claudecord.exe" if platform.system() == "Windows" else "bin/claudecord")
     out = run(str(cmd), "--help")
-    assert "hub" in out and "start" in out, out
+    assert "hub" in out and "--detach" in out, out
     print(f"pip: built {wheel.name}, installed into a clean environment and ran claudecord --help")
 
 
