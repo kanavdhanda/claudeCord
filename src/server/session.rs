@@ -39,6 +39,7 @@ pub(crate) async fn run(
 ) {
     let (tx, mut rx) = mpsc::channel::<Out>(1024);
     let queued = Arc::new(AtomicUsize::new(0));
+    let queued_files = Arc::new(AtomicUsize::new(0));
     let kill = Arc::new(tokio::sync::Notify::new());
     if to_actor
         .send(Input::Connected {
@@ -46,6 +47,7 @@ pub(crate) async fn run(
             conn,
             tx,
             queued: queued.clone(),
+            queued_files: queued_files.clone(),
             kill: kill.clone(),
         })
         .await
@@ -64,7 +66,10 @@ pub(crate) async fn run(
     // Why the connection ended, for the log.
     let mut why = "the device closed the connection".to_string();
     loop {
+        // Biased, and in this order: what the device sent is read first, so a long stretch of sending (a big file) never makes a live device look
+        // silent. The stall check comes before more sending for the same reason.
         tokio::select! {
+            biased;
             incoming = socket.recv() => match incoming {
                 None => break,
                 Some(Err(e)) => { why = format!("the connection failed: {e}"); break; }
@@ -86,6 +91,8 @@ pub(crate) async fn run(
                                 continue;
                             }
                             if to_actor.send(Input::Frame { node: node.clone(), text: t.as_str().to_string(), stamp: crate::protocol::stamp_of(t.as_str()) }).await.is_err() { why = "the hub is stopping".into(); break; }
+                            // Time spent waiting for the hub's core to take the frame is ours, not the device's silence.
+                            last_seen = Instant::now();
                         }
                         Message::Pong(_) => {
                             if to_actor.send(Input::Alive { node: node.clone() }).await.is_err() { why = "the hub is stopping".into(); break; }
@@ -93,16 +100,6 @@ pub(crate) async fn run(
                         Message::Close(_) => break,
                         _ => {}
                     }
-                }
-            },
-            out = rx.recv() => match out {
-                None => { why = "the hub ended the connection".into(); close = Some((1013, "try again later")); break; }
-                Some(Out::Close(code, reason)) => { why = format!("the hub closed it: {reason}"); close = Some((code, reason)); break; }
-                Some(Out::Frame(text)) => {
-                    let n = text.len();
-                    let sent = send_bounded(&mut socket, Message::Text(text.into()), &kill, stall).await;
-                    queued.fetch_sub(n.min(queued.load(Ordering::Relaxed)), Ordering::Relaxed);
-                    if let Err(e) = sent { why = e.into(); break; }
                 }
             },
             _ = ping.tick() => {
@@ -113,6 +110,22 @@ pub(crate) async fn run(
                 }
                 if let Err(e) = send_bounded(&mut socket, Message::Ping(Vec::new().into()), &kill, stall).await { why = e.into(); break; }
             }
+            out = rx.recv() => match out {
+                None => { why = "the hub ended the connection".into(); close = Some((1013, "try again later")); break; }
+                Some(Out::Close(code, reason)) => { why = format!("the hub closed it: {reason}"); close = Some((code, reason)); break; }
+                Some(Out::Chunk(text)) => {
+                    let n = text.len();
+                    let sent = send_bounded(&mut socket, Message::Text(text.into()), &kill, stall).await;
+                    queued_files.fetch_sub(n.min(queued_files.load(Ordering::Relaxed)), Ordering::Relaxed);
+                    if let Err(e) = sent { why = e.into(); break; }
+                }
+                Some(Out::Frame(text)) => {
+                    let n = text.len();
+                    let sent = send_bounded(&mut socket, Message::Text(text.into()), &kill, stall).await;
+                    queued.fetch_sub(n.min(queued.load(Ordering::Relaxed)), Ordering::Relaxed);
+                    if let Err(e) = sent { why = e.into(); break; }
+                }
+            },
         }
     }
     if let Some((code, reason)) = close {

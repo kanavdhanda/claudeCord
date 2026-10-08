@@ -518,7 +518,10 @@ async fn session(
     let mut last_seen = tokio::time::Instant::now();
     let mut replaced = false;
     loop {
+        // Biased, and in this order: what the hub sent is read first, so a long stretch of sending never makes a live hub look silent. The stall
+        // check comes before more sending for the same reason.
         tokio::select! {
+            biased;
             msg = rx.next() => match msg {
                 None | Some(Err(_)) => return replaced,
                 Some(Ok(m)) => {
@@ -532,6 +535,8 @@ async fn session(
                             Some(HubFrame::Error { message }) if message.contains("replaced") => replaced = true,
                             Some(f) => {
                                 if events.send(LinkEvent::Frame(f)).await.is_err() { return replaced; }
+                                // Time spent waiting for the owner to take the frame is ours, not the hub's silence.
+                                last_seen = tokio::time::Instant::now();
                             }
                             None => {}
                         },
@@ -540,6 +545,10 @@ async fn session(
                     }
                 }
             },
+            _ = ping.tick() => {
+                if last_seen.elapsed() > opts.ping_every * 2 { return replaced; }
+                if tx.send(Message::Ping(Vec::new().into())).await.is_err() { return replaced; }
+            }
             frame = outbox.recv() => match frame {
                 None => return replaced,
                 Some(f) => {
@@ -547,10 +556,6 @@ async fn session(
                     if tx.send(Message::Text(text.into())).await.is_err() { return replaced; }
                 }
             },
-            _ = ping.tick() => {
-                if last_seen.elapsed() > opts.ping_every * 2 { return replaced; }
-                if tx.send(Message::Ping(Vec::new().into())).await.is_err() { return replaced; }
-            }
             _ = watch.tick() => {
                 // The machine was asleep: the old connection is certainly dead, so do not wait to find out.
                 let now = SystemTime::now();

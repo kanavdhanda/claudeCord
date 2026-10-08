@@ -2468,8 +2468,8 @@ async fn a_large_file_in_many_pieces_arrives_byte_for_byte_and_leaves_no_part_fi
             .unwrap()
     })
     .await;
-    // Three megabytes of a pattern that shows if a piece is lost, doubled or out of place.
-    let body: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
+    // Ten megabytes, near the size limit, of a pattern (a big burst in the test rig, whose heartbeat is very short: it must never cost the connection) that shows if a piece is lost, doubled or out of place.
+    let body: Vec<u8> = (0..10_000_000u32).map(|i| (i % 251) as u8).collect();
     let sent = body.clone();
     r.hub
         .call(move |c, _| {
