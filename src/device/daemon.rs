@@ -53,10 +53,14 @@ pub fn shot(screen: &str) -> String {
 
 /// Received files are kept this long, and this much of them at most (the oldest go first).
 const FILES_KEEP_MS: i64 = 3 * 24 * 3_600_000;
-/// How long `claudecord say` waits for the hub to confirm that the agents it named have the message.
+/// How long a message from another agent is tried for before the device gives up and says it could not paste it.
 const SAY_WAIT: Duration = Duration::from_secs(5);
 
-/// What `claudecord say` prints, from what the hub said (or did not say in time).
+/// How long `claudecord say` waits for the hub's word: a little longer than the device tries, so a failure it reports arrives first.
+const SAY_REPLY_WAIT: Duration = Duration::from_secs(8);
+
+/// What `claudecord say` prints, from what the hub said. There is no in-between: the agent it named has the message or it failed, and a say
+/// is only a success in the first case (or when it named nobody and just went to the chat).
 fn say_answer(
     got: Result<
         Result<(String, Option<String>), oneshot::error::RecvError>,
@@ -66,18 +70,14 @@ fn say_answer(
     match got {
         Ok(Ok((state, detail))) => match state.as_str() {
             "delivered" => Resp::ok("delivered: they have it"),
-            "pending" => Resp::ok(format!(
-                "pending: {} cannot take it yet (offline or on hold); it will be delivered as soon as it can",
-                detail.unwrap_or_else(|| "the agent".into())
-            )),
             "failed" => Resp::err(format!(
-                "message could not be sent: {}",
-                detail.unwrap_or_else(|| "the hub refused it".into())
+                "NOT delivered: {}",
+                detail.unwrap_or_else(|| "the hub could not send it".into())
             )),
             _ => Resp::ok("sent"),
         },
-        _ => Resp::ok(
-            "pending: sent, but not yet confirmed as received; it will be delivered when the agent is ready",
+        _ => Resp::err(
+            "NOT delivered: the hub did not confirm it, so it may not have been sent. Check `claudecord doctor`, then send it again",
         ),
     }
 }
@@ -129,7 +129,7 @@ fn intro(spec: &AgentSpec) -> Option<Delivery> {
     })
 }
 
-pub const RULES: &str = "Team chat is the shell command claudecord: say <text>, ask <question>, assign <agent> <task>, done <id> <summary>, dump (save state), team (who else is here), send <file> (to the chat) or send <file> --to <agent> (to another agent's .claudecord inbox). Answer team messages with say, not also in the terminal; answer a person typing at your terminal there. For several lines pipe them in: say - <<'EOF'. Put @theirname before a person's name only when you need their attention; never @ yourself. @agentname addresses ANOTHER agent, in a thread of its own, so keep it short and only when you need them. Ask a person only what you cannot decide, once. Your say on a task goes to its thread; ask, done and report go to the main chat.";
+pub const RULES: &str = "Team chat is the shell command claudecord: say <text>, ask <question>, assign <agent> <task>, done <id> <summary>, dump (save state), team (who else is here), send <file> (to the chat) or send <file> --to <agent> (to another agent's .claudecord inbox). Answer team messages with say, not also in the terminal; answer a person typing at your terminal there. For several lines pipe them in: say - <<'EOF'. Put @theirname before a person's name only when you need their attention; never @ yourself. @agentname addresses ANOTHER agent, in a thread of its own, so keep it short and only when you need them. Ask a person only what you cannot decide, once. A say naming an agent prints delivered, or NOT delivered and why (then it was not sent). Your say on a task goes to its thread; ask, done and report go to the main chat.";
 
 /// Choices that tests change.
 #[derive(Clone)]
@@ -292,6 +292,9 @@ struct Agent {
     urgency: Urgency,
     /// The delivery that asked for it: once it has been pasted nothing is urgent any more. What waits ahead of it goes in with the same urgency.
     urgent_id: Option<String>,
+    /// A message from another agent that is not queued: its id and the time (ms) after which, if it still has not been pasted, it is dropped and
+    /// the sender is told.
+    direct: Option<(String, i64)>,
     /// When Escape was pressed for a steering message, so the paste follows after the agent has had a moment to stop.
     steered_at: Option<i64>,
     status: AgentStatus,
@@ -430,7 +433,7 @@ pub async fn run(cfg: Config, dir: PathBuf, opts: Options) -> std::io::Result<()
                     // A `say` that named agents: answered when the hub says they have it, or after a few seconds, without holding the loop.
                     Some(receipt) if resp.ok => {
                         tokio::spawn(async move {
-                            let _ = reply.send(say_answer(tokio::time::timeout(SAY_WAIT, receipt).await));
+                            let _ = reply.send(say_answer(tokio::time::timeout(SAY_REPLY_WAIT, receipt).await));
                         });
                     }
                     _ => { let _ = reply.send(resp); }
@@ -627,11 +630,16 @@ impl State {
                 msg_id,
                 mode,
             } => {
-                if let (Some(a), Some(u)) = (self.agents.get_mut(&agent_id), Urgency::parse(&mode))
+                let direct = mode == "direct";
+                let mode = if direct { "now" } else { mode.as_str() };
+                if let (Some(a), Some(u)) = (self.agents.get_mut(&agent_id), Urgency::parse(mode))
                     && a.queue.iter().any(|d| d.msg_id.as_ref() == Some(&msg_id))
                 {
                     a.urgency = a.urgency.max(u);
-                    a.urgent_id = Some(msg_id);
+                    a.urgent_id = Some(msg_id.clone());
+                    if direct {
+                        a.direct = Some((msg_id, crate::now_ms() + SAY_WAIT.as_millis() as i64));
+                    }
                 }
             }
             HubFrame::SayReceipt {
@@ -1427,6 +1435,9 @@ impl State {
                 if settled && a.proc.inject_as(&text, now, a.urgency).is_ok() {
                     a.log.event(now, "delivered", &text);
                     let ids: Vec<String> = a.queue.drain(..n).filter_map(|d| d.msg_id).collect();
+                    if a.direct.as_ref().is_some_and(|(d, _)| ids.contains(d)) {
+                        a.direct = None;
+                    }
                     if a.urgent_id.as_ref().is_none_or(|u| ids.contains(u)) {
                         a.urgency = Urgency::Queue;
                         a.urgent_id = None;
@@ -1436,6 +1447,33 @@ impl State {
                         ids,
                         since: now,
                         screen_before: before,
+                    });
+                }
+            }
+            // A message from another agent that could not be pasted in time is dropped, and the hub told why, so the sender hears "failed" and not silence.
+            if let Some((mid, by)) = a.direct.clone()
+                && now > by
+            {
+                a.direct = None;
+                if a.queue.iter().any(|d| d.msg_id.as_ref() == Some(&mid)) {
+                    a.queue.retain(|d| d.msg_id.as_ref() != Some(&mid));
+                    if a.urgent_id.as_ref() == Some(&mid) {
+                        a.urgency = Urgency::Queue;
+                        a.urgent_id = None;
+                    }
+                    let reason = if state.limit.is_some() {
+                        "at a usage limit"
+                    } else if state.prompt.is_some() {
+                        "waiting on a question or permission prompt"
+                    } else if !state.ready {
+                        "its terminal was not ready for input"
+                    } else {
+                        "someone was typing in its terminal"
+                    };
+                    out.push(NodeFrame::AgentDeliveryFailed {
+                        agent_id: id.to_string(),
+                        msg_ids: vec![mid],
+                        reason: reason.into(),
                     });
                 }
             }
@@ -2170,6 +2208,7 @@ impl State {
                 inflight: None,
                 urgency: Urgency::Queue,
                 urgent_id: None,
+                direct: None,
                 steered_at: None,
                 status: AgentStatus::Starting,
                 held: false,

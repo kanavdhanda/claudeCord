@@ -3065,7 +3065,7 @@ fn say_from(w: &mut World, node: &str, agent: &str, text: &str, id: &str) -> Vec
 }
 
 #[test]
-fn a_say_to_a_peer_is_confirmed_only_when_the_peer_has_it_and_is_pasted_straight_in() {
+fn a_say_to_a_peer_is_confirmed_only_when_the_peer_has_it_and_is_sent_straight_in() {
     let mut w = World::new();
     w.join("mac", 1, "otter");
     w.join("gpu", 2, "heron");
@@ -3075,7 +3075,7 @@ fn a_say_to_a_peer_is_confirmed_only_when_the_peer_has_it_and_is_pasted_straight
     let id = frames(&fx)
         .iter()
         .find_map(|f| match f {
-            HubFrame::Priority { msg_id, mode, .. } if mode == "now" => Some(msg_id.clone()),
+            HubFrame::Priority { msg_id, mode, .. } if mode == "direct" => Some(msg_id.clone()),
             _ => None,
         })
         .expect("straight in");
@@ -3096,7 +3096,8 @@ fn a_say_to_a_peer_is_confirmed_only_when_the_peer_has_it_and_is_pasted_straight
 }
 
 #[test]
-fn a_say_to_an_offline_peer_is_pending_at_once_and_a_plain_say_is_just_posted() {
+fn a_say_to_a_peer_that_cannot_take_it_fails_at_once_and_is_not_queued_and_a_plain_say_is_just_posted()
+ {
     let mut w = World::new();
     w.join("mac", 1, "otter");
     w.join("gpu", 2, "heron");
@@ -3104,8 +3105,66 @@ fn a_say_to_an_offline_peer_is_pending_at_once_and_a_plain_say_is_just_posted() 
     let fx = say_from(&mut w, "gpu", "heron", "@otter are you there", "s1");
     assert_eq!(
         receipts(&fx),
-        vec![(2, "s1".into(), "pending".into(), Some("otter".into()))]
+        vec![(
+            2,
+            "s1".into(),
+            "failed".into(),
+            Some("otter is offline".into())
+        )]
+    );
+    // Nothing waits for otter: when it comes back it hears nothing of this.
+    let fx = w.core.node_connected("mac", 1);
+    assert!(
+        deliveries(&fx)
+            .iter()
+            .all(|d| !d.2.contains("are you there"))
     );
     let fx = say_from(&mut w, "gpu", "heron", "just thinking aloud", "s2");
     assert_eq!(receipts(&fx), vec![(2, "s2".into(), "posted".into(), None)]);
+}
+
+#[test]
+fn a_device_that_could_not_paste_a_message_in_time_tells_the_sender_it_failed() {
+    let mut w = World::new();
+    w.join("mac", 1, "otter");
+    w.join("gpu", 2, "heron");
+    let fx = say_from(&mut w, "gpu", "heron", "@otter ping", "s1");
+    let id = frames(&fx)
+        .iter()
+        .find_map(|f| match f {
+            HubFrame::Priority { msg_id, .. } => Some(msg_id.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let fx = w.core.on_node_frame(
+        "mac",
+        NodeFrame::AgentDeliveryFailed {
+            agent_id: "p/otter".into(),
+            msg_ids: vec![id.clone()],
+            reason: "someone was typing in its terminal".into(),
+        },
+        T0 + 5000,
+    );
+    assert_eq!(
+        receipts(&fx),
+        vec![(
+            2,
+            "s1".into(),
+            "failed".into(),
+            Some("otter could not take it: someone was typing in its terminal".into())
+        )]
+    );
+    // It is gone: accepting it afterwards confirms nothing.
+    assert!(
+        w.core
+            .on_node_frame(
+                "mac",
+                NodeFrame::AgentAccepted {
+                    agent_id: "p/otter".into(),
+                    msg_ids: vec![id]
+                },
+                T0 + 5100
+            )
+            .is_empty()
+    );
 }

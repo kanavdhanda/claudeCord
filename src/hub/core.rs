@@ -683,6 +683,7 @@ impl HubCore {
             | NodeFrame::AgentGone { agent_id }
             | NodeFrame::AgentScreen { agent_id, .. }
             | NodeFrame::AgentAccepted { agent_id, .. }
+            | NodeFrame::AgentDeliveryFailed { agent_id, .. }
             | NodeFrame::AgentAssign { agent_id, .. }
             | NodeFrame::AgentTaskDone { agent_id, .. }
             | NodeFrame::AgentPermission { agent_id, .. }
@@ -814,6 +815,11 @@ impl HubCore {
                 );
                 Self::refresh(&a.project, &mut fx);
             }
+            NodeFrame::AgentDeliveryFailed {
+                agent_id,
+                msg_ids,
+                reason,
+            } => self.on_delivery_failed(&agent_id, &msg_ids, &reason, &mut fx),
             NodeFrame::AgentAccepted { agent_id, msg_ids } => {
                 self.on_accepted(&agent_id, &msg_ids, now, &mut fx)
             }

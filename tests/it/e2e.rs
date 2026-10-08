@@ -2392,3 +2392,67 @@ async fn a_say_to_a_peer_returns_delivered_once_the_peer_has_it_and_a_plain_say_
     );
     r.hub.shutdown().await;
 }
+
+/// Never shows its input box, so it stays "starting" and nothing can be pasted into it.
+const NEVER_READY: &str = "#!/bin/sh\nsleep 60\n";
+
+#[tokio::test]
+async fn a_say_to_a_peer_whose_terminal_cannot_take_it_fails_with_the_reason_and_is_not_a_success()
+{
+    let r = rig_with("sayfails", NEVER_READY).await;
+    let key = up(&r, "otter").await;
+    let other = r.project.parent().unwrap().join("demo2");
+    std::fs::create_dir_all(&other).unwrap();
+    let resp = ipc::call(
+        &r.dir,
+        &Req::Up {
+            project: "demo".into(),
+            name: Some("heron".into()),
+            adapter: "claude".into(),
+            model: None,
+            role: None,
+            cwd: other.to_string_lossy().into(),
+            policy: "autonomous".into(),
+            rows: 24,
+            cols: 80,
+            opts: UpOpts::default(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(resp.ok, "{}", resp.msg);
+    eventually("both registered", async || {
+        r.hub
+            .call(|c, _| {
+                (
+                    c.agent("demo/otter").is_some() && c.agent("demo/heron").is_some(),
+                    vec![],
+                )
+            })
+            .await
+            .unwrap()
+    })
+    .await;
+    let resp = ipc::call_as(
+        &r.dir,
+        Some(&key),
+        &Req::Say {
+            agent: "demo/otter".into(),
+            text: "@heron are you there".into(),
+            thread: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        !resp.ok,
+        "a failed say must not look like a success: {}",
+        resp.msg
+    );
+    assert!(
+        resp.msg.starts_with("NOT delivered") && resp.msg.contains("not ready for input"),
+        "{}",
+        resp.msg
+    );
+    r.hub.shutdown().await;
+}

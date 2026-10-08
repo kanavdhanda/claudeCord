@@ -247,6 +247,13 @@ pub enum NodeFrame {
     /// agents the hub still lists are gone.
     #[serde(rename = "agents.here", rename_all = "camelCase")]
     AgentsHere { agent_ids: Vec<String> },
+    /// A message another agent sent (`priority` mode `direct`) could not be pasted in time, for `reason`. It is dropped, not queued.
+    #[serde(rename = "agent.delivery_failed", rename_all = "camelCase")]
+    AgentDeliveryFailed {
+        agent_id: String,
+        msg_ids: Vec<String>,
+        reason: String,
+    },
     #[serde(rename = "agent.accepted", rename_all = "camelCase")]
     AgentAccepted {
         agent_id: String,
@@ -419,6 +426,11 @@ impl NodeFrame {
             AgentLimit { .. } => true,
             AgentAccepted { msg_ids, .. } => {
                 msg_ids.len() <= 200 && msg_ids.iter().all(|s| within(s, 40))
+            }
+            AgentDeliveryFailed {
+                msg_ids, reason, ..
+            } => {
+                msg_ids.len() <= 200 && msg_ids.iter().all(|s| within(s, 40)) && within(reason, 500)
             }
             AgentAssign {
                 to, task, thread, ..
