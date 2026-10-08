@@ -75,6 +75,7 @@ fn fast(extra: Vec<PathBuf>, max_agents: usize, labels: Vec<String>) -> Options 
         backend: Backend::Pty,
         auto_startup: false,
         idle_exit: None,
+        idle_agents_exit: None,
     }
 }
 
@@ -1959,7 +1960,7 @@ async fn rig_hub_only(name: &str) -> Rig {
     .await
 }
 
-/// What a waiting `claudecord start` tells the daemon about where the agent goes.
+/// What a waiting `claudecord` tells the daemon about where the agent goes.
 fn expect(code: &str, cwd: &Path) -> Req {
     Req::Expect {
         code: code.into(),
@@ -2012,7 +2013,7 @@ async fn nothing_starts_an_agent_on_a_machine_but_the_hub() {
     );
     let list = ipc::call(&r.dir, &Req::List).await.unwrap().data.unwrap();
     assert_eq!(list.as_array().unwrap().len(), 0);
-    // The hub can: with a waiting `claudecord start`, in its folder, and the start is told.
+    // The hub can: with a waiting `claudecord`, in its folder, and the start is told.
     assert!(
         ipc::call(&r.dir, &expect("abc123", &r.project))
             .await
@@ -2199,5 +2200,68 @@ async fn a_start_that_is_waiting_for_the_hub_keeps_the_daemon_from_leaving() {
         ipc::call(&r.dir, &Req::Ping).await.is_ok(),
         "the daemon left while a start was waiting"
     );
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_daemon_whose_agents_all_sit_idle_closes_them_and_goes_away() {
+    let r = rig_tuned("idleagents", NORMAL, 8, vec![], Backend::Pty, |o| {
+        o.idle_exit = Some(Duration::from_millis(600));
+        o.idle_agents_exit = Some(Duration::from_millis(1500));
+    })
+    .await;
+    up(&r, "otter").await;
+    eventually("idle", async || {
+        r.hub
+            .call(|c, _| (c.status_of("demo/otter") == AgentStatus::Idle, vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    // Nothing is sent to it, and nobody touches its terminal: it is given up on.
+    eventually("the daemon to leave", async || {
+        ipc::call(&r.dir, &Req::Ping).await.is_err()
+    })
+    .await;
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_daemon_with_an_agent_that_keeps_getting_messages_stays() {
+    let r = rig_tuned("busyagents", NORMAL, 8, vec![], Backend::Pty, |o| {
+        o.idle_exit = Some(Duration::from_millis(600));
+        o.idle_agents_exit = Some(Duration::from_millis(2500));
+    })
+    .await;
+    up(&r, "otter").await;
+    eventually("idle", async || {
+        r.hub
+            .call(|c, _| (c.status_of("demo/otter") == AgentStatus::Idle, vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    // A message every second changes its screen, so it is never idle for the whole time.
+    for n in 0..5 {
+        r.hub
+            .call(move |c, now| {
+                let r = c
+                    .human_message(
+                        &kd(),
+                        "demo",
+                        &format!("ping {n}"),
+                        &MessageOpts::default(),
+                        now,
+                    )
+                    .unwrap();
+                ((), r.1)
+            })
+            .await;
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        assert!(
+            ipc::call(&r.dir, &Req::Ping).await.is_ok(),
+            "the daemon left while the agent was in use"
+        );
+    }
     r.hub.shutdown().await;
 }

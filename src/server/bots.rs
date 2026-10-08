@@ -92,7 +92,7 @@ pub(crate) async fn bot_guilds_cached(
 }
 
 /// Why a placed project cannot work right now (its bot was removed from the server, or lacks a permission), or None if it can or that cannot be
-/// told. This is what the dashboard shows, and what `claudecord start` waits on.
+/// told. This is what the dashboard shows, and what `claudecord` waits on.
 pub(crate) async fn project_problem(
     gw: &Gateway,
     tenant: &str,

@@ -427,6 +427,7 @@ async fn rig(
         backend: crate::device::terminal::Backend::Pty,
         auto_startup: false,
         idle_exit: None,
+        idle_agents_exit: None,
     };
     let d = dir.clone();
     tokio::spawn(async move {
@@ -657,7 +658,7 @@ fn command_line() -> Probe {
         use clap::Parser;
         for args in [
             vec!["claudecord", "hub"],
-            vec!["claudecord", "start", "--detach"],
+            vec!["claudecord", "--detach"],
             vec!["claudecord", "logs", "otter"],
             vec!["claudecord", "handoff", "otter"],
             vec!["claudecord", "say", "hi"],
@@ -675,7 +676,6 @@ fn command_line() -> Probe {
             ],
             vec!["claudecord", "selftest"],
             vec!["claudecord", "storage", "show"],
-            vec!["claudecord", "discord", "show"],
             vec!["claudecord", "export", "--out", "v"],
         ] {
             ensure!(

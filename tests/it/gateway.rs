@@ -1563,7 +1563,7 @@ async fn pressing_start_makes_the_hub_ask_the_machine_to_start_the_agent_with_th
     )
     .await;
     assert_eq!(st, 200, "{body}");
-    // The machine is asked, with the command's text, the code of the waiting `claudecord start`, and the page's choices.
+    // The machine is asked, with the command's text, the code of the waiting `claudecord`, and the page's choices.
     let mut asked = None;
     for _ in 0..80 {
         if let Ok(Some(Ok(Message::Text(t)))) =
@@ -1775,7 +1775,7 @@ async fn discord_spawn_can_name_a_saved_startup_command_with_autocomplete_and_re
     );
     assert!(
         pick.is_none(),
-        "a Discord spawn is not for a waiting claudecord start"
+        "a Discord spawn is not for a waiting claudecord"
     );
     gw.shutdown().await;
 }

@@ -163,9 +163,26 @@ async fn run(
 ) {
     let mut failures = 0u32;
     let mut unacked = Unacked::new();
+    let mut said = String::new();
     loop {
         let started = tokio::time::Instant::now();
-        if let Some(ws) = connect(&url, &token, &opts).await {
+        let conn = connect_detailed(&url, &token, &opts).await;
+        // Say why once, not at every retry: a refused login would otherwise fail in silence for ever.
+        if let Err(e) = &conn
+            && *e != said
+        {
+            said = e.clone();
+            if e.contains("401") {
+                crate::error!(
+                    "link",
+                    "the hub does not recognise this machine's login (removed on the dashboard?). Run `claudecord` to sign in again"
+                );
+            } else {
+                crate::warn!("link", "cannot connect to the hub: {e}");
+            }
+        }
+        if let Ok(ws) = conn {
+            said.clear();
             let replaced = session(ws, &node, &events, &mut outbox, &mut unacked, &opts).await;
             if events.send(LinkEvent::Down).await.is_err() {
                 return;

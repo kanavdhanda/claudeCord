@@ -1,5 +1,5 @@
 //! A machine joining a hub with no token typed by anyone: it asks the hub for a short code, shows the person a link, and waits while they
-//! sign in with Discord in a browser and approve it. This is what the very first `claudecord start` (or `npx claudecord`) does on a new
+//! sign in with Discord in a browser and approve it. This is what the very first `claudecord` (or `npx claudecord`) does on a new
 //! machine. The token it gets back never appears on screen or in a shell history; it goes straight into the machine's private config.
 
 use super::config::Config;

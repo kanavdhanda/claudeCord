@@ -582,7 +582,7 @@ pub enum HubFrame {
         /// if its owner allowed that (`claudecord settings custom-commands on`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         command: Option<String>,
-        /// The code of a `claudecord start` waiting on this machine: the agent goes in the folder that command was run in.
+        /// The code of a `claudecord` waiting on this machine: the agent goes in the folder that command was run in.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pick: Option<String>,
     },

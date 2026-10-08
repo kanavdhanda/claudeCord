@@ -18,7 +18,7 @@ export function Setup() {
   const [bot, setBot] = useState<Bot | null>(null)
   const [guild, setGuild] = useState<Guild | null>(null)
   const [channel, setChannel] = useState<Channel | null>(null)
-  // `claudecord start` opens this page with ?project=NAME for a project that has no Discord channel yet.
+  // `claudecord` opens this page with ?project=NAME for a project that has no Discord channel yet.
   const [project, setProject] = useState(() => {
     const p = new URLSearchParams(window.location.search).get('project') ?? ''
     return /^[A-Za-z0-9._-]{1,64}$/.test(p) ? p : ''
@@ -63,14 +63,14 @@ export function Setup() {
           setProgram={setProgram}
           back={() => setStep('where')}
           next={async () => {
-            // Reached from a waiting `claudecord start`: the project is chosen now that its bot and channel exist, which lets that terminal carry on.
+            // Reached from a waiting `claudecord`: the project is chosen now that its bot and channel exist, which lets that terminal carry on.
             const code = new URLSearchParams(window.location.search).get('code')
             if (code) {
               try {
                 await api.choose(code, project)
               } catch (e) {
                 // The terminal gave up waiting (or the hub restarted): the project is set up anyway, so say how to carry on.
-                alert(`The project is set up, but the terminal is no longer waiting for it (${e instanceof Error ? e.message : e}). Run claudecord start again and pick ${project}.`)
+                alert(`The project is set up, but the terminal is no longer waiting for it (${e instanceof Error ? e.message : e}). Run claudecord again and pick ${project}.`)
               }
             }
             setStep('done')
@@ -280,8 +280,8 @@ function DoneStep({ project, agent, program, fromTerminal }: { project: string; 
   const [node, setNode] = useState('')
   const spawn = useAction()
   const [started, setStarted] = useState<string | null>(null)
-  const cmd = `cd ~/code/${project}\nclaudecord start --project ${project}${agent ? ` --name ${agent}` : ''}${program !== 'claude' ? ` --adapter ${program}` : ''}`
-  // Reached from `claudecord start`: that terminal is already carrying on, so there is nothing to type anywhere.
+  const cmd = `cd ~/code/${project}\nclaudecord --project ${project}${agent ? ` --name ${agent}` : ''}${program !== 'claude' ? ` --adapter ${program}` : ''}`
+  // Reached from `claudecord`: that terminal is already carrying on, so there is nothing to type anywhere.
   if (fromTerminal)
     return (
       <div className="card narrow stack">

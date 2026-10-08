@@ -126,6 +126,9 @@ pub struct Options {
     pub auto_startup: bool,
     /// Exit this long after the last agent ends, so the machine is only connected while something is running. None keeps it running.
     pub idle_exit: Option<Duration>,
+    /// How long every agent may sit idle (nothing queued for it, nobody typing, not working or waiting) before the daemon ends them and goes
+    /// away too. `None` keeps agents for ever. Not applied while keep-running is on.
+    pub idle_agents_exit: Option<Duration>,
 }
 
 impl Default for Options {
@@ -144,6 +147,7 @@ impl Default for Options {
             backend: Backend::from_env(),
             auto_startup: false,
             idle_exit: None,
+            idle_agents_exit: None,
             max_agents: std::env::var("CLAUDECORD_MAX_AGENTS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -211,7 +215,7 @@ struct Launch {
     cols: u16,
 }
 
-/// What became of a `claudecord start` that is waiting for the hub to start an agent.
+/// What became of a `claudecord` that is waiting for the hub to start an agent.
 enum PendingState {
     Waiting,
     Started {
@@ -221,7 +225,7 @@ enum PendingState {
     Failed(String),
 }
 
-/// A `claudecord start` waiting on the dashboard: where it was run, and the choices that belong to this machine (see `ExpectOpts`).
+/// A `claudecord` waiting on the dashboard: where it was run, and the choices that belong to this machine (see `ExpectOpts`).
 struct PendingStart {
     cwd: String,
     rows: u16,
@@ -231,7 +235,7 @@ struct PendingStart {
     state: PendingState,
 }
 
-/// How long a waiting `claudecord start` is remembered (the page's own code expires after the same time).
+/// How long a waiting `claudecord` is remembered (the page's own code expires after the same time).
 const PENDING_TTL_MS: i64 = 60 * 60_000;
 
 /// Restarts (when asked for with `--restart N`) are counted over this long. Past the count the agent is left stopped, because
@@ -289,7 +293,7 @@ struct State {
     folders: HashMap<String, Vec<PathBuf>>,
     /// For each folder, the projects it was started for, the most recent first.
     last: BTreeMap<String, Vec<String>>,
-    /// The `claudecord start`s waiting for the hub to start an agent for them, by the code of the page they opened.
+    /// The `claudecord`s waiting for the hub to start an agent for them, by the code of the page they opened.
     pending: HashMap<String, PendingStart>,
     link: Link,
     /// Since when no agent has been running, so the daemon can go away by itself (see `Options::idle_exit`).
@@ -658,7 +662,7 @@ impl State {
                 command,
                 pick,
             } => {
-                // The agent goes in the folder of the `claudecord start` that is waiting for it (the hub sent its code). Otherwise only in a
+                // The agent goes in the folder of the `claudecord` that is waiting for it (the hub sent its code). Otherwise only in a
                 // folder this machine already knows for the project (the hub never chooses a folder): one with no agent in it first, and if
                 // every known folder is busy, the first one with its own git worktree.
                 let waiting = pick
@@ -699,7 +703,11 @@ impl State {
                                 ex.model.clone().or(agent.model.clone()),
                                 agent.role.clone(),
                                 cwd,
-                                if ex.policy.is_empty() { "ask".into() } else { ex.policy },
+                                if ex.policy.is_empty() {
+                                    "ask".into()
+                                } else {
+                                    ex.policy
+                                },
                                 rows,
                                 cols,
                                 UpOpts {
@@ -714,7 +722,10 @@ impl State {
                             if let Some(p) = pick.as_deref().and_then(|c| self.pending.get_mut(c)) {
                                 p.state = PendingState::Started {
                                     agent: r.msg.clone(),
-                                    worktree: r.data.as_ref().and_then(|d| d["worktree"].as_str().map(String::from)),
+                                    worktree: r
+                                        .data
+                                        .as_ref()
+                                        .and_then(|d| d["worktree"].as_str().map(String::from)),
                                 };
                             }
                             self.remember_agent(
@@ -733,12 +744,13 @@ impl State {
                         }
                     }
                     (Ok(_), None, _) if pick.is_some() => Err(
-                        "the `claudecord start` this was for is not waiting here any more. Run it again".to_string(),
+                        "the `claudecord` this was for is not waiting here any more. Run it again"
+                            .to_string(),
                     ),
                     (Ok(command), None, None) => {
                         let _ = command;
                         Err(format!(
-                            "this machine has no folder for project {} yet. Run `claudecord start` in one",
+                            "this machine has no folder for project {} yet. Run `claudecord` in one",
                             agent.project
                         ))
                     }
@@ -1121,7 +1133,7 @@ impl State {
         // With no agent running, the daemon (which holds the connection to the hub) goes away by itself after a short while, unless the person
         // chose to keep it running (`claudecord settings keep-running on`).
         if let Some(limit) = self.opts.idle_exit {
-            // A `claudecord start` still waiting for the hub counts as something to wait for.
+            // A `claudecord` still waiting for the hub counts as something to wait for.
             self.pending.retain(|_, p| now - p.at < PENDING_TTL_MS);
             let waiting = self
                 .pending
@@ -1136,6 +1148,26 @@ impl State {
             } else {
                 self.idle_since = None;
             }
+        }
+        // Agents that all sit idle for a long time are not worth keeping: the daemon ends them and goes. Idle means ready for input with
+        // nothing queued or in flight, and a screen that has not changed for the whole time (so nobody is typing in it either).
+        if let Some(limit) = self.opts.idle_agents_exit
+            && !self.agents.is_empty()
+            && !super::config::keep_running(&self.dir)
+            && self.agents.values().all(|a| {
+                a.status == AgentStatus::Idle
+                    && a.queue.is_empty()
+                    && a.raw.is_empty()
+                    && a.inflight.is_none()
+                    && now - a.still.1 > limit.as_millis() as i64
+            })
+        {
+            crate::info!(
+                "daemon",
+                "every agent has been idle for {} minutes, so they are closed and this machine disconnects (`claudecord settings keep-running on` prevents this)",
+                limit.as_secs() / 60
+            );
+            self.quit = true;
         }
         let ids: Vec<String> = self.agents.keys().cloned().collect();
         // Looking at a tmux session runs the tmux program, which waits for the operating system. All of them are looked at at once on
@@ -1472,7 +1504,7 @@ impl State {
                 }
             },
             Req::Up { .. } if !self.opts.dev_spawn => Resp::err(
-                "agents are started by the hub, never from this machine: run `claudecord start` and press Start on the dashboard page it opens",
+                "agents are started by the hub, never from this machine: run `claudecord` and press Start on the dashboard page it opens",
             ),
             Req::Up {
                 project,

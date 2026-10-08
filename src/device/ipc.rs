@@ -24,7 +24,7 @@ pub struct UpOpts {
     pub restart: u32,
 }
 
-/// What a waiting `claudecord start` decides for the agent the hub is about to start for it. The project, name, program and role come from the
+/// What a waiting `claudecord` decides for the agent the hub is about to start for it. The project, name, program and role come from the
 /// dashboard page; these are the choices that belong to this machine alone.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExpectOpts {
@@ -64,7 +64,7 @@ pub enum Req {
         #[serde(default)]
         opts: UpOpts,
     },
-    /// A `claudecord start` is waiting for the hub to start an agent in this folder (the hub's request carries `code`). Agents are started by
+    /// A `claudecord` is waiting for the hub to start an agent in this folder (the hub's request carries `code`). Agents are started by
     /// the hub alone: this only says where, and with which local choices, to start the one that is asked for.
     Expect {
         code: String,

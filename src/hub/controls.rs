@@ -13,7 +13,7 @@ use crate::protocol::{AgentSpec, AgentStatus, HubFrame};
 pub struct SpawnExtra {
     /// The shell line of a saved startup command, to run instead of the plain agent program.
     pub command: Option<String>,
-    /// The code of a `claudecord start` waiting on the machine, so the agent goes in the folder it was run in.
+    /// The code of a `claudecord` waiting on the machine, so the agent goes in the folder it was run in.
     pub pick: Option<String>,
 }
 
@@ -420,7 +420,7 @@ impl HubCore {
         self.spawn_with(by, project, node, spec, SpawnExtra::default())
     }
 
-    /// Like `spawn`, with what a request can add: a saved startup command, and the `claudecord start` waiting on that machine.
+    /// Like `spawn`, with what a request can add: a saved startup command, and the `claudecord` waiting on that machine.
     pub fn spawn_with(
         &self,
         by: &Human,

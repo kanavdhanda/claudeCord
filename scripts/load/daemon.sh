@@ -26,7 +26,7 @@ total=0
 for s in $(seq "$steps"); do
   for _ in $(seq "$step"); do
     total=$((total + 1)); mkdir -p "$work/f$total"
-    (cd "$work/f$total" && "$bin" start --project load --name "a$total" --detach --no-guide -- cat >/dev/null 2>&1) || { echo "start $total failed"; break 2; }
+    (cd "$work/f$total" && "$bin" --project load --name "a$total" --detach --no-guide -- cat >/dev/null 2>&1) || { echo "start $total failed"; break 2; }
   done
   sleep "$settle"
   # the daemon of THIS run is whoever holds this run's socket, and its tmux server answers on this run's own socket: never found by name

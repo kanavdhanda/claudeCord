@@ -278,7 +278,7 @@ async fn connect(
 }
 
 /// `GET /api/device/project/{name}`: asks, with a machine's own token, whether a project of its account has a Discord channel yet, so that
-/// `claudecord start` can send the person to the dashboard's setup page only when it is needed. It says nothing else about the account.
+/// `claudecord` can send the person to the dashboard's setup page only when it is needed. It says nothing else about the account.
 async fn device_project(
     State(gw): State<Gateway>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -339,7 +339,7 @@ struct PickStart {
     role: Option<String>,
 }
 
-/// `POST /api/device/pick`: `claudecord start` in a folder that belongs to no project yet asks for a short code. The person opens
+/// `POST /api/device/pick`: `claudecord` in a folder that belongs to no project yet asks for a short code. The person opens
 /// `/pick?code=...` on the dashboard, chooses or names the project there, and the machine collects the answer (`pick_poll`). The choice is
 /// only ever made on the dashboard, by a signed-in person of the same account.
 async fn pick_start(
@@ -400,7 +400,7 @@ async fn pick_start(
             at: now,
         },
     );
-    // `spawns`: choosing on the page makes this hub ask the machine to start the agent, so a `claudecord start` can wait for it.
+    // `spawns`: choosing on the page makes this hub ask the machine to start the agent, so a `claudecord` can wait for it.
     json_reply(StatusCode::OK, json!({ "code": code, "spawns": true }))
 }
 
@@ -558,7 +558,7 @@ async fn pick_choose(
     {
         return err(
             StatusCode::CONFLICT,
-            "this one is already chosen: run claudecord start again for another agent",
+            "this one is already chosen: run claudecord again for another agent",
         );
     }
     // Nothing continues without a Discord bot that is really in a server with the permissions it needs. (A saved bot is one Discord confirmed the
@@ -609,7 +609,7 @@ async fn pick_choose(
             "that choice expired; run the command again",
         );
     };
-    // The hub asks the machine to start the agent (a `claudecord start` only ever asks; it never starts one itself). A machine too old to be
+    // The hub asks the machine to start the agent (a `claudecord` only ever asks; it never starts one itself). A machine too old to be
     // asked this way still collects the choice and starts the agent itself, as it always did.
     let Ok(t) = gw.registry.hub(&a) else {
         return err(StatusCode::SERVICE_UNAVAILABLE, "your hub could not start");
@@ -686,7 +686,7 @@ async fn pick_choose(
         Some(Outcome::Offline) => {
             return err(
                 StatusCode::CONFLICT,
-                "your machine is not connected right now. Is `claudecord start` still running there?",
+                "your machine is not connected right now. Is `claudecord` still running there?",
             );
         }
         Some(Outcome::Taken(n)) => {

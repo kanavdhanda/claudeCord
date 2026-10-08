@@ -117,14 +117,11 @@ pub async fn run_hub(a: HubArgs) -> Result<(), String> {
     for o in &a.owners {
         core.add_owner(o);
     }
-    let oauth = super::discord::oauth_config(&a.data)?;
-    let discord = super::discord::bridge_config(&a.data)?;
+    // No Discord here: bot tokens are only ever saved through the hosted service, sealed (`claudecord serve`). This hub is for tests and development.
     let hub = server::start(
         Config {
             bind,
-            oauth,
             log_path: Some(a.data.join("hub.log")),
-            discord_expected: discord.is_some(),
             ..Config::default()
         },
         core,
@@ -136,18 +133,6 @@ pub async fn run_hub(a: HubArgs) -> Result<(), String> {
         std::io::ErrorKind::PermissionDenied => format!("not allowed to listen on {bind} (ports below 1024 need extra permission; use a higher port behind a TLS proxy)"),
         _ => e.to_string(),
     })?;
-    // Discord is part of the hub: once `claudecord discord set` has been run, starting the hub starts the bridge too.
-    match discord {
-        Some(mut cfg) => {
-            cfg.owners = a.owners.clone();
-            crate::discord::bridge::spawn(hub.handle(), hub.chat(), cfg);
-            crate::info!("hub", "the Discord bridge is starting");
-        }
-        None => crate::warn!(
-            "hub",
-            "Discord is not set up (claudecord discord set), so only the dashboard and machines are served"
-        ),
-    }
     crate::info!(
         "hub",
         "listening on {}  (data in {}, log in hub.log)",

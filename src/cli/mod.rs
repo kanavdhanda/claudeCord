@@ -1,11 +1,10 @@
 //! The command line: what each command is, and where it is handled. Commands fall in three groups:
-//! - running things: `hub` (the central server), `daemon` (the program on a machine)
+//! - running things: `serve` (the hosted service), `daemon` (the program on a machine)
 //! - working with agents: `login`, `up`, `ls`, `attach`, `stop`, `down`, `doctor`
 //! - what an agent runs in its own shell: `say`, `ask`, `assign`, `done`, `report`, `dump`, `pickup`, `team`, `send`
 //!
-//! Files: `hub` (server commands), `discord` (connect to Discord), `storage` (where old history goes), `machine` (daemon, login, up, attach and friends), `verbs` (the agent's commands).
+//! Files: `hub` (server commands), `storage` (where old history goes), `machine` (daemon, login, up, attach and friends), `verbs` (the agent's commands).
 
-pub mod discord;
 pub mod export;
 pub mod hub;
 pub mod machine;
@@ -17,21 +16,28 @@ use clap::{Parser, Subcommand};
 
 /// Run coding agents on any machine and talk to them like a team.
 #[derive(Parser)]
-#[command(name = "claudecord", version, about)]
+#[command(
+    name = "claudecord",
+    version,
+    about,
+    args_conflicts_with_subcommands = true
+)]
 pub struct Cli {
-    /// With no command: on a new machine, open the browser to sign in and approve it; afterwards, open the agent running here, or start one.
+    /// With no command, `claudecord` starts an agent in the current folder and opens its terminal: on a new machine it first opens the
+    /// browser to sign in and approve it, and the dashboard page asks which project, name and program. The options below are for that.
     #[command(subcommand)]
     pub command: Option<Cmd>,
+    #[command(flatten)]
+    pub start: machine::StartArgs,
 }
 
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// Run the central hub (one per team).
+    /// Run a bare hub with no Discord, for tests and development. Real use is `serve`.
+    #[command(hide = true)]
     Hub(hub::HubArgs),
     /// Run the hosted service: many accounts sign in with Discord, join machines by code, and each gets its own hub.
     Serve(hub::ServeArgs),
-    /// Connect the hub to your Discord server (token, server id, invite link).
-    Discord(discord::DiscordArgs),
     /// Choose, test and change where old history files are kept (Oracle Cloud, Cloudflare R2, ...).
     Storage(storage::StorageArgs),
     /// Write the conversation history as Obsidian notes you can browse and graph.
@@ -61,8 +67,6 @@ pub enum Cmd {
         name: Option<String>,
         value: Option<String>,
     },
-    /// Start an agent in the current folder and open its terminal (starting the daemon if needed, and saying so).
-    Start(machine::StartArgs),
     /// Show the tail of an agent's log: what it was sent and did, or what its terminal showed.
     Logs {
         agent: String,
@@ -140,7 +144,12 @@ pub enum Cmd {
 /// Runs a parsed command.
 pub async fn run(cli: Cli) -> Result<(), String> {
     let Some(command) = cli.command else {
-        return machine::home().await;
+        use std::io::IsTerminal;
+        // Without a terminal there is nobody to choose on the dashboard: only say what is running here.
+        if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+            return machine::home().await;
+        }
+        return machine::start(cli.start).await;
     };
     match command {
         Cmd::Hub(a) => hub::run_hub(a).await,
@@ -150,12 +159,10 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         Cmd::LoadTokens(a) => hub::make_load_tokens(a),
         Cmd::Uptime(a) => uptime::show(a),
         Cmd::Probe(a) => uptime::probe(a).await,
-        Cmd::Discord(a) => discord::run(a),
         Cmd::Storage(a) => storage::run(a),
         Cmd::Export(a) => export::run(a),
         Cmd::Daemon => machine::run_daemon().await,
         Cmd::Login(a) => machine::login(a).await,
-        Cmd::Start(a) => machine::start(a).await,
         Cmd::Logs {
             agent,
             lines,

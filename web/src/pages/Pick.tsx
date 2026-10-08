@@ -7,7 +7,7 @@ const slug = /^[A-Za-z0-9][A-Za-z0-9._-]{0,49}$/
 const clean = (s: string) => s.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^[^a-z0-9]+/, '').slice(0, 50)
 
 /**
- * The one page `claudecord start` opens for a folder that belongs to no project yet. Everything is asked here, once: the project's name (the Discord
+ * The one page `claudecord` opens for a folder that belongs to no project yet. Everything is asked here, once: the project's name (the Discord
  * channel is named after it, so it is typed nowhere else), where in Discord, and the first agent. One button does it all and releases the terminal.
  */
 export function Pick() {
@@ -44,12 +44,12 @@ export function Pick() {
         const r = (await api.pick(code)).result
         if (r) { setOutcome(r); setWaiting(false) }
       } catch { /* try again */ }
-      if (tries > 90) { setOutcome({ ok: false, message: 'Your machine has not answered. Is `claudecord start` still running there?' }); setWaiting(false) }
+      if (tries > 90) { setOutcome({ ok: false, message: 'Your machine has not answered. Is `claudecord` still running there?' }); setWaiting(false) }
     }, 1000)
     return () => clearInterval(t)
   }, [waiting, outcome])
 
-  // What `claudecord start` was given on the command line is where the form starts.
+  // What `claudecord` was given on the command line is where the form starts.
   useEffect(() => {
     const f = what.data?.prefill
     if (!f) return
@@ -81,7 +81,7 @@ export function Pick() {
       <div className="card narrow stack">
         <h2>Start here</h2>
         <p className="error">{what.error ? what.error.message : 'This link has no code.'}</p>
-        <p className="muted">Run <span className="mono">claudecord start</span> in the folder again to get a new link.</p>
+        <p className="muted">Run <span className="mono">claudecord</span> in the folder again to get a new link.</p>
       </div>
     )
 
@@ -94,7 +94,7 @@ export function Pick() {
         {outcome && !outcome.ok && (
           <>
             <p className="error" style={{ whiteSpace: 'pre-wrap' }}>{outcome.message}</p>
-            <p className="muted">Fix that on the machine, then run <span className="mono">claudecord start</span> again.</p>
+            <p className="muted">Fix that on the machine, then run <span className="mono">claudecord</span> again.</p>
           </>
         )}
         <Link className="btn primary" to="/">Go to the dashboard</Link>

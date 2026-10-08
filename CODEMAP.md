@@ -16,7 +16,6 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 
 | File | What it is |
 |---|---|
-| `src/cli/discord.rs` | `claudecord discord`: connect the hub to your Discord server. |
 | `src/cli/export.rs` | `claudecord export`: writes the conversation history as an Obsidian vault. |
 | `src/cli/hub.rs` | The server commands: `claudecord hub` runs the central hub, `claudecord token` makes a token for a machine, and `claudecord load-tokens` makes many at once into a private file for the k6 load test. |
 | `src/cli/machine.rs` | Commands for a machine that runs agents: save the hub address, run the daemon, start an agent in the current folder, open an agent's terminal, list, stop, and check connectivity. |
