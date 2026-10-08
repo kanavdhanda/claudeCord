@@ -126,8 +126,11 @@ pub enum Cmd {
 pub async fn run(cli: Cli) -> Result<(), String> {
     let Some(command) = cli.command else {
         use std::io::IsTerminal;
-        // Without a terminal there is nobody to choose on the dashboard: only say what is running here.
-        if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        // Bare `claudecord` shows the picker (open an agent here, or start a new one); options like --project go straight to starting. Without a terminal it only says what is running here.
+        if std::env::args_os().len() == 1
+            || !std::io::stdin().is_terminal()
+            || !std::io::stdout().is_terminal()
+        {
             return machine::home().await;
         }
         return machine::start(cli.start).await;
