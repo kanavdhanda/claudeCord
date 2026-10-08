@@ -92,6 +92,39 @@ fn frames(fx: &[Effect]) -> Vec<&HubFrame> {
 }
 
 #[test]
+fn a_reaction_on_a_delivered_message_asks_the_device_to_send_it_through() {
+    let mut w = World::new();
+    w.join("mac", 1, "otter");
+    let opts = MessageOpts {
+        reference: Some("c:1"),
+        ..Default::default()
+    };
+    w.core
+        .human_message(&w.kd.clone(), "p", "stop and look at this", &opts, T0)
+        .unwrap();
+    let mut fx = Vec::new();
+    assert_eq!(
+        w.core.prioritise(&w.vi.clone(), "p", "c:1", "now", &mut fx),
+        Err(Denied::NeedsRole(Role::Operator))
+    );
+    assert_eq!(
+        w.core
+            .prioritise(&w.kd.clone(), "p", "c:other", "now", &mut fx),
+        Ok(false),
+        "a message that was never delivered has nothing to hurry"
+    );
+    assert_eq!(
+        w.core
+            .prioritise(&w.kd.clone(), "p", "c:1", "steer", &mut fx),
+        Ok(true)
+    );
+    assert!(frames(&fx).iter().any(|f| matches!(
+        f,
+        HubFrame::Priority { agent_id, mode, .. } if agent_id.ends_with("otter") && mode == "steer"
+    )));
+}
+
+#[test]
 fn unlisted_and_viewer_accounts_cannot_instruct_agents() {
     let mut w = World::new();
     w.join("mac", 1, "otter");

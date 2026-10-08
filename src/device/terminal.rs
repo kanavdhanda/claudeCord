@@ -8,7 +8,7 @@
 //!
 //! Neither knows which program is inside. Everything above this file treats them alike.
 
-use super::inject::{Guard, Wait};
+use super::inject::{Guard, Urgency, Wait};
 use super::pty::PtyTerminal;
 use super::tmux::TmuxTerminal;
 use std::path::PathBuf;
@@ -152,6 +152,22 @@ impl Terminal {
         match self {
             Terminal::Tmux(t) => t.inject(text, now),
             Terminal::Pty(t) => t.inject(text, now),
+        }
+    }
+
+    /// Presses Escape to stop what the agent is doing, without the guard taking it for a person typing.
+    pub fn interrupt(&self, now: i64) -> std::io::Result<()> {
+        match self {
+            Terminal::Tmux(t) => t.type_input(b"\x1b", now),
+            Terminal::Pty(t) => t.interrupt(),
+        }
+    }
+
+    /// Like `inject`, for a message that asked to go through sooner.
+    pub fn inject_as(&self, text: &str, now: i64, urgency: Urgency) -> Result<(), Wait> {
+        match self {
+            Terminal::Tmux(t) => t.inject_as(text, now, urgency),
+            Terminal::Pty(t) => t.inject_as(text, now, urgency),
         }
     }
 

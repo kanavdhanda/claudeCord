@@ -91,6 +91,10 @@ const CHECK: &str = "\u{2705}";
 const SEEN: &str = "\u{1F440}";
 /// The agent's machine is not connected, so the message waits for it.
 const WAITING: &str = "\u{23F3}";
+/// Added by the bridge next to a delivered message: pressing it sends the message straight through, even while the agent is working.
+const NOW: &str = "\u{23E9}";
+/// Likewise, but stops what the agent is doing first (explicit human steering).
+const STEER: &str = "\u{1F9ED}";
 const REFUSED: &str = "\u{26D4}";
 
 /// Starts the bridge in the background, supervised: if it panics it is logged and started again, so Discord never quietly stops
@@ -524,6 +528,9 @@ impl Bridge {
                         // The eyes (and the hourglass) said "received, waiting"; the check mark replaces them. Taking them off is only tidiness,
                         // so if it fails nothing else does.
                         let _ = self.rest.unreact(ch, mid, SEEN).await;
+                        // Taken up: there is nothing left to hurry.
+                        let _ = self.rest.unreact(ch, mid, NOW).await;
+                        let _ = self.rest.unreact(ch, mid, STEER).await;
                         let _ = self.rest.unreact(ch, mid, WAITING).await;
                     }
                 }
@@ -863,6 +870,7 @@ impl Bridge {
         match e.name.as_str() {
             "MESSAGE_CREATE" => self.on_message(&e.data).await,
             "INTERACTION_CREATE" => self.on_interaction(&e.data).await,
+            "MESSAGE_REACTION_ADD" => self.on_reaction(&e.data).await,
             _ => {}
         }
     }
@@ -1043,9 +1051,48 @@ impl Bridge {
                     let _ = self.rest.react(channel, mid, WAITING).await;
                 } else {
                     let _ = self.rest.react(channel, mid, SEEN).await;
+                    // Queued is the default; these two let the person choose to go through at once, or to steer.
+                    let _ = self.rest.react(channel, mid, NOW).await;
+                    let _ = self.rest.react(channel, mid, STEER).await;
                 }
             }
         }
+    }
+
+    /// A person pressed one of the delivery reactions on their message. The hub checks they may, and that the message is still waiting.
+    async fn on_reaction(&mut self, r: &Value) {
+        let (Some(channel), Some(mid), Some(uid), Some(emoji)) = (
+            r["channel_id"].as_str(),
+            r["message_id"].as_str(),
+            r["user_id"].as_str(),
+            r["emoji"]["name"].as_str(),
+        ) else {
+            return;
+        };
+        let mode = match emoji {
+            NOW => "now",
+            STEER => "steer",
+            _ => return,
+        };
+        if r["member"]["user"]["bot"].as_bool().unwrap_or(false) {
+            return;
+        }
+        let Some((project, _)) = self.project_of(channel) else {
+            return;
+        };
+        let human = Human {
+            id: uid.to_string(),
+            name: String::new(),
+        };
+        let reference = format!("{channel}:{mid}");
+        let _ = self
+            .handle
+            .call(move |c, _| {
+                let mut fx = Vec::new();
+                let _ = c.prioritise(&human, &project, &reference, mode, &mut fx);
+                ((), fx)
+            })
+            .await;
     }
 
     /// A button press (type 3) or a slash command (type 2).

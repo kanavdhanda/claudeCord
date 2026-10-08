@@ -195,6 +195,57 @@ async fn up(r: &Rig, name: &str) -> String {
 }
 
 #[tokio::test]
+async fn a_message_waiting_on_a_busy_agent_goes_straight_through_when_the_person_asks() {
+    // The agent never goes quiet for 60 seconds, as if it were in the middle of a long run.
+    let r = rig_tuned("hurry", NORMAL, 8, vec![], Backend::Pty, |o| {
+        o.quiet = (0, 60_000)
+    })
+    .await;
+    up(&r, "otter").await;
+    eventually("registered", async || {
+        r.hub
+            .call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    r.hub
+        .call(|c, now| {
+            let r = c
+                .human_message(
+                    &kd(),
+                    "demo",
+                    "look at this now",
+                    &MessageOpts {
+                        reference: Some("c:7"),
+                        ..Default::default()
+                    },
+                    now,
+                )
+                .unwrap();
+            ((), r.1)
+        })
+        .await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(
+        std::fs::read_to_string(r.project.join("fake.log")).is_err(),
+        "queued: the agent is busy, so nothing was pasted"
+    );
+    r.hub
+        .call(|c, _| {
+            let mut fx = Vec::new();
+            let sent = c.prioritise(&kd(), "demo", "c:7", "now", &mut fx);
+            (sent, fx)
+        })
+        .await;
+    eventually("the message goes straight through", async || {
+        std::fs::read_to_string(r.project.join("fake.log"))
+            .is_ok_and(|s| s.contains("look at this now"))
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn a_persons_message_reaches_the_agents_terminal_and_the_agent_speaks_back() {
     let r = rig("flow").await;
     let mut chat = r.hub.chat();

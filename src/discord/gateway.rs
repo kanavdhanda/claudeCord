@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
 /// Events Discord should send: servers, messages in servers, and the text of those messages.
-pub const INTENTS: u64 = (1 << 0) | (1 << 9) | (1 << 15);
+pub const INTENTS: u64 = (1 << 0) | (1 << 9) | (1 << 10) | (1 << 15);
 
 /// An event from Discord.
 #[derive(Debug, Clone)]

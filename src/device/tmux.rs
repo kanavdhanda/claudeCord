@@ -9,7 +9,7 @@
 //! To keep the cost low on machines with many agents, a session is looked at with ONE tmux command (the screen, whether the
 //! program ended, and client activity together), and quiet sessions are looked at less and less often.
 
-use super::inject::{Guard, Wait};
+use super::inject::{Guard, Urgency, Wait};
 use crate::agents::text::strip_control;
 use crate::sync::Lock;
 use std::io::Write;
@@ -398,8 +398,13 @@ impl TmuxTerminal {
     /// Pastes a message into the session as one block and presses Enter, if the guard says now is safe. The text has every
     /// control character removed first, so it cannot escape the paste.
     pub fn inject(&self, text: &str, now: i64) -> Result<(), Wait> {
+        self.inject_as(text, now, Urgency::Queue)
+    }
+
+    /// Pastes a message as urgently as it asked for.
+    pub fn inject_as(&self, text: &str, now: i64, urgency: Urgency) -> Result<(), Wait> {
         // tmux cannot say which program is reading the terminal, so the foreground check always passes here.
-        self.guard.locked().check(now, true)?;
+        self.guard.locked().check_as(now, true, urgency)?;
         let clean = strip_control(text);
         let buffer = format!("cc-{}", self.session);
         let loaded = (|| -> std::io::Result<()> {

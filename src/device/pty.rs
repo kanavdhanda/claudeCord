@@ -3,7 +3,7 @@
 //! watches what it prints (keeping a picture of the screen), and carries keystrokes in: the person's, or a message
 //! from the hub pasted at a safe moment (see `inject`).
 
-use super::inject::{Guard, Wait, paste_bytes};
+use super::inject::{Guard, Urgency, Wait, paste_bytes};
 use crate::sync::Lock;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
@@ -106,6 +106,13 @@ impl PtyTerminal {
         w.flush()
     }
 
+    /// Presses Escape, to stop what the agent is doing. Not noted by the guard: it is the daemon acting, not a person half-way through a line.
+    pub fn interrupt(&self) -> std::io::Result<()> {
+        let mut w = self.writer.locked();
+        w.write_all(b"\x1b")?;
+        w.flush()
+    }
+
     /// A screen-sized fingerprint, to tell whether anything on the screen changed.
     pub fn screen_hash(&self) -> u64 {
         use std::hash::{Hash, Hasher};
@@ -139,7 +146,14 @@ impl PtyTerminal {
 
     /// Pastes a message into the agent's terminal if that is safe now. Returns what to wait for otherwise.
     pub fn inject(&self, text: &str, now: i64) -> Result<(), Wait> {
-        self.guard.locked().check(now, self.foreground())?;
+        self.inject_as(text, now, Urgency::Queue)
+    }
+
+    /// Pastes a message as urgently as it asked for.
+    pub fn inject_as(&self, text: &str, now: i64, urgency: Urgency) -> Result<(), Wait> {
+        self.guard
+            .locked()
+            .check_as(now, self.foreground(), urgency)?;
         let mut w = self.writer.locked();
         let _ = w.write_all(&paste_bytes(text)).and_then(|_| w.flush());
         Ok(())

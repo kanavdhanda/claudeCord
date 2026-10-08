@@ -229,6 +229,39 @@ impl HubCore {
         }
     }
 
+    /// A person reacted to their own message asking for it to go through sooner (`"now"`, or `"steer"` to stop the agent first). It only
+    /// does something while that message is delivered but not yet picked up; returns whether a request was sent to the agent's device.
+    pub fn prioritise(
+        &mut self,
+        by: &Human,
+        project: &str,
+        reference: &str,
+        mode: &str,
+        fx: &mut Vec<Effect>,
+    ) -> Result<bool, Denied> {
+        self.require(project, &by.id, Role::Operator)?;
+        let Some((msg_id, agent_id)) = self
+            .pending
+            .iter()
+            .find(|(_, p)| p.project == project && p.references.iter().any(|r| r == reference))
+            .map(|(id, p)| (id.clone(), p.agent_id.clone()))
+        else {
+            return Ok(false);
+        };
+        let Some(a) = self.agents.get(&agent_id).cloned() else {
+            return Ok(false);
+        };
+        Ok(self.send_to(
+            &a,
+            HubFrame::Priority {
+                agent_id,
+                msg_id,
+                mode: mode.to_string(),
+            },
+            fx,
+        ))
+    }
+
     /// The agents a human message should go to: those it mentions, otherwise the lead (or the first agent).
     pub(super) fn pick_targets(&mut self, project: &str, text: &str) -> Vec<AgentRow> {
         let mentioned = self.mentioned(project, text, None);
