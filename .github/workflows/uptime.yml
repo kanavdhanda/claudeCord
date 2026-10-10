@@ -5,7 +5,7 @@ name: uptime
 # fails. Set the repository variable HUB_URL (Settings > Secrets and variables > Actions > Variables) to turn it on.
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "10 10 20 2 6"
   workflow_dispatch:
 
 jobs:
