@@ -61,8 +61,8 @@ pub struct Config {
     pub oauth: Option<Oauth>,
     /// The hub's log file, for the dashboard's log view (`/api/v1/logs`). None leaves that route off.
     pub log_path: Option<std::path::PathBuf>,
-    /// Most device connections at once. More are refused with "try later" instead of running the hub out of file handles.
-    pub max_devices: usize,
+    /// Optional limit on device connections at once. None means unlimited (no artificial cap).
+    pub max_devices: Option<usize>,
     /// Whether a Discord bridge is run with this hub, so readiness includes it.
     pub discord_expected: bool,
     /// The availability target the dashboard measures the error budget against.
@@ -95,7 +95,7 @@ impl Default for Config {
             backup_every: Some(Duration::from_secs(3600)),
             oauth: None,
             log_path: None,
-            max_devices: 20_000,
+            max_devices: None,
             discord_expected: false,
             uptime_target: 0.999,
             min_client_version: crate::protocol::MIN_CLIENT_VERSION.to_string(),
@@ -485,12 +485,12 @@ pub(crate) fn admit(
     node: String,
     ws: WebSocketUpgrade,
 ) -> axum::response::Response {
-    // Past the cap a device is told to try later, rather than the hub running out of file handles and failing for everyone.
+    // Past an optional cap a device is told to try later. By default there is no artificial limit.
     let slot = OpenSlot::take(&st.open, st.cfg.max_devices);
     let Some(slot) = slot else {
         crate::warn!(
             "hub",
-            "refused {node} from {ip}: already at the limit of {} device connections",
+            "refused {node} from {ip}: already at the limit of {:?} device connections",
             st.cfg.max_devices
         );
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -516,10 +516,16 @@ pub(crate) fn admit(
 struct OpenSlot(Arc<std::sync::atomic::AtomicUsize>);
 
 impl OpenSlot {
-    fn take(open: &Arc<std::sync::atomic::AtomicUsize>, max: usize) -> Option<Self> {
+    fn take(open: &Arc<std::sync::atomic::AtomicUsize>, max: Option<usize>) -> Option<Self> {
         use std::sync::atomic::Ordering::SeqCst;
-        open.try_update(SeqCst, SeqCst, |n| (n < max).then_some(n + 1))
-            .ok()?;
+        if let Some(max) = max
+            && max > 0
+        {
+            open.try_update(SeqCst, SeqCst, |n| (n < max).then_some(n + 1))
+                .ok()?;
+            return Some(Self(open.clone()));
+        }
+        open.fetch_add(1, SeqCst);
         Some(Self(open.clone()))
     }
 }

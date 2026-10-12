@@ -28,6 +28,9 @@ pub struct HubArgs {
     /// Allow listening on a public address without TLS. Tokens and messages would travel unencrypted.
     #[arg(long)]
     pub allow_plain: bool,
+    /// Optional limit on device connections at once (unlimited by default).
+    #[arg(long)]
+    pub max_devices: Option<usize>,
 }
 
 #[derive(Args)]
@@ -66,6 +69,9 @@ pub struct ServeArgs {
     /// Minimum client version required to connect to this hub.
     #[arg(long, default_value = "0.1.0")]
     pub min_client_version: String,
+    /// Optional limit on device connections at once (unlimited by default).
+    #[arg(long)]
+    pub max_devices: Option<usize>,
 }
 
 #[derive(Args)]
@@ -125,6 +131,7 @@ pub async fn run_hub(a: HubArgs) -> Result<(), String> {
         Config {
             bind,
             log_path: Some(a.data.join("hub.log")),
+            max_devices: a.max_devices,
             ..Config::default()
         },
         core,
@@ -401,6 +408,7 @@ pub async fn run_serve(a: ServeArgs) -> Result<(), String> {
             oauth,
             hub: Config {
                 min_client_version: a.min_client_version.clone(),
+                max_devices: a.max_devices,
                 ..Config::default()
             },
             discord,

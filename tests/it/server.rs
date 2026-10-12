@@ -959,7 +959,7 @@ async fn past_its_limit_the_hub_refuses_new_devices_with_try_later_and_takes_the
     let dir = tmp("cap");
     let (hub, tokens) = boot(
         Config {
-            max_devices: 2,
+            max_devices: Some(2),
             ..cfg()
         },
         &dir.join("t.db"),
@@ -979,6 +979,20 @@ async fn past_its_limit_the_hub_refuses_new_devices_with_try_later_and_takes_the
     wait_for("room again", async || !connected(&hub, "b").await).await;
     let again = connect(&hub, &tokens[2]).await;
     assert!(again.is_ok(), "{:?}", again.err());
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn by_default_device_connections_are_not_capped() {
+    let dir = tmp("no_cap");
+    let (hub, tokens) = boot(cfg(), &dir.join("t.db"), &["a", "b", "c"]).await;
+    let _a = connect(&hub, &tokens[0]).await.unwrap();
+    let _b = connect(&hub, &tokens[1]).await.unwrap();
+    let c = connect(&hub, &tokens[2]).await;
+    assert!(
+        c.is_ok(),
+        "default hub configuration must not cap device connections"
+    );
     hub.shutdown().await;
 }
 
