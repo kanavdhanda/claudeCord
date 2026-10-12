@@ -274,7 +274,18 @@ impl HubCore {
     ) -> Result<(Vec<String>, Vec<Effect>), Denied> {
         self.require(project, &by.id, Role::Operator)?;
         let mut fx = Vec::new();
-        let targets = self.pick_targets(project, text);
+        let targets = if let Some(ref th) = thread {
+            let mentioned = self.mentioned(project, text, None);
+            if !mentioned.is_empty() {
+                mentioned
+            } else if let Some(assignee) = self.task_assignee_of_thread(project, th) {
+                vec![assignee]
+            } else {
+                self.pick_targets(project, text)
+            }
+        } else {
+            self.pick_targets(project, text)
+        };
         let from = self.label(project, by);
         let total = data.len().div_ceil(FILE_CHUNK_BYTES).max(1);
         let sum = crate::agents::text::sha256_hex(data);

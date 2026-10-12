@@ -1436,16 +1436,14 @@ async fn the_delivery_reactions_are_offered_and_only_a_listed_person_can_press_t
     r.event("MESSAGE_CREATE", message(&ch, "m1", "1", "look at this"));
     r.frame("the message", |f| deliver_text(f, "look at this"))
         .await;
-    // The bridge offers both choices on the message while it is waiting.
-    for emoji in ["\u{23E9}", "\u{1F9ED}"] {
-        r.until("the choice offered", |l| {
-            l.reactions
-                .iter()
-                .find(|x| x["message"] == "m1" && x["emoji"] == emoji)
-                .cloned()
-        })
-        .await;
-    }
+    // The message is marked seen while waiting.
+    r.until("the message acknowledged", |l| {
+        l.reactions
+            .iter()
+            .find(|x| x["message"] == "m1" && x["emoji"] == "\u{1F440}")
+            .cloned()
+    })
+    .await;
     // A person who is not on the project's list presses steer first, then the owner presses "straight through": the hub must act only on
     // the owner's.
     r.event(

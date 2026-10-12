@@ -110,6 +110,10 @@ pub enum Cmd {
     Team,
     /// List where you can post: the main channel and your open tasks, each with the id to use in `say --thread`. Answered at once.
     Threads,
+    /// List open tasks and where you can post.
+    Tasks,
+    /// Print what an agent's terminal shows now.
+    Screen { agent: Option<String> },
     /// Print the short rules for using the team chat (what to run, and when).
     Guide,
     /// Send a file to the chat, or to a peer with --to.
@@ -162,6 +166,8 @@ pub async fn run(cli: Cli) -> Result<(), String> {
         Cmd::Pickup => verbs::pickup().await,
         Cmd::Team => verbs::team().await,
         Cmd::Threads => verbs::threads().await,
+        Cmd::Tasks => verbs::threads().await,
+        Cmd::Screen { agent } => machine::screen(agent).await,
         Cmd::Guide => {
             println!("{}", crate::device::daemon::RULES);
             Ok(())

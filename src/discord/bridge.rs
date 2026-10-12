@@ -1105,13 +1105,8 @@ impl Bridge {
                             &[],
                         )
                         .await;
-                } else if routed.offline.len() == routed.targets.len() {
-                    let _ = self.rest.react(channel, mid, WAITING).await;
                 } else {
                     let _ = self.rest.react(channel, mid, SEEN).await;
-                    // Queued is the default; these two let the person choose to go through at once, or to steer.
-                    let _ = self.rest.react(channel, mid, NOW).await;
-                    let _ = self.rest.react(channel, mid, STEER).await;
                 }
             }
         }

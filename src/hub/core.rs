@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 /// Agent-only messages in a row before an agent's forwarding pauses until a human speaks.
-pub const DEFAULT_STREAK_LIMIT: u32 = 20;
+pub const DEFAULT_STREAK_LIMIT: u32 = 100;
 /// How long a human message may sit unaccepted before the room is told.
 pub const DEFAULT_ACCEPT_TIMEOUT_MS: u64 = 30_000;
 /// How long a standing permission lasts unless the person says otherwise.
@@ -66,6 +66,7 @@ pub(super) struct Pending {
 use super::tracked::{Cell, Log, TrackedMap, TrackedSet};
 
 pub struct HubCore {
+    #[allow(dead_code)]
     pub(super) streak_limit: u32,
     pub(super) accept_timeout_ms: u64,
     pub(super) grant_ttl_ms: i64,
@@ -1001,15 +1002,8 @@ impl HubCore {
         // `--thread T2` is enough: the id of a task of this project stands for its thread's whole name.
         let thread = thread.map(|t| self.resolve_thread(&a.project, t));
         let text = strip_mention(text, &a.name);
-        // What is said to a person stays in the channel they are in; the task thread is only the default for work talk.
-        let thread = match thread {
-            None if !self.addresses_human(&a.project, &text) => {
-                self.open_task_thread(agent_id, &a.project)
-            }
-            t => t,
-        };
         // Agents talking to each other (and not to a person) do it in a thread of their own, named after the pair, so the main channel stays for
-        // the people and the results. Nothing is asked of the agents: it is where the hub puts the message.
+        // the people and the results. If no specific peer is mentioned, work talk defaults to the open task thread.
         let thread = match thread {
             Some(t) => Some(t),
             None if !self.addresses_human(&a.project, &text) => {
@@ -1018,15 +1012,15 @@ impl HubCore {
                     .into_iter()
                     .map(|p| p.name)
                     .collect();
-                if names.is_empty() {
-                    None
-                } else {
+                if !names.is_empty() {
                     names.push(a.name.clone());
                     names.sort();
                     Some(names.join(" & ").chars().take(90).collect())
+                } else {
+                    self.open_task_thread(agent_id, &a.project)
                 }
             }
-            None => None,
+            t => t,
         };
         let clean = self.scrub(&a, &text, now, fx);
         fx.push(Effect::Persist(Persist::History {

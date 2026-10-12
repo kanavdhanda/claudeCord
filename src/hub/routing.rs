@@ -413,7 +413,18 @@ impl HubCore {
             text: body.clone(),
             at: now,
         }));
-        let targets = self.pick_targets(project, text);
+        let targets = if let Some(th) = opts.thread {
+            let mentioned = self.mentioned(project, text, None);
+            if !mentioned.is_empty() {
+                mentioned
+            } else if let Some(assignee) = self.task_assignee_of_thread(project, th) {
+                vec![assignee]
+            } else {
+                self.pick_targets(project, text)
+            }
+        } else {
+            self.pick_targets(project, text)
+        };
         Ok((
             self.queue_for(
                 &targets,
@@ -599,6 +610,10 @@ impl HubCore {
             self.say_receipt(from, say_id.as_deref(), "posted", None, fx);
             return;
         }
+        // Reset peers' streaks so active back-and-forth collaboration does not trigger the loop pause
+        for peer in &peers {
+            self.streak.remove(&peer.agent_id);
+        }
         let mentioned = self.mentioned(&from.project, text, Some(&from.agent_id));
         let n = self.streak.get(&from.agent_id).copied().unwrap_or(0) + 1;
         self.streak.insert(from.agent_id.clone(), n);
@@ -609,7 +624,7 @@ impl HubCore {
                     "{} has sent many messages without input. Pausing its forwarding until someone replies.",
                     from.name
                 ),
-                true,
+                false,
                 fx,
             );
         }

@@ -111,6 +111,16 @@ impl HubCore {
             self.tell(&from, "Only the lead assigns tasks.".into(), now, fx);
             return;
         }
+        let task_clean = task.trim();
+        if task_clean.is_empty() || task_clean == "-" {
+            self.tell(
+                &from,
+                "Task description cannot be empty or '-'.".into(),
+                now,
+                fx,
+            );
+            return;
+        }
         let to = self
             .find_by_name(&from.project, to_name)
             .filter(|t| t.agent_id != from.agent_id)
@@ -355,5 +365,16 @@ impl HubCore {
             .rev()
             .find(|t| t.to_agent == agent_id && t.state != TaskState::Done)
             .map(task_thread)
+    }
+
+    /// Looks up which agent is assigned to the task representing this thread.
+    pub(super) fn task_assignee_of_thread(&self, project: &str, thread: &str) -> Option<AgentRow> {
+        let first = thread.split_whitespace().next().unwrap_or(thread);
+        let task = self
+            .tasks
+            .get(project)?
+            .iter()
+            .find(|t| t.id.eq_ignore_ascii_case(first) || task_thread(t) == thread)?;
+        self.agents.get(&task.to_agent).cloned()
     }
 }

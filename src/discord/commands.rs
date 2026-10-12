@@ -80,12 +80,32 @@ pub fn definitions() -> Value {
             ],
         ),
         cmd(
-            "screen",
-            "Show what an agent's terminal shows now",
+            "tasks",
+            "List tasks in this project with status and assignees",
             vec![opt(
                 "agent",
                 STRING,
-                "Which agent (default: the lead)",
+                "Filter by agent (default: all)",
+                false,
+            )],
+        ),
+        cmd(
+            "report",
+            "Request a screen and activity report from agents",
+            vec![opt(
+                "agent",
+                STRING,
+                "Which agent, or 'all' (default: all)",
+                false,
+            )],
+        ),
+        cmd(
+            "screen",
+            "Show what an agent's terminal shows now (or 'report')",
+            vec![opt(
+                "agent",
+                STRING,
+                "Which agent, or 'report' / 'all' (default: the lead)",
                 false,
             )],
         ),
@@ -281,8 +301,120 @@ pub fn handle(
             Ok((n, fx)) => (format!("Asked {n} agent(s) to quit."), fx),
             Err(d) => fail(d),
         },
+        "tasks" => {
+            let tasks = core.tasks_of(project);
+            let filter = get("agent");
+            let list: Vec<String> = tasks
+                .iter()
+                .filter(|t| {
+                    if let Some(f) = filter {
+                        let to = core
+                            .agent(&t.to_agent)
+                            .map(|a| a.name.as_str())
+                            .unwrap_or("");
+                        let from = core
+                            .agent(&t.from_agent)
+                            .map(|a| a.name.as_str())
+                            .unwrap_or("");
+                        to.eq_ignore_ascii_case(f) || from.eq_ignore_ascii_case(f)
+                    } else {
+                        true
+                    }
+                })
+                .map(|t| {
+                    let state_lbl = match t.state {
+                        crate::hub::TaskState::Assigned => "ASSIGNED",
+                        crate::hub::TaskState::Accepted => "IN PROGRESS",
+                        crate::hub::TaskState::Done => "DONE",
+                    };
+                    let to_name = core
+                        .agent(&t.to_agent)
+                        .map_or_else(|| t.to_agent.clone(), |a| a.name.clone());
+                    let from_name = core
+                        .agent(&t.from_agent)
+                        .map_or_else(|| t.from_agent.clone(), |a| a.name.clone());
+                    let sum = t
+                        .summary
+                        .as_deref()
+                        .map(|s| format!(" (Summary: {s})"))
+                        .unwrap_or_default();
+                    format!(
+                        "• **[{}]** `[{state_lbl}]` @{from_name} ➜ @{to_name}: {}{sum}",
+                        t.id, t.text
+                    )
+                })
+                .collect();
+            (
+                if list.is_empty() {
+                    "No tasks in this project.".into()
+                } else {
+                    list.join("\n")
+                },
+                vec![],
+            )
+        }
+        "report" => {
+            let agents: Vec<crate::hub::AgentRow> = core
+                .agents_of_project(project)
+                .into_iter()
+                .cloned()
+                .collect();
+            if agents.is_empty() {
+                ("No agents in this project.".into(), vec![])
+            } else {
+                let mut fx = Vec::new();
+                let mut lines = vec![format!("**Screen Report for {project}**:")];
+                for a in &agents {
+                    let status = status_word(core.status_of(&a.agent_id));
+                    let role = if a.is_lead { " (lead)" } else { "" };
+                    lines.push(format!(
+                        "• **{}{}** `[{status}]` on `{}`",
+                        a.name, role, a.node_name
+                    ));
+                    match core.screen(by, project, &a.name) {
+                        Ok(f) if !f.is_empty() => {
+                            fx.extend(f);
+                        }
+                        _ => {
+                            lines.push("  ↳ machine not connected".into());
+                        }
+                    }
+                }
+                (lines.join("\n"), fx)
+            }
+        }
         "screen" => {
-            let name = match get("agent") {
+            let target = get("agent");
+            if target == Some("report") || target == Some("all") {
+                let agents: Vec<crate::hub::AgentRow> = core
+                    .agents_of_project(project)
+                    .into_iter()
+                    .cloned()
+                    .collect();
+                if agents.is_empty() {
+                    return ("No agents in this project.".into(), vec![]);
+                }
+                let mut fx = Vec::new();
+                let mut lines = vec![format!("**Screen Report for {project}**:")];
+                for a in &agents {
+                    let status = status_word(core.status_of(&a.agent_id));
+                    let role = if a.is_lead { " (lead)" } else { "" };
+                    lines.push(format!(
+                        "• **{}{}** `[{status}]` on `{}`",
+                        a.name, role, a.node_name
+                    ));
+                    match core.screen(by, project, &a.name) {
+                        Ok(f) if !f.is_empty() => {
+                            fx.extend(f);
+                        }
+                        _ => {
+                            lines.push("  ↳ machine not connected".into());
+                        }
+                    }
+                }
+                return (lines.join("\n"), fx);
+            }
+            let name = match target {
                 Some(n) => Some(n.to_string()),
                 None => core
                     .agents_of_project(project)

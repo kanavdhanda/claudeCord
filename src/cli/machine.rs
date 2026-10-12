@@ -140,9 +140,6 @@ async fn browser_login(hub: &str, name: &str) -> Result<Config, String> {
     .await
 }
 
-/// How long every agent may sit idle before the daemon closes them and itself.
-const IDLE_AGENTS_MINUTES: u64 = 30;
-
 /// Runs the daemon in the foreground.
 pub async fn run_daemon() -> Result<(), String> {
     let dir = home_dir();
@@ -150,11 +147,11 @@ pub async fn run_daemon() -> Result<(), String> {
         Config::load(&dir).ok_or_else(|| format!("not logged in: run {} login first", me()))?;
     // The daemon logs to the terminal, which `claudecord` points at daemon.log when it starts the daemon for you.
     crate::log::init(None);
-    // Gone by itself 20 seconds after the last agent ends, or when every agent has sat idle for half an hour, unless the person turned on keep-running.
+    // Gone by itself 20 seconds after the last agent ends, unless the person turned on keep-running.
     let opts = Options {
         dev_spawn: dev_spawn(),
         idle_exit: Some(Duration::from_secs(20)),
-        idle_agents_exit: Some(Duration::from_secs(IDLE_AGENTS_MINUTES * 60)),
+        idle_agents_exit: None,
         ..Options::default()
     };
     // The daemon is started from a terminal. Closing that terminal sends it a hangup, whose default is to end it (and with it every agent's
@@ -724,6 +721,7 @@ pub fn key_bytes(code: crossterm::event::KeyCode, mods: crossterm::event::KeyMod
             vec![(c.to_ascii_lowercase() as u8) - b'a' + 1]
         }
         KeyCode::Char(c) => c.to_string().into_bytes(),
+        KeyCode::Enter if mods.contains(KeyModifiers::SHIFT) => vec![b'\n'],
         KeyCode::Enter => vec![b'\r'],
         KeyCode::Backspace => vec![0x7f],
         KeyCode::Tab => vec![b'\t'],
@@ -872,6 +870,21 @@ pub async fn logs(agent: &str, lines: usize, terminal: bool) -> Result<(), Strin
         println!("{}", l.as_str().unwrap_or(""));
     }
     Ok(())
+}
+
+/// `claudecord screen`: prints what an agent's terminal shows now.
+pub async fn screen(agent: Option<String>) -> Result<(), String> {
+    let name = match agent {
+        Some(a) => a,
+        None => {
+            let rows = list_agents().await;
+            if rows.is_empty() {
+                return Err("no agents are running here".into());
+            }
+            rows[0]["agent"].as_str().unwrap_or("").to_string()
+        }
+    };
+    logs(&name, 40, true).await
 }
 
 /// `claudecord handoff`: writes a note a person (or a fresh session) can read to carry an agent's work on: what happened lately and
