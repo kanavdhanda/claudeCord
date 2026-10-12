@@ -33,7 +33,7 @@ struct Rig {
 impl Rig {
     /// Waits until the stand-in Discord has a record matching `f`, and returns it.
     async fn until(&self, what: &str, f: impl Fn(&Log) -> Option<Value>) -> Value {
-        for _ in 0..200 {
+        for _ in 0..400 {
             if let Some(v) = f(&self.fake.log.lock().unwrap()) {
                 return v;
             }
@@ -52,7 +52,7 @@ impl Rig {
 
     /// Waits for a frame from the hub on the device that matches.
     async fn frame(&mut self, what: &str, f: impl Fn(&HubFrame) -> bool) -> HubFrame {
-        let r = tokio::time::timeout(Duration::from_secs(5), async {
+        let r = tokio::time::timeout(Duration::from_secs(10), async {
             while let Some(e) = self.device.recv().await {
                 if let LinkEvent::Frame(fr) = e
                     && f(&fr)

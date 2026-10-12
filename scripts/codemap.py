@@ -30,7 +30,7 @@ def section(title, files):
     return f"## {title}\n\n| File | What it is |\n|---|---|\n{rows}\n"
 
 def build():
-    src = sorted((ROOT / "crates").rglob("*.rs"))
+    src = sorted(p for p in (ROOT / "crates").rglob("*.rs") if "target" not in p.parts)
     groups = {}
     for f in src:
         rel = f.relative_to(ROOT / "crates")

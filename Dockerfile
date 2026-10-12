@@ -11,6 +11,7 @@ WORKDIR /src
 # Only what the program is built from: the dashboard's built files are embedded in it, so no Node is needed here.
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+COPY tests ./tests
 COPY examples ./examples
 COPY assets ./assets
 COPY web/dist ./web/dist

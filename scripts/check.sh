@@ -9,6 +9,7 @@
 set -e
 cd "$(dirname "$0")/.."
 PATH="$HOME/.cargo/bin:$PATH"
+ulimit -n 4096 2>/dev/null || true
 FIX=0; COST=0
 for a in "$@"; do case "$a" in --fix) FIX=1;; --cost) COST=1;; esac; done
 
