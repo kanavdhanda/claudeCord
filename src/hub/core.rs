@@ -114,6 +114,7 @@ pub struct HubCore {
     pub(super) seq_written: u64,
     pub(super) counters: TrackedMap<u32>,
     pub metrics: Metrics,
+    pub min_client_version: String,
 }
 
 impl Default for HubCore {
@@ -163,7 +164,14 @@ impl HubCore {
             device_seq: TrackedMap::new("device_seq", &dirty),
             chat_last: TrackedMap::new("chat_last", &dirty),
             metrics: Metrics::new(1440),
+            min_client_version: crate::protocol::MIN_CLIENT_VERSION.to_string(),
         }
+    }
+
+    /// Overrides the minimum client version required to connect to this core.
+    pub fn with_min_client_version(mut self, v: &str) -> Self {
+        self.min_client_version = v.to_string();
+        self
     }
 
     // Reading state
@@ -713,16 +721,34 @@ impl HubCore {
                 version, features, ..
             } => {
                 self.features.insert(node.to_string(), features);
-                // A machine running an older claudeCord than this hub is told the newest version (it words the update itself).
-                if crate::protocol::version_older(&version, env!("CARGO_PKG_VERSION"))
-                    && let Some(&conn) = self.conns.get(node)
-                {
-                    fx.push(Effect::Send {
-                        conn,
-                        frame: HubFrame::Update {
-                            latest: env!("CARGO_PKG_VERSION").into(),
-                        },
-                    });
+                if let Some(&conn) = self.conns.get(node) {
+                    if crate::protocol::version_older(&version, &self.min_client_version) {
+                        crate::warn!(
+                            "hub",
+                            "refusing connection from {node}: version {version} is below minimum supported {}",
+                            self.min_client_version
+                        );
+                        fx.push(Effect::Send {
+                            conn,
+                            frame: HubFrame::Error {
+                                message: format!(
+                                    "claudecord on {node} (version {version}) is below minimum supported version {}. Please upgrade claudecord: npm install -g claudecord",
+                                    self.min_client_version
+                                ),
+                            },
+                        });
+                        fx.push(Effect::Close { conn });
+                        return fx;
+                    }
+                    // A machine running an older claudeCord than this hub is told the newest version (it words the update itself).
+                    if crate::protocol::version_older(&version, env!("CARGO_PKG_VERSION")) {
+                        fx.push(Effect::Send {
+                            conn,
+                            frame: HubFrame::Update {
+                                latest: env!("CARGO_PKG_VERSION").into(),
+                            },
+                        });
+                    }
                 }
             }
             NodeFrame::NodeInfo {

@@ -14,7 +14,7 @@
 use super::api::Rest;
 use super::commands;
 use super::gateway::{self, Event, GatewayOpts};
-use crate::hub::{Answerer, Chat, Decision, Denied, Human, MessageOpts};
+use crate::hub::{Answerer, Chat, Decision, Denied, Human, MessageOpts, Role};
 use crate::protocol::MAX_FILE_BYTES;
 use crate::server::HubHandle;
 use crate::store::Store;
@@ -521,7 +521,7 @@ impl Bridge {
                     };
                     self.rest.send(&ch, &text, None, &users).await.map_err(|e| e.to_string())?;
                 }
-                Chat::Confirm { reference, .. } => {
+                Chat::Confirm { reference, agent_name, .. } => {
                     if let Some((ch, mid)) = reference.split_once(':') {
                         self.rest.react(ch, mid, CHECK).await.map_err(|e| e.to_string())?;
                         // The eyes (and the hourglass) said "received, waiting"; the check mark replaces them. Taking them off is only tidiness,
@@ -531,6 +531,18 @@ impl Bridge {
                         let _ = self.rest.unreact(ch, mid, NOW).await;
                         let _ = self.rest.unreact(ch, mid, STEER).await;
                         let _ = self.rest.unreact(ch, mid, WAITING).await;
+
+                        let agent_label = if agent_name.is_empty() {
+                            "An agent".to_string()
+                        } else {
+                            format!("**@{agent_name}**")
+                        };
+                        let embed = json!({
+                            "title": "✅ [TAKEN UP] Processing Started",
+                            "description": format!("{agent_label} picked up this message and has started working."),
+                            "color": 0x57F287,
+                        });
+                        let _ = self.rest.send_embed(ch, embed, Some(mid)).await;
                     }
                 }
                 Chat::RefreshStatus(project) => self.refresh_status(&project).await?,
@@ -1089,8 +1101,22 @@ impl Bridge {
             .await;
         match outcome {
             Some(Err(Denied::Unlisted)) | None => {}
-            Some(Err(_)) => {
+            Some(Err(e)) => {
                 let _ = self.rest.react(channel, mid, REFUSED).await;
+                let reason = match e {
+                    Denied::NeedsRole(Role::Viewer) | Denied::NeedsRole(Role::Operator) => {
+                        "This instruction requires an Operator or Owner role."
+                    }
+                    Denied::NeedsRole(Role::Owner) => "This instruction requires an Owner role.",
+                    Denied::Unlisted => "You are not listed in this project workspace.",
+                    _ => "Instruction was refused by the hub.",
+                };
+                let embed = json!({
+                    "title": "⛔ [REFUSED] Request Denied",
+                    "description": reason,
+                    "color": 0xED4245,
+                });
+                let _ = self.rest.send_embed(channel, embed, Some(mid)).await;
             }
             Some(Ok(None)) => {}
             // Say at once what became of the message, so nobody has to wonder whether it arrived.
@@ -1107,6 +1133,37 @@ impl Bridge {
                         .await;
                 } else {
                     let _ = self.rest.react(channel, mid, SEEN).await;
+                    let targets = routed
+                        .targets
+                        .iter()
+                        .map(|t| format!("**@{t}**"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let desc = if !routed.offline.is_empty() {
+                        let off = routed
+                            .offline
+                            .iter()
+                            .map(|t| format!("**@{t}**"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("Dispatched to {targets} (waiting for offline machine: {off})")
+                    } else if !routed.held.is_empty() {
+                        let held = routed
+                            .held
+                            .iter()
+                            .map(|(t, r)| format!("**@{t}** ({r})"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("Dispatched to {targets} (held: {held})")
+                    } else {
+                        format!("Dispatched to {targets}")
+                    };
+                    let embed = json!({
+                        "title": "👀 [QUEUED] Dispatched to Agent",
+                        "description": desc,
+                        "color": 0x5865F2,
+                    });
+                    let _ = self.rest.send_embed(channel, embed, Some(mid)).await;
                 }
             }
         }

@@ -1482,3 +1482,55 @@ async fn the_delivery_reactions_are_offered_and_only_a_listed_person_can_press_t
         "a bot's or an unknown reaction was acted on"
     );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delivery_and_acceptance_post_status_embeds_with_labels() {
+    let mut r = rig("embeds").await;
+    register(&r, "otter").await;
+    let ch = channel(&r).await;
+    r.event("MESSAGE_CREATE", message(&ch, "m1", "1", "write a test"));
+    let frame = r
+        .frame("the message", |f| deliver_text(f, "write a test"))
+        .await;
+    let HubFrame::Deliver { msg_id, .. } = frame else {
+        unreachable!()
+    };
+
+    // Check that a QUEUED embed was posted
+    r.until("queued embed", |l| {
+        l.messages
+            .iter()
+            .find(|m| {
+                m["embeds"]
+                    .as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|e| e["title"].as_str())
+                    .is_some_and(|t| t.contains("[QUEUED]"))
+            })
+            .cloned()
+    })
+    .await;
+
+    // Agent accepts the message
+    r.link
+        .send(NodeFrame::AgentAccepted {
+            agent_id: "demo/otter".into(),
+            msg_ids: vec![msg_id.unwrap()],
+        })
+        .await;
+
+    // Check that a TAKEN UP embed was posted
+    r.until("taken up embed", |l| {
+        l.messages
+            .iter()
+            .find(|m| {
+                m["embeds"]
+                    .as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|e| e["title"].as_str())
+                    .is_some_and(|t| t.contains("[TAKEN UP]"))
+            })
+            .cloned()
+    })
+    .await;
+}

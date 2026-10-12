@@ -63,6 +63,9 @@ pub struct ServeArgs {
     /// Allow listening on a public address without TLS.
     #[arg(long)]
     pub allow_plain: bool,
+    /// Minimum client version required to connect to this hub.
+    #[arg(long, default_value = "0.1.0")]
+    pub min_client_version: String,
 }
 
 #[derive(Args)]
@@ -396,7 +399,10 @@ pub async fn run_serve(a: ServeArgs) -> Result<(), String> {
             bind,
             public_url: url.clone(),
             oauth,
-            hub: Config::default(),
+            hub: Config {
+                min_client_version: a.min_client_version.clone(),
+                ..Config::default()
+            },
             discord,
             dev: a.dev || a.demo,
             bucket,

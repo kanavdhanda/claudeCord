@@ -389,6 +389,36 @@ impl Rest {
             .ok_or_else(|| ApiError("no message id in the answer".into()))
     }
 
+    /// Sends an embed message as the bot (with optional reply reference) and returns its id.
+    pub async fn send_embed(
+        &self,
+        channel: &str,
+        embed: Value,
+        reply_to_mid: Option<&str>,
+    ) -> Result<String> {
+        let mut body = json!({
+            "embeds": [embed],
+            "allowed_mentions": {"parse": []}
+        });
+        if let Some(mid) = reply_to_mid {
+            body["message_reference"] = json!({
+                "message_id": mid,
+                "fail_if_not_exists": false
+            });
+        }
+        let v = self
+            .call(
+                Method::POST,
+                &format!("/channels/{channel}/messages"),
+                Some(body),
+            )
+            .await?;
+        v["id"]
+            .as_str()
+            .map(String::from)
+            .ok_or_else(|| ApiError("no message id in the answer".into()))
+    }
+
     /// Changes a message's text and buttons (an empty list removes the buttons).
     pub async fn edit(
         &self,

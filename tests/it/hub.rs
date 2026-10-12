@@ -2624,7 +2624,7 @@ fn a_machine_running_an_older_version_is_told_the_newest_and_a_current_one_is_no
         )
     };
     let now = env!("CARGO_PKG_VERSION");
-    let fx = hello("old", "0.0.1", &mut w);
+    let fx = hello("old", "0.1.0", &mut w);
     assert!(
         matches!(frames(&fx).as_slice(), [HubFrame::Update { latest }] if latest == now),
         "{fx:?}"
@@ -2636,6 +2636,29 @@ fn a_machine_running_an_older_version_is_told_the_newest_and_a_current_one_is_no
     assert!(
         frames(&hello("new", "99.0.0", &mut w)).is_empty(),
         "nor does a machine that is ahead of the hub"
+    );
+}
+
+#[test]
+fn a_machine_below_minimum_version_is_refused_and_disconnected() {
+    let mut w = World::new();
+    w.core.node_connected("ancient", 1);
+    let fx = w.core.on_node_frame(
+        "ancient",
+        NodeFrame::Hello {
+            node_name: "ancient".into(),
+            version: "0.0.9".into(),
+            features: vec![],
+        },
+        T0,
+    );
+    assert!(
+        matches!(frames(&fx).as_slice(), [HubFrame::Error { message }] if message.contains("below minimum supported version")),
+        "{fx:?}"
+    );
+    assert!(
+        fx.iter().any(|e| matches!(e, Effect::Close { conn: 1 })),
+        "connection must be closed"
     );
 }
 

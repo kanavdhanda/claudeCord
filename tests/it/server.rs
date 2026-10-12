@@ -190,7 +190,7 @@ async fn a_bad_token_is_refused_and_a_good_one_is_welcomed() {
     assert!(connect(&hub, "wrong").await.is_err());
     let mut ws = connect(&hub, &tokens[0]).await.unwrap();
     assert!(
-        matches!(next_frame(&mut ws, 1000).await, Some(HubFrame::Welcome { node_id }) if node_id == "mac")
+        matches!(next_frame(&mut ws, 1000).await, Some(HubFrame::Welcome { node_id, .. }) if node_id == "mac")
     );
     hub.shutdown().await;
 }
@@ -570,7 +570,7 @@ async fn a_flood_of_frames_is_cut_off_by_the_rate_limit() {
     let mut ws = connect(&hub, &tokens[0]).await.unwrap();
     let hello = serde_json::to_string(&NodeFrame::Hello {
         node_name: "mac".into(),
-        version: "t".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
         features: vec![],
     })
     .unwrap();

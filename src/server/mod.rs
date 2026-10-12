@@ -67,6 +67,8 @@ pub struct Config {
     pub discord_expected: bool,
     /// The availability target the dashboard measures the error budget against.
     pub uptime_target: f64,
+    /// Minimum client version required to connect to this hub.
+    pub min_client_version: String,
 }
 
 /// Discord OAuth2 settings for the dashboard sign-in. `authorize_url` and `api_base` are Discord's, and are changed only by tests.
@@ -96,6 +98,7 @@ impl Default for Config {
             max_devices: 20_000,
             discord_expected: false,
             uptime_target: 0.999,
+            min_client_version: crate::protocol::MIN_CLIENT_VERSION.to_string(),
         }
     }
 }
@@ -306,6 +309,15 @@ pub async fn start(cfg: Config, core: HubCore, store: Store) -> std::io::Result<
     let app = Router::new()
         .route(NODE_CONNECT_PATH, get(connect))
         .route("/healthz", get(|| async { "ok" }))
+        .route(
+            "/version",
+            get(|| async {
+                axum::Json(serde_json::json!({
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "min_client_version": crate::protocol::MIN_CLIENT_VERSION,
+                }))
+            }),
+        )
         .route("/readyz", get(health::readyz))
         .route("/metrics", get(health::metrics))
         .route("/api/v1/uptime", get(health::uptime))

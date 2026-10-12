@@ -145,6 +145,7 @@ pub(crate) async fn run(
 ) {
     let mut disk = Disk::new(store);
     load_core(&mut core, disk.reader());
+    core.min_client_version = cfg.min_client_version.clone();
     let mut conns: HashMap<u64, Conn> = HashMap::new();
     let mut tick = tokio::time::interval(cfg.tick_every);
     // History rollover runs on its own timer, in the background, on a second database connection.
@@ -190,7 +191,14 @@ pub(crate) async fn run(
                             conns.insert(conn, Conn { node: node.clone(), tx, queued, queued_files, kill });
                             // The welcome acknowledges nothing and promises nothing, so it is not held for the disk: a slow write must not make
                             // a machine think the hub did not answer.
-                            carry_out(vec![Effect::Send { conn, frame: HubFrame::Welcome { node_id: node.clone() } }], &mut conns, &chat, cfg.max_out_bytes);
+                            carry_out(vec![Effect::Send {
+                                conn,
+                                frame: HubFrame::Welcome {
+                                    node_id: node.clone(),
+                                    hub_version: Some(env!("CARGO_PKG_VERSION").into()),
+                                    min_version: Some(core.min_client_version.clone()),
+                                },
+                            }], &mut conns, &chat, cfg.max_out_bytes);
                             fx.extend(guard(&mut core, disk.reader(), &conns, &mut report, Some(&node), |c| c.node_connected(&node, conn)).unwrap_or_default());
                         }
                         Input::Disconnected { node, conn } => {

@@ -12,6 +12,10 @@ use std::sync::LazyLock;
 pub const FILE_CHUNK_BYTES: usize = 192 * 1024;
 pub const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
 pub const NODE_CONNECT_PATH: &str = "/api/v1/node/connect";
+/// Current version of this program.
+pub const HUB_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Default minimum client version accepted by the hub.
+pub const MIN_CLIENT_VERSION: &str = "0.1.0";
 
 static SLUG: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$").unwrap());
@@ -509,7 +513,13 @@ impl NodeFrame {
 #[serde(tag = "t")]
 pub enum HubFrame {
     #[serde(rename = "welcome", rename_all = "camelCase")]
-    Welcome { node_id: String },
+    Welcome {
+        node_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hub_version: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_version: Option<String>,
+    },
     /// The newest version of claudeCord, sent to a machine that told the hub (in its hello) it runs an older one. The machine decides how to
     /// word the update (it knows how it was installed). A machine that does not know this frame ignores it.
     #[serde(rename = "update")]

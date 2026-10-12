@@ -528,7 +528,14 @@ async fn session(
                     last_seen = tokio::time::Instant::now();
                     match m {
                         Message::Text(t) => match HubFrame::parse(t.as_str()) {
-                            Some(HubFrame::Welcome { .. }) => {
+                            Some(HubFrame::Welcome { node_id, hub_version, min_version }) => {
+                                if let Some(hv) = &hub_version {
+                                    crate::info!(
+                                        "device",
+                                        "connected to hub (node {node_id}, hub v{hv}, min client v{})",
+                                        min_version.as_deref().unwrap_or("any")
+                                    );
+                                }
                                 if events.send(LinkEvent::Up).await.is_err() { return replaced; }
                             }
                             Some(HubFrame::Ack { n }) => unacked.ack(n),

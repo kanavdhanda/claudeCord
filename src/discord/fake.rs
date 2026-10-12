@@ -275,7 +275,7 @@ pub async fn start_fake() -> (Fake, String) {
         Json(b): Json<Value>,
     ) -> Json<Value> {
         let id = f.id();
-        f.log.lock().unwrap().messages.push(json!({"channel": ch, "content": b["content"], "components": b["components"], "id": id}));
+        f.log.lock().unwrap().messages.push(json!({"channel": ch, "content": b["content"], "components": b["components"], "embeds": b["embeds"], "id": id}));
         Json(json!({"id": id}))
     }
     async fn edit(
