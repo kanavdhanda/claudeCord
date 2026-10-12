@@ -1,0 +1,10 @@
+[package]
+name = "claudecord-test-facade"
+version = "0.3.2"
+edition = "2024"
+publish = false
+
+[dependencies]
+claudecord-client = { package = "claudecord", path = "../claudecord" }
+claudecord-hub = { path = "../claudecord-hub" }
+claudecord-protocol = { path = "../claudecord-protocol" }

@@ -33,7 +33,14 @@ fn every_source_file_is_claimed_by_a_probe() {
         .flat_map(|f| f.covers.iter().copied())
         .collect();
     let mut missing = Vec::new();
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = if manifest.join("../crates/claudecord-hub/src").exists() {
+        manifest.join("../crates/claudecord-hub/src")
+    } else if manifest.join("crates/claudecord-hub/src").exists() {
+        manifest.join("crates/claudecord-hub/src")
+    } else {
+        manifest.join("src")
+    };
     let mut stack = vec![root.clone()];
     while let Some(dir) = stack.pop() {
         for entry in std::fs::read_dir(&dir).unwrap() {

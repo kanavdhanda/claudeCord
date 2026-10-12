@@ -2,6 +2,27 @@
 //! meant twenty links, which is most of the time a CI run spends, above all on Windows). Each file stays a separate module with its
 //! own purpose and its own helpers; run one with `cargo test --test it races::` (the module name, then `::`).
 
+pub fn bin(name: &str) -> std::path::PathBuf {
+    let key = format!("CARGO_BIN_EXE_{name}");
+    if let Ok(p) = std::env::var(&key) {
+        return std::path::PathBuf::from(p);
+    }
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest.parent().unwrap_or(manifest);
+    let target = std::env::var("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| root.join("target"));
+    let debug = target.join("debug").join(name);
+    if debug.exists() {
+        return debug;
+    }
+    let release = target.join("release").join(name);
+    if release.exists() {
+        return release;
+    }
+    debug
+}
+
 mod bucket;
 mod capacity;
 mod conformance;

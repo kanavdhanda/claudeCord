@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends cmake && rm -rf
 WORKDIR /src
 # Only what the program is built from: the dashboard's built files are embedded in it, so no Node is needed here.
 COPY Cargo.toml Cargo.lock ./
-COPY src ./src
+COPY crates ./crates
 COPY examples ./examples
 COPY assets ./assets
 COPY web/dist ./web/dist
