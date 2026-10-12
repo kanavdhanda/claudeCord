@@ -7,18 +7,53 @@ pub fn bin(name: &str) -> std::path::PathBuf {
     if let Ok(p) = std::env::var(&key) {
         return std::path::PathBuf::from(p);
     }
+    let binary_name = if cfg!(windows) {
+        if name.ends_with(".exe") {
+            name.to_string()
+        } else {
+            format!("{name}.exe")
+        }
+    } else {
+        name.to_string()
+    };
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let root = manifest.parent().unwrap_or(manifest);
     let target = std::env::var("CARGO_TARGET_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| root.join("target"));
-    let debug = target.join("debug").join(name);
+    let debug = target.join("debug").join(&binary_name);
     if debug.exists() {
         return debug;
     }
-    let release = target.join("release").join(name);
+    let release = target.join("release").join(&binary_name);
     if release.exists() {
         return release;
+    }
+
+    // Binary has not been compiled yet; build it via cargo build --bin <name>.
+    static BUILD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = BUILD_LOCK.lock().unwrap();
+
+    if debug.exists() {
+        return debug;
+    }
+    if release.exists() {
+        return release;
+    }
+
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let mut cmd = std::process::Command::new(cargo);
+    cmd.current_dir(root).args(["build", "--bin", name]);
+    if !cfg!(debug_assertions) {
+        cmd.arg("--release");
+    }
+    let _ = cmd.status();
+
+    if !cfg!(debug_assertions) && release.exists() {
+        return release;
+    }
+    if debug.exists() {
+        return debug;
     }
     debug
 }
