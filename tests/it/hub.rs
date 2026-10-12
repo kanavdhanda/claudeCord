@@ -2663,6 +2663,35 @@ fn a_machine_below_minimum_version_is_refused_and_disconnected() {
 }
 
 #[test]
+fn test_and_load_harnesses_bypass_minimum_version_rejection() {
+    let mut w = World::new();
+    for (i, v) in ["k6", "load", "dev", "test", "t"].iter().enumerate() {
+        let node = format!("harness_{i}");
+        let conn = (i + 1) as u64;
+        w.core.node_connected(&node, conn);
+        let fx = w.core.on_node_frame(
+            &node,
+            NodeFrame::Hello {
+                node_name: node.clone(),
+                version: (*v).into(),
+                features: vec![],
+            },
+            T0,
+        );
+        assert!(
+            !fx.iter().any(|e| matches!(e, Effect::Close { .. })),
+            "harness with version {v} must not be closed"
+        );
+        assert!(
+            !frames(&fx)
+                .iter()
+                .any(|f| matches!(f, HubFrame::Error { .. })),
+            "harness with version {v} must not receive Error frame"
+        );
+    }
+}
+
+#[test]
 fn versions_compare_number_by_number() {
     use claudecord::protocol::version_older as older;
     assert!(older("0.2.5", "0.2.10") && older("0.2.9", "0.3.0") && older("v0.1.0", "0.2.0"));

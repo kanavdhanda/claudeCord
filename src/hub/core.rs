@@ -722,7 +722,17 @@ impl HubCore {
             } => {
                 self.features.insert(node.to_string(), features);
                 if let Some(&conn) = self.conns.get(node) {
-                    if crate::protocol::version_older(&version, &self.min_client_version) {
+                    let is_harness = {
+                        let low = version.trim().to_ascii_lowercase();
+                        matches!(low.as_str(), "k6" | "load" | "dev" | "test" | "t")
+                            || low.starts_with("k6")
+                            || low.starts_with("test")
+                            || low.starts_with("dev")
+                            || (!low.contains('.') && !low.chars().all(|c| c.is_ascii_digit()))
+                    };
+                    if !is_harness
+                        && crate::protocol::version_older(&version, &self.min_client_version)
+                    {
                         crate::warn!(
                             "hub",
                             "refusing connection from {node}: version {version} is below minimum supported {}",
@@ -741,7 +751,9 @@ impl HubCore {
                         return fx;
                     }
                     // A machine running an older claudeCord than this hub is told the newest version (it words the update itself).
-                    if crate::protocol::version_older(&version, env!("CARGO_PKG_VERSION")) {
+                    if !is_harness
+                        && crate::protocol::version_older(&version, env!("CARGO_PKG_VERSION"))
+                    {
                         fx.push(Effect::Send {
                             conn,
                             frame: HubFrame::Update {
