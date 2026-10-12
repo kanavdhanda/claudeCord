@@ -101,7 +101,7 @@ async fn rig_with(name: &str, me_failures: usize) -> Rig {
     let hub = server::start(
         ServerConfig {
             bind: "127.0.0.1:0".parse().unwrap(),
-            ping_every: Duration::from_millis(300),
+            ping_every: Duration::from_secs(5),
             tick_every: Duration::from_millis(100),
             ..ServerConfig::default()
         },
@@ -117,7 +117,7 @@ async fn rig_with(name: &str, me_failures: usize) -> Rig {
         "mac".into(),
         tx,
         LinkOpts {
-            ping_every: Duration::from_millis(300),
+            ping_every: Duration::from_secs(5),
             connect_timeout: Duration::from_secs(1),
             backoff_min: Duration::from_millis(30),
             backoff_max: Duration::from_millis(200),

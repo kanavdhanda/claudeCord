@@ -6,6 +6,8 @@ members = [
     "crates/claudecord-test-facade",
     "tests",
 ]
+resolver = "3"
+
 [workspace.package]
 version = "0.3.2"
 edition = "2024"
