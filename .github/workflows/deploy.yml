@@ -1,11 +1,12 @@
 name: deploy
 
 # Continuous deployment of the HUB (the server). It runs by itself after the tests (rust.yml) pass on main, and also by hand with any git ref.
-# The server builds candidate images in an isolated staging worktree (nothing goes to a registry), verifies them via selftest and
-# container readiness checks, and promotes them to primary only after staging succeeds. If deploy fails, the primary service is never disrupted.
+# The server builds a candidate image itself in a separate worktree (nothing goes to a registry), tests it (selftest and a probe of a throwaway
+# container) and swaps it in only if it passes, so a bad build never disturbs the running hub. After the swap this checks /readyz and puts the
+# previous version back if it does not become ready. The steps run on the server as deploy/ci-entry.sh, the only command the deploy key may run.
 #
 # It deploys only when something the hub is made of changed. Changes that only touch the machine side (the `claudecord` command and daemon
-# shipped to npm and PyPI by release.yml: src/device, src/agents, the machine commands, packaging, docs) do not need a deploy and are skipped.
+# shipped to npm and PyPI by release.yml: crates/claudecord, packaging, docs) do not need a deploy and are skipped.
 # Code both sides share (the protocol, security) does deploy. If a newer commit has arrived by the time this runs, that commit deploys itself
 # and this one stops, so an older version never replaces a newer one.
 #
@@ -41,7 +42,6 @@ jobs:
     env:
       REF: ${{ inputs.ref || github.event.workflow_run.head_sha }}
       AUTO: ${{ github.event_name == 'workflow_run' }}
-      DIR: ${{ vars.DEPLOY_DIR }}
       HUB_URL: ${{ vars.HUB_URL }}
     steps:
       - uses: actions/checkout@v4
@@ -70,7 +70,7 @@ jobs:
             if [ "$(git rev-parse origin/main)" != "$REF" ]; then
               echo "a newer commit exists on main; it will deploy itself"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0
             fi
-            deployed=$(~/ssh_ "cd '$DIR' && git rev-parse HEAD" || true)
+            deployed=$(~/ssh_ head || true)
             if [ -n "$deployed" ] && changed=$(git diff --name-only "$deployed" "$REF" 2>/dev/null); then
               hub=$(echo "$changed" | grep -vE '^(.*\.md|deploy/baremetal/|crates/claudecord/|npm/|pyproject\.toml|scripts/|\.github/workflows/release\.yml)' || true)
               if [ -z "$hub" ]; then
@@ -80,96 +80,22 @@ jobs:
           fi
           echo "go=true" >> "$GITHUB_OUTPUT"
 
-      - name: "Stage 1: Build candidate image in isolated staging worktree"
+      - name: Build on the server, restart, check, roll back on failure
         if: steps.decide.outputs.go == 'true'
         run: |
-          echo "Building candidate image claudecord:staging on server from ref $REF..."
-          ~/ssh_ "set -e; cd '$DIR'
-            git fetch --tags origin
-            git worktree prune 2>/dev/null || true
-            rm -rf .staging_build 2>/dev/null || true
-            git worktree add --detach .staging_build '$REF'
-            cleanup() {
-              cd '$DIR' && git worktree remove --force .staging_build 2>/dev/null || rm -rf .staging_build
-              git worktree prune 2>/dev/null || true
-            }
-            trap cleanup EXIT
-            cd .staging_build
-            docker build -t claudecord:staging -f Dockerfile .
-          "
-
-      - name: "Stage 2: Verify candidate in staging (selftest & container probe)"
-        if: steps.decide.outputs.go == 'true'
-        run: |
-          echo "Testing candidate image claudecord:staging before touching primary..."
-          ~/ssh_ "set -e
-            echo '==> 1. Running internal selftest in candidate container'
-            docker run --rm --tmpfs /tmp claudecord:staging selftest
-
-            echo '==> 2. Verifying candidate container startup and probe'
-            docker rm -f claudecord-staging 2>/dev/null || true
-            docker run -d --name claudecord-staging \
-              --read-only --tmpfs /tmp --tmpfs /data \
-              claudecord:staging \
-              serve --data=/data --bind=0.0.0.0:8787 --allow-plain \
-                    --public-url=http://127.0.0.1:8787 \
-                    --client-id=staging-verify \
-                    --secret-file=/etc/hosts
-
-            ready=false
-            for i in \$(seq 1 15); do
-              if docker exec claudecord-staging /claudecord-hub probe http://127.0.0.1:8787 --once --data /tmp/probe >/dev/null 2>&1; then
-                ready=true
-                echo \"Candidate container verified ready after \$i checks\"
-                break
-              fi
-              sleep 1
-            done
-
-            if [ \"\$ready\" != 'true' ]; then
-              echo 'ERROR: Staging container failed readiness probe! Logs:'
-              docker logs --tail 50 claudecord-staging 2>&1 || true
-              docker rm -f claudecord-staging 2>/dev/null || true
-              exit 1
-            fi
-
-            docker rm -f claudecord-staging 2>/dev/null || true
-            echo 'Staging verification PASSED. Candidate image is ready for promotion.'
-          "
-
-      - name: "Stage 3: Promote staged candidate to primary"
-        if: steps.decide.outputs.go == 'true'
-        run: |
-          echo "Promoting verified candidate image to primary claudecord:local..."
-          ~/ssh_ "set -e; cd '$DIR'
-            git rev-parse HEAD > .previous
-            docker tag claudecord:local claudecord:previous 2>/dev/null || true
-            docker tag claudecord:staging claudecord:local
-            git checkout --detach '$REF'
-            cd deploy
-            docker compose up -d --no-build
-          "
-
-      - name: "Stage 4: Verify primary live health and roll back on failure"
-        if: steps.decide.outputs.go == 'true'
-        run: |
-          echo "Verifying live primary service at $HUB_URL/readyz..."
+          # The deploy key can only run deploy/ci-entry.sh on the server (a forced command), which takes one of: head, deploy SHA, logs, rollback.
+          # It keeps the running image as claudecord:previous, and the commit it came from in .previous, so a failed deploy can put it back.
+          rc=0; ~/ssh_ deploy "$(git rev-parse HEAD)" || rc=$?
+          # 10 = the candidate failed its build or tests; the running hub was never touched, so there is nothing to put back.
+          [ "$rc" = 10 ] && { echo "the new version failed before it replaced anything; the running hub is unchanged"; exit 1; }
+          [ "$rc" = 0 ] || { echo "the swap failed (exit $rc)"; ~/ssh_ logs || true; echo "putting the previous one back"; ~/ssh_ rollback; exit 1; }
           for i in $(seq 1 30); do
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$HUB_URL/readyz" || true)
-            [ "$code" = "200" ] && { echo "Primary is healthy and ready after $i checks"; exit 0; }
+            [ "$code" = "200" ] && { echo "ready after $i checks"; exit 0; }
             sleep 4
           done
-          echo "ERROR: Primary failed /readyz check! Logs from primary hub:"
-          ~/ssh_ "cd '$DIR/deploy' && docker compose logs --tail 50 hub 2>&1" || true
-          echo "Rolling back primary to previous version..."
-          ~/ssh_ "set -e; cd '$DIR'
-            if [ -f .previous ]; then
-              git checkout --detach \$(cat .previous)
-            fi
-            if docker image inspect claudecord:previous >/dev/null 2>&1; then
-              docker tag claudecord:previous claudecord:local
-            fi
-            cd deploy
-            docker compose up -d --no-build
-          "
+          echo "the new version never became ready. Its log, so the reason is in this run:"
+          ~/ssh_ logs || true
+          echo "putting the previous one back"
+          ~/ssh_ rollback
           exit 1

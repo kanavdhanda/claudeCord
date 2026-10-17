@@ -1,6 +1,6 @@
 [package]
 name = "claudecord-protocol"
-version = "0.3.2"
+version.workspace = true
 edition = "2024"
 description = "Wire protocol types and framing for claudeCord"
 license = "MIT"

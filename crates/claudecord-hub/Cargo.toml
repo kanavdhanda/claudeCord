@@ -1,6 +1,6 @@
 [package]
 name = "claudecord-hub"
-version = "0.3.2"
+version.workspace = true
 edition = "2024"
 description = "claudeCord Hub: manage coding agents from Discord and web dashboard"
 license = "MIT"
