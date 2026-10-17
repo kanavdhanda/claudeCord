@@ -26,4 +26,11 @@ Repository = "https://github.com/kanavdhanda/claudeCord"
 bindings = "bin"
 strip = true
 manifest-path = "crates/claudecord/Cargo.toml"
+# The program lives in crates/claudecord, so files that are outside it have to be named or the source package would be missing them: the
+# LICENSE (it is listed in the package's metadata, and PyPI refuses an upload that lists a license file it does not contain) and the fonts
+# that crates/claudecord/src/device/shot.rs embeds (without them the package does not compile).
+include = [
+  { path = "LICENSE", format = "sdist" },
+  { path = "assets/fonts/*", format = "sdist" },
+]
 

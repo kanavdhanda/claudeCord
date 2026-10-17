@@ -115,6 +115,13 @@ jobs:
         with:
           command: sdist
           args: --out dist
+      # PyPI refuses a source package whose metadata names a license file that is not in it (0.3.4 was refused for this), and the program does
+      # not compile without the fonts it embeds. Both live outside crates/claudecord, so check they are in the package before anything is published.
+      - run: |
+          t=$(ls dist/*.tar.gz)
+          for f in LICENSE assets/fonts/DejaVuSans.ttf assets/fonts/DejaVuSansMono.ttf assets/fonts/DejaVuSansMono-Bold.ttf; do
+            tar tzf "$t" | grep -q "/$f$" || { echo "the source package is missing $f"; exit 1; }
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: sdist
