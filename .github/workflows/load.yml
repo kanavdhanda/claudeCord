@@ -19,7 +19,7 @@ jobs:
     # Long and heavy, so each size waits for your approval (Settings > Environments > load-test > Required reviewers).
     environment: load-test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: grafana/setup-k6-action@v1
       - run: docker build -t claudecord .
       - run: scripts/load/profile.sh ${{ matrix.profile }} ${{ inputs.users }} 60
