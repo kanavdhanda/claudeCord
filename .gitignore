@@ -18,6 +18,19 @@ __pycache__/
 *.pyc
 deploy/oauth-secret
 deploy/data/
+
+# Keys and tokens: never committed, whatever they are called
+.env.*
+!.env.example
+*.pem
+*.p12
+*.key
+id_rsa*
+id_ed25519*
+id_ecdsa*
+.npmrc
+.pypirc
+kek
 .claude/worktrees/
 review/
 problems.pdf

@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Refuses a commit that adds something that looks like a real secret: a GitHub, npm, PyPI, AWS, Anthropic or Slack token, or a private key.
+# Turn it on once per clone:   git config core.hooksPath .githooks
+# GitHub's push protection is the second wall, on the server; this one stops the secret before it is even in your history.
+#
+# Only ADDED lines are looked at. The tests hold obviously fake values (abcdef..., AKIAABCDEF..., xxxx...) and those are skipped; a line
+# that is a deliberate fixture can also carry the words  secret-ok  in a comment.
+set -euo pipefail
+
+patterns='gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,}|npm_[A-Za-z0-9]{36}|pypi-AgEI[A-Za-z0-9_-]{20,}|A(KIA|SIA)[0-9A-Z]{16}|sk-ant-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY-----[^-]'
+fake='abcdefghijklmnop|ABCDEFGHIJKLMNOP|xxxxxxxx|secret-ok'
+
+hits=$(git diff --cached -U0 --no-color --diff-filter=ACMR \
+  | grep -E '^\+' | grep -vE '^\+\+\+' \
+  | grep -E -- "$patterns" | grep -vE -- "$fake" || true)
+
+# A private key block is only a problem when real key text follows the header, not when the header is written inside a test string.
+hits=$(printf '%s\n' "$hits" | grep -vE 'BEGIN [A-Z ]*PRIVATE KEY-----\\n' || true)
+
+# Whole files that should never be committed, whatever they contain.
+files=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '(^|/)(\.env|\.env\.[^e].*|\.npmrc|\.pypirc|id_(rsa|ed25519|ecdsa)(\.pem)?|.*\.pem|.*\.p12|kek|oauth-secret)$' || true)
+
+if [ -n "$(printf '%s' "$hits$files" | tr -d '[:space:]')" ]; then
+  echo "pre-commit: this commit looks like it contains a secret, so it was stopped." >&2
+  [ -n "$files" ] && { echo "Files that must not be committed:" >&2; printf '  %s\n' $files >&2; }
+  [ -n "$(printf '%s' "$hits" | tr -d '[:space:]')" ] && { echo "Added lines that look like tokens or keys (shown cut short):" >&2; printf '%s\n' "$hits" | cut -c1-90 | sed 's/^/  /' >&2; }
+  echo "If it is a real secret: remove it, and revoke it, because anything once typed here may be in your shell history or editor backups." >&2
+  echo "If it is a harmless test value: add  secret-ok  in a comment on that line." >&2
+  exit 1
+fi

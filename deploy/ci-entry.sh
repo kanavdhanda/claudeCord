@@ -42,7 +42,7 @@ case "$action" in
     echo "==> 2. Test the candidate"
     docker run --rm --tmpfs /tmp claudecord:staging selftest || staging_failed "the candidate's selftest failed"
     docker rm -f claudecord-staging >/dev/null 2>&1 || true
-    docker run -d --name claudecord-staging --read-only --tmpfs /tmp --tmpfs /data claudecord:staging \
+    docker run -d --name claudecord-staging --read-only --tmpfs /tmp --tmpfs /data:uid=65532,gid=65532,mode=0700 claudecord:staging \
       serve --data=/data --bind=0.0.0.0:8787 --allow-plain --public-url=http://127.0.0.1:8787 \
             --client-id=staging-verify --secret-file=/etc/hosts >/dev/null || staging_failed "the candidate would not start"
     ready=false
