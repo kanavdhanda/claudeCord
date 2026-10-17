@@ -5,18 +5,23 @@ name: uptime
 # fails. Set the repository variable HUB_URL (Settings > Secrets and variables > Actions > Variables) to turn it on.
 on:
   schedule:
-    - cron: "10 10 20 2 6"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
+
+# It only reads a public address, so it needs no access to the repository.
+permissions: {}
 
 jobs:
   probe:
     if: vars.HUB_URL != ''
     runs-on: ubuntu-latest
+    env:
+      HUB_URL: ${{ vars.HUB_URL }}
     steps:
       # Three tries, ten seconds apart, so one dropped packet is not an outage (the same debounce the prober uses).
       - run: |
           for i in 1 2 3; do
-            code=$(curl -s -o body.json -w '%{http_code}' --max-time 10 "${{ vars.HUB_URL }}/readyz" || true)
+            code=$(curl -s -o body.json -w '%{http_code}' --max-time 10 "$HUB_URL/readyz" || true)
             [ "$code" = "200" ] && { echo "ready"; exit 0; }
             echo "try $i: HTTP $code"; cat body.json 2>/dev/null; sleep 10
           done
