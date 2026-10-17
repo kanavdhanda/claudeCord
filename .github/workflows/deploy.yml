@@ -57,7 +57,7 @@ jobs:
           echo "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
           cat > ~/ssh_ <<'EOF'
           #!/usr/bin/env bash
-          exec ssh -i ~/.ssh/id -o StrictHostKeyChecking=yes -o ConnectTimeout=15 "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" "$@"
+          exec ssh -i ~/.ssh/id -o StrictHostKeyChecking=yes -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=40 "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" "$@"
           EOF
           chmod +x ~/ssh_
       # ---------------------------------------------------------------------------------------------------------------------------------------
