@@ -531,6 +531,12 @@ impl Bridge {
                         let _ = self.rest.unreact(ch, mid, NOW).await;
                         let _ = self.rest.unreact(ch, mid, STEER).await;
                         let _ = self.rest.unreact(ch, mid, WAITING).await;
+                        if let Some(qv) = self.get(&format!("queued:{reference}"))
+                            && let Some((qch, qmid)) = qv.split_once(':')
+                        {
+                            let _ = self.rest.edit_components(qch, qmid, json!([])).await;
+                            let _ = self.kv.kv_del(&format!("queued:{reference}"));
+                        }
 
                         let agent_label = if agent_name.is_empty() {
                             "An agent".to_string()
@@ -1163,7 +1169,33 @@ impl Bridge {
                         "description": desc,
                         "color": 0x5865F2,
                     });
-                    let _ = self.rest.send_embed(channel, embed, Some(mid)).await;
+                    let components = json!([{
+                        "type": 1,
+                        "components": [
+                            {
+                                "type": 2,
+                                "style": 1,
+                                "label": "⏩ Send Now",
+                                "custom_id": format!("prio:now:{channel}:{mid}")
+                            },
+                            {
+                                "type": 2,
+                                "style": 2,
+                                "label": "🧭 Steer",
+                                "custom_id": format!("prio:steer:{channel}:{mid}")
+                            }
+                        ]
+                    }]);
+                    if let Ok(qmid) = self
+                        .rest
+                        .send_embed_with_components(channel, embed, Some(mid), Some(components))
+                        .await
+                    {
+                        self.set(
+                            &format!("queued:{channel}:{mid}"),
+                            &format!("{channel}:{qmid}"),
+                        );
+                    }
                 }
             }
         }
@@ -1420,6 +1452,31 @@ impl Bridge {
                     .call(move |c, now| {
                         match c.decide_permission(&h, &p, &label, decision, None, now) {
                             Ok(fx) => (format!("Done ({what})."), fx),
+                            Err(d) => (commands::denied_text(&d), vec![]),
+                        }
+                    })
+                    .await
+                    .unwrap_or_default()
+            }
+            ["prio", mode, ch, mid] => {
+                let mode = mode.to_string();
+                let reference = format!("{ch}:{mid}");
+                self.handle
+                    .call(move |c, _| {
+                        let mut fx = Vec::new();
+                        match c.prioritise(&h, &p, &reference, &mode, &mut fx) {
+                            Ok(true) => {
+                                let msg = if mode == "steer" {
+                                    "🧭 Steering agent and sending now."
+                                } else {
+                                    "⏩ Sending now."
+                                };
+                                (msg.to_string(), fx)
+                            }
+                            Ok(false) => (
+                                "Message was already picked up or is not waiting.".to_string(),
+                                fx,
+                            ),
                             Err(d) => (commands::denied_text(&d), vec![]),
                         }
                     })

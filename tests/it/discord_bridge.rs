@@ -1496,20 +1496,38 @@ async fn delivery_and_acceptance_post_status_embeds_with_labels() {
         unreachable!()
     };
 
-    // Check that a QUEUED embed was posted
-    r.until("queued embed", |l| {
-        l.messages
-            .iter()
-            .find(|m| {
-                m["embeds"]
-                    .as_array()
-                    .and_then(|a| a.first())
-                    .and_then(|e| e["title"].as_str())
-                    .is_some_and(|t| t.contains("[QUEUED]"))
-            })
-            .cloned()
-    })
-    .await;
+    // Check that a QUEUED embed was posted with Send Now and Steer buttons
+    let queued_msg = r
+        .until("queued embed", |l| {
+            l.messages
+                .iter()
+                .find(|m| {
+                    m["embeds"]
+                        .as_array()
+                        .and_then(|a| a.first())
+                        .and_then(|e| e["title"].as_str())
+                        .is_some_and(|t| t.contains("[QUEUED]"))
+                })
+                .cloned()
+        })
+        .await;
+    let send_now_id = queued_msg["components"][0]["components"][0]["custom_id"]
+        .as_str()
+        .expect("Send Now button custom_id")
+        .to_string();
+    assert_eq!(send_now_id, format!("prio:now:{ch}:m1"));
+
+    // Pressing the Send Now button sends a Priority("now") frame to the device
+    r.event(
+        "INTERACTION_CREATE",
+        interaction(3, &ch, "1", json!({"custom_id": send_now_id})),
+    );
+    let prio = r
+        .frame("priority frame from button", |f| {
+            matches!(f, HubFrame::Priority { .. })
+        })
+        .await;
+    assert!(matches!(prio, HubFrame::Priority { mode, .. } if mode == "now"));
 
     // Agent accepts the message
     r.link
