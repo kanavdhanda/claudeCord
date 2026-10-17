@@ -1,0 +1,33 @@
+[package]
+name = "claudecord"
+version.workspace = true
+edition = "2024"
+description = "Run Claude Code, agy and Codex agents on any machine as a Discord team"
+license = "MIT"
+repository = "https://github.com/kanavdhanda/claudeCord"
+
+[[bin]]
+name = "claudecord"
+path = "src/main.rs"
+
+[dependencies]
+claudecord-protocol = { path = "../claudecord-protocol" }
+ab_glyph = "0.2.32"
+base64 = "0.22"
+clap = { version = "4.6.7", features = ["derive"] }
+crossterm = "0.29.0"
+futures-util = "0.3.34"
+getrandom = "0.4.3"
+hmac = "0.13.0"
+interprocess = { version = "2.4.4", features = ["tokio"] }
+png = "0.18.1"
+portable-pty = "0.9.0"
+regex = "1"
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "json", "multipart", "rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11.0"
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "signal", "io-std", "process", "fs"] }
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+vt100 = "0.16.2"
+unicode-width = "0.2.2"

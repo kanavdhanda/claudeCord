@@ -28,8 +28,11 @@ PLATFORMS = [
 
 
 def cargo_version():
-    m = re.search(r'^version\s*=\s*"([^"]+)"', (ROOT / "Cargo.toml").read_text(), re.M)
-    assert m, "no version in Cargo.toml"
+    text = (ROOT / "Cargo.toml").read_text()
+    m = re.search(r'^version\s*=\s*"([^"]+)"', text, re.M)
+    if not m:
+        m = re.search(r'^version\s*=\s*"([^"]+)"', (ROOT / "crates/claudecord/Cargo.toml").read_text(), re.M)
+    assert m, "no version in Cargo.toml or crates/claudecord/Cargo.toml"
     return m.group(1)
 
 

@@ -1448,7 +1448,7 @@ async fn an_agents_own_shell_command_can_speak_to_the_team_and_only_with_its_own
     let run = |agent: &str, key: &str| {
         let (home, agent, key) = (r.dir.clone(), agent.to_string(), key.to_string());
         tokio::task::spawn_blocking(move || {
-            std::process::Command::new(env!("CARGO_BIN_EXE_claudecord"))
+            std::process::Command::new(crate::bin("claudecord"))
                 .args(["say", "hello from the shell"])
                 .env("CLAUDECORD_HOME", home)
                 .env("CLAUDECORD_AGENT", agent)
@@ -1480,7 +1480,7 @@ async fn an_agents_own_shell_command_can_speak_to_the_team_and_only_with_its_own
     let (home, k) = (r.dir.clone(), key.clone());
     let piped = tokio::task::spawn_blocking(move || {
         use std::io::Write;
-        let mut c = std::process::Command::new(env!("CARGO_BIN_EXE_claudecord"))
+        let mut c = std::process::Command::new(crate::bin("claudecord"))
             .args(["say", "-"])
             .env("CLAUDECORD_HOME", home)
             .env("CLAUDECORD_AGENT", "demo/otter")

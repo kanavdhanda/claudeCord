@@ -2,7 +2,8 @@
 **
 !Cargo.toml
 !Cargo.lock
-!src/**
+!crates/**
+!tests/**
 !examples/**
 !web/dist/**
 !assets/**

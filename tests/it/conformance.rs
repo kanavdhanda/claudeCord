@@ -2,7 +2,7 @@
 //! given input (frames, redaction, terminal screens, rate limits, metrics and more). A change that alters any of them is a change to
 //! the wire format or to a safety rule, and needs the vector updated on purpose.
 
-use claudecord::adapters::{LaunchCtx, Policy, detect_limit, parse_menu};
+use claudecord::adapters::{AdapterExt, LaunchCtx, Policy, detect_limit, parse_menu};
 use claudecord::codes::{format_code, normalize_code};
 use claudecord::env::secret_env_names;
 use claudecord::limits::{Bucket, FailureLimiter};
@@ -30,10 +30,11 @@ fn expand(v: Value) -> Value {
 }
 
 fn load(name: &str) -> Value {
-    let path = format!(
-        "{}/testdata/conformance/{name}.json",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let mut path = format!("{manifest}/testdata/conformance/{name}.json");
+    if !std::path::Path::new(&path).exists() {
+        path = format!("{manifest}/../testdata/conformance/{name}.json");
+    }
     expand(
         serde_json::from_str(
             &std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}")),

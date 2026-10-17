@@ -210,7 +210,7 @@ async fn welcomed(ws: &mut Ws) -> Option<String> {
     loop {
         match tokio::time::timeout(Duration::from_secs(2), ws.next()).await {
             Ok(Some(Ok(Message::Text(t)))) => {
-                if let Some(HubFrame::Welcome { node_id }) = HubFrame::parse(t.as_str()) {
+                if let Some(HubFrame::Welcome { node_id, .. }) = HubFrame::parse(t.as_str()) {
                     return Some(node_id);
                 }
             }
@@ -251,7 +251,7 @@ async fn a_machine_is_approved_by_code_and_connects_to_its_owners_hub() {
     assert_eq!(welcomed(&mut ws).await.as_deref(), Some("mac"));
     let hello = NodeFrame::Hello {
         node_name: "mac".into(),
-        version: "t".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
         features: vec![],
     };
     ws.send(Message::Text(serde_json::to_string(&hello).unwrap().into()))

@@ -1,11 +1,12 @@
 name: deploy
 
 # Continuous deployment of the HUB (the server). It runs by itself after the tests (rust.yml) pass on main, and also by hand with any git ref.
-# The server builds the image itself from its clone of this repository (nothing goes to a registry), checks /readyz, and puts the previous
-# version back if the new one does not become ready.
+# The server builds a candidate image itself in a separate worktree (nothing goes to a registry), tests it (selftest and a probe of a throwaway
+# container) and swaps it in only if it passes, so a bad build never disturbs the running hub. After the swap this checks /readyz and puts the
+# previous version back if it does not become ready. The steps run on the server as deploy/ci-entry.sh, the only command the deploy key may run.
 #
 # It deploys only when something the hub is made of changed. Changes that only touch the machine side (the `claudecord` command and daemon
-# shipped to npm and PyPI by release.yml: src/device, src/agents, the machine commands, packaging, docs) do not need a deploy and are skipped.
+# shipped to npm and PyPI by release.yml: crates/claudecord, packaging, docs) do not need a deploy and are skipped.
 # Code both sides share (the protocol, security) does deploy. If a newer commit has arrived by the time this runs, that commit deploys itself
 # and this one stops, so an older version never replaces a newer one.
 #
@@ -71,7 +72,7 @@ jobs:
             fi
             deployed=$(~/ssh_ head || true)
             if [ -n "$deployed" ] && changed=$(git diff --name-only "$deployed" "$REF" 2>/dev/null); then
-              hub=$(echo "$changed" | grep -vE '^(.*\.md|deploy/baremetal/|src/device/|src/agents/|src/cli/machine\.rs|src/cli/verbs\.rs|npm/|pyproject\.toml|scripts/|\.github/workflows/release\.yml)' || true)
+              hub=$(echo "$changed" | grep -vE '^(.*\.md|deploy/baremetal/|crates/claudecord/|npm/|pyproject\.toml|scripts/|\.github/workflows/release\.yml)' || true)
               if [ -z "$hub" ]; then
                 echo "only the machine side changed since $deployed; nothing for the hub"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0
               fi
@@ -84,7 +85,10 @@ jobs:
         run: |
           # The deploy key can only run deploy/ci-entry.sh on the server (a forced command), which takes one of: head, deploy SHA, logs, rollback.
           # It keeps the running image as claudecord:previous, and the commit it came from in .previous, so a failed deploy can put it back.
-          ~/ssh_ deploy "$(git rev-parse HEAD)"
+          rc=0; ~/ssh_ deploy "$(git rev-parse HEAD)" || rc=$?
+          # 10 = the candidate failed its build or tests; the running hub was never touched, so there is nothing to put back.
+          [ "$rc" = 10 ] && { echo "the new version failed before it replaced anything; the running hub is unchanged"; exit 1; }
+          [ "$rc" = 0 ] || { echo "the swap failed (exit $rc)"; ~/ssh_ logs || true; echo "putting the previous one back"; ~/ssh_ rollback; exit 1; }
           for i in $(seq 1 30); do
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$HUB_URL/readyz" || true)
             [ "$code" = "200" ] && { echo "ready after $i checks"; exit 0; }

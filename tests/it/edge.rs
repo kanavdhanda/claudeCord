@@ -369,7 +369,7 @@ const TRUST_SCREEN: &str = "\n────────────────�
 #[test]
 fn a_start_up_question_without_numbers_is_seen_so_it_reaches_the_chat_instead_of_hanging_the_agent()
 {
-    use claudecord::adapters::parse_menu;
+    use claudecord::adapters::{AdapterExt, parse_menu};
     use claudecord::protocol::AdapterId;
     let p = parse_menu(TRUST_SCREEN).expect("the unnumbered menu is recognised");
     assert_eq!(p.options, vec!["No, exit", "Yes, I trust this folder"]);
@@ -388,7 +388,7 @@ fn a_start_up_question_without_numbers_is_seen_so_it_reaches_the_chat_instead_of
 
 #[test]
 fn an_idle_screen_and_ordinary_text_are_not_mistaken_for_a_menu() {
-    use claudecord::adapters::parse_menu;
+    use claudecord::adapters::{AdapterExt, parse_menu};
     use claudecord::protocol::AdapterId;
     let idle = "\n╭────────────────────────────────╮\n│ > Try \"fix the failing test\"   │\n╰────────────────────────────────╯\n  ? for shortcuts\n";
     assert!(parse_menu(idle).is_none());

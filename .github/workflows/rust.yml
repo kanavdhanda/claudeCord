@@ -32,6 +32,7 @@ jobs:
           cache-on-failure: true
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo build --bins
       # Every integration test is one program (tests/it), so it is compiled and linked once.
       - run: cargo test
       # The timing tests again, many times: a race that shows once in fifty runs is still a bug.
@@ -52,6 +53,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+      - run: cargo build --bins
       - run: cargo test
       - run: cargo run -q --bin claudecord-hub -- selftest
 

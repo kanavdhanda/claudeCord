@@ -365,12 +365,10 @@ name = "claudecord"
 version = "0.3.3"
 dependencies = [
  "ab_glyph",
- "aes-gcm",
- "axum",
  "base64 0.22.1",
  "clap",
+ "claudecord-protocol",
  "crossterm",
- "flate2",
  "futures-util",
  "getrandom 0.4.3",
  "hmac",
@@ -379,7 +377,6 @@ dependencies = [
  "portable-pty",
  "regex",
  "reqwest",
- "rusqlite",
  "serde",
  "serde_json",
  "sha2",
@@ -387,6 +384,71 @@ dependencies = [
  "tokio-tungstenite 0.30.0",
  "unicode-width",
  "vt100",
+]
+
+[[package]]
+name = "claudecord-hub"
+version = "0.3.3"
+dependencies = [
+ "aes-gcm",
+ "axum",
+ "base64 0.22.1",
+ "clap",
+ "claudecord-protocol",
+ "flate2",
+ "futures-util",
+ "getrandom 0.4.3",
+ "hmac",
+ "regex",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+]
+
+[[package]]
+name = "claudecord-it"
+version = "0.3.3"
+dependencies = [
+ "aes-gcm",
+ "axum",
+ "base64 0.22.1",
+ "clap",
+ "claudecord-test-facade",
+ "flate2",
+ "futures-util",
+ "getrandom 0.4.3",
+ "hmac",
+ "regex",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-tungstenite 0.30.0",
+]
+
+[[package]]
+name = "claudecord-protocol"
+version = "0.3.3"
+dependencies = [
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "claudecord-test-facade"
+version = "0.3.3"
+dependencies = [
+ "claudecord",
+ "claudecord-hub",
+ "claudecord-protocol",
 ]
 
 [[package]]

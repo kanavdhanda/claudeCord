@@ -2624,7 +2624,7 @@ fn a_machine_running_an_older_version_is_told_the_newest_and_a_current_one_is_no
         )
     };
     let now = env!("CARGO_PKG_VERSION");
-    let fx = hello("old", "0.0.1", &mut w);
+    let fx = hello("old", "0.1.0", &mut w);
     assert!(
         matches!(frames(&fx).as_slice(), [HubFrame::Update { latest }] if latest == now),
         "{fx:?}"
@@ -2637,6 +2637,58 @@ fn a_machine_running_an_older_version_is_told_the_newest_and_a_current_one_is_no
         frames(&hello("new", "99.0.0", &mut w)).is_empty(),
         "nor does a machine that is ahead of the hub"
     );
+}
+
+#[test]
+fn a_machine_below_minimum_version_is_refused_and_disconnected() {
+    let mut w = World::new();
+    w.core.node_connected("ancient", 1);
+    let fx = w.core.on_node_frame(
+        "ancient",
+        NodeFrame::Hello {
+            node_name: "ancient".into(),
+            version: "0.0.9".into(),
+            features: vec![],
+        },
+        T0,
+    );
+    assert!(
+        matches!(frames(&fx).as_slice(), [HubFrame::Error { message }] if message.contains("below minimum supported version")),
+        "{fx:?}"
+    );
+    assert!(
+        fx.iter().any(|e| matches!(e, Effect::Close { conn: 1 })),
+        "connection must be closed"
+    );
+}
+
+#[test]
+fn test_and_load_harnesses_bypass_minimum_version_rejection() {
+    let mut w = World::new();
+    for (i, v) in ["k6", "load", "dev", "test", "t"].iter().enumerate() {
+        let node = format!("harness_{i}");
+        let conn = (i + 1) as u64;
+        w.core.node_connected(&node, conn);
+        let fx = w.core.on_node_frame(
+            &node,
+            NodeFrame::Hello {
+                node_name: node.clone(),
+                version: (*v).into(),
+                features: vec![],
+            },
+            T0,
+        );
+        assert!(
+            !fx.iter().any(|e| matches!(e, Effect::Close { .. })),
+            "harness with version {v} must not be closed"
+        );
+        assert!(
+            !frames(&fx)
+                .iter()
+                .any(|f| matches!(f, HubFrame::Error { .. })),
+            "harness with version {v} must not receive Error frame"
+        );
+    }
 }
 
 #[test]

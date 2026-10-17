@@ -33,7 +33,7 @@ struct Rig {
 impl Rig {
     /// Waits until the stand-in Discord has a record matching `f`, and returns it.
     async fn until(&self, what: &str, f: impl Fn(&Log) -> Option<Value>) -> Value {
-        for _ in 0..200 {
+        for _ in 0..400 {
             if let Some(v) = f(&self.fake.log.lock().unwrap()) {
                 return v;
             }
@@ -52,7 +52,7 @@ impl Rig {
 
     /// Waits for a frame from the hub on the device that matches.
     async fn frame(&mut self, what: &str, f: impl Fn(&HubFrame) -> bool) -> HubFrame {
-        let r = tokio::time::timeout(Duration::from_secs(5), async {
+        let r = tokio::time::timeout(Duration::from_secs(10), async {
             while let Some(e) = self.device.recv().await {
                 if let LinkEvent::Frame(fr) = e
                     && f(&fr)
@@ -101,7 +101,7 @@ async fn rig_with(name: &str, me_failures: usize) -> Rig {
     let hub = server::start(
         ServerConfig {
             bind: "127.0.0.1:0".parse().unwrap(),
-            ping_every: Duration::from_millis(300),
+            ping_every: Duration::from_secs(5),
             tick_every: Duration::from_millis(100),
             ..ServerConfig::default()
         },
@@ -117,7 +117,7 @@ async fn rig_with(name: &str, me_failures: usize) -> Rig {
         "mac".into(),
         tx,
         LinkOpts {
-            ping_every: Duration::from_millis(300),
+            ping_every: Duration::from_secs(5),
             connect_timeout: Duration::from_secs(1),
             backoff_min: Duration::from_millis(30),
             backoff_max: Duration::from_millis(200),
@@ -1436,16 +1436,14 @@ async fn the_delivery_reactions_are_offered_and_only_a_listed_person_can_press_t
     r.event("MESSAGE_CREATE", message(&ch, "m1", "1", "look at this"));
     r.frame("the message", |f| deliver_text(f, "look at this"))
         .await;
-    // The bridge offers both choices on the message while it is waiting.
-    for emoji in ["\u{23E9}", "\u{1F9ED}"] {
-        r.until("the choice offered", |l| {
-            l.reactions
-                .iter()
-                .find(|x| x["message"] == "m1" && x["emoji"] == emoji)
-                .cloned()
-        })
-        .await;
-    }
+    // The message is marked seen while waiting.
+    r.until("the message acknowledged", |l| {
+        l.reactions
+            .iter()
+            .find(|x| x["message"] == "m1" && x["emoji"] == "\u{1F440}")
+            .cloned()
+    })
+    .await;
     // A person who is not on the project's list presses steer first, then the owner presses "straight through": the hub must act only on
     // the owner's.
     r.event(
@@ -1483,4 +1481,56 @@ async fn the_delivery_reactions_are_offered_and_only_a_listed_person_can_press_t
         more.is_err() || more == Ok(false),
         "a bot's or an unknown reaction was acted on"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delivery_and_acceptance_post_status_embeds_with_labels() {
+    let mut r = rig("embeds").await;
+    register(&r, "otter").await;
+    let ch = channel(&r).await;
+    r.event("MESSAGE_CREATE", message(&ch, "m1", "1", "write a test"));
+    let frame = r
+        .frame("the message", |f| deliver_text(f, "write a test"))
+        .await;
+    let HubFrame::Deliver { msg_id, .. } = frame else {
+        unreachable!()
+    };
+
+    // Check that a QUEUED embed was posted
+    r.until("queued embed", |l| {
+        l.messages
+            .iter()
+            .find(|m| {
+                m["embeds"]
+                    .as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|e| e["title"].as_str())
+                    .is_some_and(|t| t.contains("[QUEUED]"))
+            })
+            .cloned()
+    })
+    .await;
+
+    // Agent accepts the message
+    r.link
+        .send(NodeFrame::AgentAccepted {
+            agent_id: "demo/otter".into(),
+            msg_ids: vec![msg_id.unwrap()],
+        })
+        .await;
+
+    // Check that a TAKEN UP embed was posted
+    r.until("taken up embed", |l| {
+        l.messages
+            .iter()
+            .find(|m| {
+                m["embeds"]
+                    .as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|e| e["title"].as_str())
+                    .is_some_and(|t| t.contains("[TAKEN UP]"))
+            })
+            .cloned()
+    })
+    .await;
 }

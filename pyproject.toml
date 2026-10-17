@@ -25,5 +25,5 @@ Repository = "https://github.com/kanavdhanda/claudeCord"
 [tool.maturin]
 bindings = "bin"
 strip = true
-# Without the hub feature: the wheel holds the machine program only.
-no-default-features = true
+manifest-path = "crates/claudecord/Cargo.toml"
+
