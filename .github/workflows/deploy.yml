@@ -43,7 +43,7 @@ jobs:
       AUTO: ${{ github.event_name == 'workflow_run' }}
       HUB_URL: ${{ vars.HUB_URL }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ inputs.ref || github.event.workflow_run.head_sha }}
