@@ -362,7 +362,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "claudecord"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "ab_glyph",
  "base64 0.22.1",
@@ -388,7 +388,7 @@ dependencies = [
 
 [[package]]
 name = "claudecord-hub"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "aes-gcm",
  "axum",
@@ -411,7 +411,7 @@ dependencies = [
 
 [[package]]
 name = "claudecord-it"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "aes-gcm",
  "axum",
@@ -434,7 +434,7 @@ dependencies = [
 
 [[package]]
 name = "claudecord-protocol"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "regex",
  "serde",
@@ -444,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "claudecord-test-facade"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "claudecord",
  "claudecord-hub",
