@@ -4,9 +4,9 @@ name: release
 #   - files on a draft GitHub release,
 #   - pip wheels (PyPI),
 #   - npm packages (one per platform, plus the main `claudecord` package).
-# Publishing to PyPI and npm only happens when it is set up: PyPI uses trusted publishing (no secret to keep), npm uses the NPM_TOKEN
-# repository secret (a granular token with read and write on all packages and "bypass two-factor" on, because no one is there to answer a passkey).
-# Ship with scripts/release.sh X.Y.Z, which bumps the version, tags it and pushes; this file does the rest. Without them the release still builds and the draft release holds every file.
+# Publishing to PyPI and npm uses trusted publishing (OIDC), so there is no token to keep or leak. Set it up once on each site for this
+# repository, the workflow release.yml and the environment pypi (PyPI) or npm (npmjs.com, package `claudecord`).
+# Ship with scripts/release.sh X.Y.Z, which bumps the version, tags it and pushes; this file does the rest.
 on:
   push:
     tags: ["v*"]
@@ -164,26 +164,25 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment: npm
+    # Trusted publishing: npm is told once that this repository, workflow and environment may publish `claudecord`, so there is no token to leak.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm 11.5.1 or newer, which is newer than the npm that comes with Node 22.
+      - run: npm install -g npm@^11.5.1
       - uses: actions/download-artifact@v4
         with:
           pattern: "bin-*"
           path: bins
           merge-multiple: true
       - run: python3 scripts/package_npm.py bins npm-out
-      - id: have
-        run: echo "token=${{ secrets.NPM_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
-      - if: steps.have.outputs.token == 'true'
-        run: scripts/publish_npm.sh npm-out
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - if: steps.have.outputs.token != 'true'
-        run: echo "NPM_TOKEN is not set, so nothing was published to npm (the packages were built and checked)."
+      - run: scripts/publish_npm.sh npm-out
 
   github-release:
     needs: [build, wheels, sdist, publish-npm]
