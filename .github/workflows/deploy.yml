@@ -41,7 +41,6 @@ jobs:
     env:
       REF: ${{ inputs.ref || github.event.workflow_run.head_sha }}
       AUTO: ${{ github.event_name == 'workflow_run' }}
-      DIR: ${{ vars.DEPLOY_DIR }}
       HUB_URL: ${{ vars.HUB_URL }}
     steps:
       - uses: actions/checkout@v4
@@ -70,7 +69,7 @@ jobs:
             if [ "$(git rev-parse origin/main)" != "$REF" ]; then
               echo "a newer commit exists on main; it will deploy itself"; echo "go=false" >> "$GITHUB_OUTPUT"; exit 0
             fi
-            deployed=$(~/ssh_ "cd '$DIR' && git rev-parse HEAD" || true)
+            deployed=$(~/ssh_ head || true)
             if [ -n "$deployed" ] && changed=$(git diff --name-only "$deployed" "$REF" 2>/dev/null); then
               hub=$(echo "$changed" | grep -vE '^(.*\.md|deploy/baremetal/|src/device/|src/agents/|src/cli/machine\.rs|src/cli/verbs\.rs|npm/|pyproject\.toml|scripts/|\.github/workflows/release\.yml)' || true)
               if [ -z "$hub" ]; then
@@ -83,16 +82,16 @@ jobs:
       - name: Build on the server, restart, check, roll back on failure
         if: steps.decide.outputs.go == 'true'
         run: |
-          # The running image is kept as claudecord:previous, and the commit it came from in .previous, so a failed deploy can put it back.
-          ~/ssh_ "set -e; cd '$DIR' && git rev-parse HEAD > .previous && { docker tag claudecord:local claudecord:previous 2>/dev/null || true; } \
-            && git fetch --tags origin && git checkout --detach '$REF' && cd deploy && docker compose up -d --build"
+          # The deploy key can only run deploy/ci-entry.sh on the server (a forced command), which takes one of: head, deploy SHA, logs, rollback.
+          # It keeps the running image as claudecord:previous, and the commit it came from in .previous, so a failed deploy can put it back.
+          ~/ssh_ deploy "$(git rev-parse HEAD)"
           for i in $(seq 1 30); do
             code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$HUB_URL/readyz" || true)
             [ "$code" = "200" ] && { echo "ready after $i checks"; exit 0; }
             sleep 4
           done
           echo "the new version never became ready. Its log, so the reason is in this run:"
-          ~/ssh_ "cd '$DIR/deploy' && docker compose logs --tail 40 hub 2>&1" || true
+          ~/ssh_ logs || true
           echo "putting the previous one back"
-          ~/ssh_ "set -e; cd '$DIR' && git checkout --detach \$(cat .previous) && docker tag claudecord:previous claudecord:local && cd deploy && docker compose up -d --no-build"
+          ~/ssh_ rollback
           exit 1
