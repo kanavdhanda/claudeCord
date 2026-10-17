@@ -202,10 +202,15 @@ impl HubCore {
     /// (its brief once, a changed roster) rides along in the same input. Does nothing if there is nothing to send, the
     /// agent is on hold, or its device is not connected, in which case the messages simply keep waiting.
     pub(super) fn flush(&mut self, agent_id: &str, now: i64, fx: &mut Vec<Effect>) {
+        self.flush_inner(agent_id, false, now, fx);
+    }
+
+    fn flush_inner(&mut self, agent_id: &str, force: bool, now: i64, fx: &mut Vec<Effect>) {
         let Some(a) = self.agents.get(agent_id).cloned() else {
             return;
         };
-        if hold_reason(self.status_of(agent_id)).is_some() || !self.conns.contains_key(&a.node_name)
+        if (!force && hold_reason(self.status_of(agent_id)).is_some())
+            || !self.conns.contains_key(&a.node_name)
         {
             return;
         }
@@ -215,7 +220,7 @@ impl HubCore {
         // Informing-only items wait for something worth a turn, up to a limit. Waking an agent costs far more than the words.
         let queue = &self.queues[agent_id];
         let oldest = queue.iter().map(|q| q.at).min().unwrap_or(now);
-        if !queue.iter().any(|q| q.wake) && now - oldest < super::core::RIDE_MAX_MS {
+        if !force && !queue.iter().any(|q| q.wake) && now - oldest < super::core::RIDE_MAX_MS {
             return;
         }
         let items = self.queues.remove(agent_id).unwrap_or_default();
@@ -316,8 +321,8 @@ impl HubCore {
         }
     }
 
-    /// A person reacted to their own message asking for it to go through sooner (`"now"`, or `"steer"` to stop the agent first). It only
-    /// does something while that message is delivered but not yet picked up; returns whether a request was sent to the agent's device.
+    /// A person reacted or pressed a button on their message asking for it to go through sooner (`"now"`, or `"steer"` to stop the agent first). It only
+    /// does something while that message is queued or delivered and not yet picked up; returns whether a request was sent to the agent's device.
     pub fn prioritise(
         &mut self,
         by: &Human,
@@ -327,26 +332,48 @@ impl HubCore {
         fx: &mut Vec<Effect>,
     ) -> Result<bool, Denied> {
         self.require(project, &by.id, Role::Operator)?;
-        let Some((msg_id, agent_id)) = self
+        let queued_agents: Vec<String> = self
+            .by_project
+            .get(project)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|aid| {
+                self.queues.get(aid).is_some_and(|q| {
+                    q.iter()
+                        .any(|item| item.reference.as_deref() == Some(reference))
+                })
+            })
+            .collect();
+        for aid in queued_agents {
+            self.flush_inner(&aid, true, crate::now_ms(), fx);
+        }
+        let matches: Vec<(String, String)> = self
             .pending
             .iter()
-            .find(|(_, p)| p.project == project && p.references.iter().any(|r| r == reference))
+            .filter(|(_, p)| p.project == project && p.references.iter().any(|r| r == reference))
             .map(|(id, p)| (id.clone(), p.agent_id.clone()))
-        else {
+            .collect();
+        if matches.is_empty() {
             return Ok(false);
-        };
-        let Some(a) = self.agents.get(&agent_id).cloned() else {
-            return Ok(false);
-        };
-        Ok(self.send_to(
-            &a,
-            HubFrame::Priority {
-                agent_id,
-                msg_id,
-                mode: mode.to_string(),
-            },
-            fx,
-        ))
+        }
+        let mut sent = false;
+        for (msg_id, agent_id) in matches {
+            if let Some(a) = self.agents.get(&agent_id).cloned()
+                && self.send_to(
+                    &a,
+                    HubFrame::Priority {
+                        agent_id,
+                        msg_id,
+                        mode: mode.to_string(),
+                    },
+                    fx,
+                )
+            {
+                sent = true;
+            }
+        }
+        Ok(sent)
     }
 
     /// The agents a human message should go to: those it mentions, otherwise the lead (or the first agent).
