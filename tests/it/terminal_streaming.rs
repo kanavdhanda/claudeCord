@@ -1080,6 +1080,7 @@ async fn reconnect_generation_supersedes_old_stream_and_rejects_stale_frames() {
 #[cfg(unix)]
 #[tokio::test]
 async fn concurrent_active_connections_and_potato_link_backpressure_resync() {
+    use claudecord::device::stream::MAX_SESSIONS_PER_NODE;
     use claudecord::protocol::terminal::StreamSequencer;
 
     let Some((term, socket)) = start_tmux("conc", &["cat"]) else {
@@ -1089,6 +1090,9 @@ async fn concurrent_active_connections_and_potato_link_backpressure_resync() {
     let link = Link::from_sender(hub_tx);
     let mut mgr = StreamManager::new("mac".into());
     mgr.set_grant_key(test_key());
+    assert_eq!(mgr.max_sessions(), MAX_SESSIONS_PER_NODE);
+    assert_eq!(MAX_SESSIONS_PER_NODE, 16);
+    mgr.set_max_sessions(3);
 
     let now_ms = claudecord::now_ms();
     let now_s = now_ms / 1000;
@@ -1102,10 +1106,9 @@ async fn concurrent_active_connections_and_potato_link_backpressure_resync() {
         })
     };
 
-    // 1. Open 16 concurrent active connections (e.g. desktop + mobile + allowed teammates across sessions)
-    // up to the node cap (MAX_SESSIONS_PER_NODE = 16).
+    // 1. Open concurrent active connections (e.g. desktop + mobile + allowed teammate) up to the node cap.
     let mut keys = Vec::new();
-    for i in 1..=16u64 {
+    for i in 1..=3u64 {
         let (grant, e2e_b64) = make_grant(
             &format!("jti-conc-{i}"),
             "mac",
@@ -1137,28 +1140,28 @@ async fn concurrent_active_connections_and_potato_link_backpressure_resync() {
         .await;
     }
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(80)).await;
     while hub_rx.try_recv().is_ok() {}
 
-    // 2. Verify that a 17th concurrent session is rejected with "machine terminal session limit reached".
-    let (grant17, e2e17) = make_grant(
-        "jti-conc-17",
+    // 2. Verify that exceeding the node session limit is rejected with "machine terminal session limit reached".
+    let (grant_over, e2e_over) = make_grant(
+        "jti-conc-over",
         "mac",
         "demo/otter",
         true,
-        17,
+        4,
         now_s,
         now_s + 120,
     );
     mgr.open(
         OpenParams {
-            session_id: "sess-conc-17".into(),
+            session_id: "sess-conc-over".into(),
             agent_id: "demo/otter".into(),
-            grant: grant17,
-            generation: 17,
+            grant: grant_over,
+            generation: 4,
             transport: "wss".into(),
             offer_sdp: None,
-            e2e_key: Some(e2e17),
+            e2e_key: Some(e2e_over),
             ice_servers: vec![],
             cols: 80,
             rows: 24,
@@ -1177,17 +1180,17 @@ async fn concurrent_active_connections_and_potato_link_backpressure_resync() {
             detail,
             ..
         } = frame
-            && session_id == "sess-conc-17"
+            && session_id == "sess-conc-over"
             && state == "failed"
         {
             assert!(
                 detail.unwrap_or_default().contains("limit reached"),
-                "17th concurrent session must report limit reached"
+                "session exceeding node cap must report limit reached"
             );
             saw_limit_err = true;
         }
     }
-    assert!(saw_limit_err, "17th concurrent session must be rejected");
+    assert!(saw_limit_err, "session exceeding node cap must be rejected");
 
     // 3. Verify that multiple concurrent active connections (e.g. session 1 on Desktop and session 2 on Mobile)
     // can BOTH interact with the agent and receive live responses simultaneously.

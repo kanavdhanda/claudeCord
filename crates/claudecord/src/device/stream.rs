@@ -25,8 +25,8 @@ use str0m::{Candidate, Event, IceConnectionState, Input as RtcInput, Output as R
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
-/// Maximum concurrent terminal streaming sessions allowed on one machine.
-const MAX_SESSIONS_PER_NODE: usize = 16;
+/// Maximum concurrent terminal streaming sessions allowed on one machine by default.
+pub const MAX_SESSIONS_PER_NODE: usize = 16;
 
 /// Outbound terminal buffer cap per streaming session (256 KiB) to prevent slow browsers from growing host memory.
 const SESSION_OUT_QUEUE_BYTES: usize = 256 * 1024;
@@ -54,6 +54,7 @@ pub struct StreamManager {
     grant_key: Option<[u8; 32]>,
     verifier: HostGrantVerifier,
     sessions: HashMap<String, SessionHandle>,
+    max_sessions: usize,
 }
 
 /// Context for the target agent session being attached.
@@ -86,7 +87,18 @@ impl StreamManager {
             grant_key: None,
             verifier: HostGrantVerifier::new(),
             sessions: HashMap::new(),
+            max_sessions: MAX_SESSIONS_PER_NODE,
         }
+    }
+
+    /// Returns the configured maximum concurrent sessions per node.
+    pub fn max_sessions(&self) -> usize {
+        self.max_sessions
+    }
+
+    /// Overrides the maximum concurrent sessions per node.
+    pub fn set_max_sessions(&mut self, max: usize) {
+        self.max_sessions = max.max(1);
     }
 
     /// Sets the machine's 32-byte grant verification key (received in `HubFrame::Welcome` or configured for tests).
@@ -186,7 +198,7 @@ impl StreamManager {
         if let Some(old) = self.sessions.remove(&params.session_id) {
             let _ = old.tx.try_send(SessionCmd::Close("superseded".into()));
         }
-        if self.sessions.len() >= MAX_SESSIONS_PER_NODE {
+        if self.sessions.len() >= self.max_sessions {
             Self::report_failure(
                 &link,
                 &params.session_id,
