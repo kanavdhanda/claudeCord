@@ -1,9 +1,11 @@
 //! Wire protocol types, framing, and text sanitization for claudeCord.
 
 pub mod frame;
+pub mod terminal;
 pub mod text;
 
 pub use frame::*;
+pub use terminal::*;
 pub use text::*;
 
 /// Length the way JavaScript counts it, in UTF-16 code units.

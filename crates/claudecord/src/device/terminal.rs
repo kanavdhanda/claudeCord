@@ -226,4 +226,12 @@ impl Terminal {
             Terminal::Tmux(_) => None,
         }
     }
+
+    /// The tmux terminal, for attaching a Control Mode (`-CC`) stream and managing tabs.
+    pub fn tmux(&self) -> Option<Arc<TmuxTerminal>> {
+        match self {
+            Terminal::Tmux(t) => Some(t.clone()),
+            Terminal::Pty(_) => None,
+        }
+    }
 }

@@ -109,6 +109,11 @@ function ProjectCard({ name, place, s, machines, targets }: { name: string; plac
               <b>{a.name}</b>
               {a.lead && <span className="tag">lead</span>}
               <span className="muted small">{a.status} on {a.node}</span>
+              {a.status !== 'offline' && (
+                <Link className="btn small" to={`/terminal/${encodeURIComponent(name)}/${encodeURIComponent(a.name)}`}>
+                  Terminal
+                </Link>
+              )}
               <MoveAgent project={name} agent={a.name} targets={targets} />
             </div>
           ))

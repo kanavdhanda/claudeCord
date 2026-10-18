@@ -93,6 +93,11 @@ pub fn features() -> Vec<Feature> {
             probe: dashboard_probe,
         },
         Feature {
+            name: "interactive terminal streaming grants and relay",
+            covers: &["server/terminal"],
+            probe: terminal_probe,
+        },
+        Feature {
             name: "discord bridge (against a stand-in Discord)",
             covers: &[
                 "discord/api",
@@ -624,6 +629,99 @@ fn dashboard_probe() -> Probe {
         );
         hub.shutdown().await;
         Ok("page served, data refused without a token and given to a dashboard token".into())
+    })
+}
+
+/// Terminal streaming grant creation, WebSocket relay, and immediate revocation.
+fn terminal_probe() -> Probe {
+    boxed(async {
+        let dir = scratch("terminal-probe");
+        let mut store = Store::open(&dir.join("hub.db"), None).map_err(|e| e.to_string())?;
+        let machine = store.create_token("mac", 0).map_err(|e| e.to_string())?;
+        let web = store
+            .create_token("web:probe", 0)
+            .map_err(|e| e.to_string())?;
+        let mut core = HubCore::default();
+        core.add_owner("1");
+        let hub = server::start(server_cfg("127.0.0.1:0"), core, store)
+            .await
+            .map_err(|e| e.to_string())?;
+        let ws_url = format!("ws://{}/api/v1/node/connect", hub.addr);
+        let mut node_ws = connect_ws(&ws_url, &machine).await?;
+        let _ = node_ws.next().await;
+        let reg = serde_json::to_string(&crate::protocol::NodeFrame::AgentRegister {
+            agent: crate::protocol::AgentSpec {
+                agent_id: "alpha/claude".into(),
+                name: "claude".into(),
+                project: "alpha".into(),
+                adapter: crate::protocol::AdapterId::Claude,
+                model: None,
+                role: None,
+            },
+            cwd: "/tmp".into(),
+        })
+        .unwrap();
+        node_ws
+            .send(Message::Text(reg.into()))
+            .await
+            .map_err(|e| e.to_string())?;
+        ensure!(
+            eventually(async || {
+                hub.read(|c, _| c.agent("alpha/claude").is_some())
+                    .await
+                    .unwrap_or(false)
+            })
+            .await,
+            "agent did not register"
+        );
+
+        let client = reqwest::Client::new();
+        let unauth = client
+            .post(format!("http://{}/api/v1/terminal/sessions", hub.addr))
+            .json(&serde_json::json!({"project": "alpha", "agent": "claude"}))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        ensure!(
+            unauth.status().as_u16() == 401,
+            "terminal session creation succeeded without auth"
+        );
+
+        let created: serde_json::Value = client
+            .post(format!("http://{}/api/v1/terminal/sessions", hub.addr))
+            .header("authorization", format!("Bearer {web}"))
+            .json(&serde_json::json!({"project": "alpha", "agent": "claude", "cols": 100, "rows": 30}))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?
+            .json()
+            .await
+            .map_err(|e| e.to_string())?;
+        let sid = created["sessionId"]
+            .as_str()
+            .ok_or("missing sessionId")?
+            .to_string();
+
+        let revoked = client
+            .post(format!(
+                "http://{}/api/v1/terminal/sessions/{sid}/revoke",
+                hub.addr
+            ))
+            .header("authorization", format!("Bearer {web}"))
+            .json(&serde_json::json!({"reason": "probe test"}))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        ensure!(
+            revoked.status().as_u16() == 200,
+            "terminal session revoke failed"
+        );
+
+        hub.shutdown().await;
+        Ok(
+            "unauthenticated grant refused, short-lived grant issued, session revoked cleanly"
+                .into(),
+        )
     })
 }
 

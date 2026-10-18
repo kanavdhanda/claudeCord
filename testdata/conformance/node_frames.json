@@ -634,5 +634,60 @@
    "text": 5
   },
   "valid": false
+ },
+ {
+  "input": {
+   "t": "term.ready",
+   "sessionId": "ts-123",
+   "agentId": "p/a",
+   "generation": 1,
+   "transport": "webrtc_direct",
+   "answerSdp": "v=0",
+   "candidates": [
+    "candidate:1 1 UDP 2122252543 127.0.0.1 50000 typ host"
+   ]
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "term.ready",
+   "sessionId": "ts-123",
+   "agentId": "p/a",
+   "generation": 0,
+   "transport": "webrtc_direct"
+  },
+  "valid": false
+ },
+ {
+  "input": {
+   "t": "term.frame",
+   "sessionId": "ts-123",
+   "generation": 1,
+   "payload": "e2e1.AAAAAAAAAAAAAAAA.BBBB"
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "term.frame",
+   "sessionId": "ts-123",
+   "generation": 1,
+   "payload": ""
+  },
+  "valid": false
+ },
+ {
+  "input": {
+   "t": "term.state",
+   "sessionId": "ts-123",
+   "agentId": "p/a",
+   "state": "connected",
+   "transport": "wss_fallback",
+   "rttMs": 4,
+   "bytesTx": 120,
+   "bytesRx": 64
+  },
+  "valid": true
  }
 ]

@@ -61,6 +61,14 @@ pub struct Link {
 }
 
 impl Link {
+    /// Creates a link backed directly by an outbound `NodeFrame` channel.
+    pub fn from_sender(out: mpsc::Sender<NodeFrame>) -> Self {
+        Self {
+            out,
+            wake: Arc::new(Notify::new()),
+        }
+    }
+
     /// Queues a frame to the hub. Waits if the queue is full, which pushes back on whoever is producing too fast.
     pub async fn send(&self, frame: NodeFrame) {
         let _ = self.out.send(frame).await;
@@ -528,7 +536,7 @@ async fn session(
                     last_seen = tokio::time::Instant::now();
                     match m {
                         Message::Text(t) => match HubFrame::parse(t.as_str()) {
-                            Some(HubFrame::Welcome { node_id, hub_version, min_version }) => {
+                            Some(HubFrame::Welcome { node_id, hub_version, min_version, grant_key }) => {
                                 if let Some(hv) = &hub_version {
                                     crate::info!(
                                         "device",
@@ -537,6 +545,19 @@ async fn session(
                                     );
                                 }
                                 if events.send(LinkEvent::Up).await.is_err() { return replaced; }
+                                if grant_key.is_some()
+                                    && events
+                                        .send(LinkEvent::Frame(HubFrame::Welcome {
+                                            node_id,
+                                            hub_version,
+                                            min_version,
+                                            grant_key,
+                                        }))
+                                        .await
+                                        .is_err()
+                                {
+                                    return replaced;
+                                }
                             }
                             Some(HubFrame::Ack { n }) => unacked.ack(n),
                             Some(HubFrame::Error { message }) if message.contains("replaced") => replaced = true,
