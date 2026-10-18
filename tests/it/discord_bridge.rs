@@ -71,7 +71,7 @@ impl Rig {
     /// Sends a gateway event and waits for the frame it should cause, sending it again if nothing comes. The stand-in Discord, unlike the
     /// real one, does not replay what a connection missed when it drops and resumes, and the bridge drops a connection whose heartbeat is
     /// answered late (the stand-in beats every 150 ms, so a slow machine does). An event sent at that moment is lost, and sending it once
-    /// made the test depend on the timing. Sending it again is safe as long as the message has a real (numeric) Discord id: one seen twice is taken once.
+    /// made the test depend on the timing. Sending it again is safe as long as the message has a real (numeric) Discord id (see `snow`): one seen twice is taken once (`a_message_that_arrives_twice_is_taken_once`).
     async fn event_until_frame(
         &mut self,
         name: &str,
@@ -227,16 +227,6 @@ async fn channel(r: &Rig) -> String {
     .as_str()
     .unwrap()
     .to_string()
-}
-
-/// A real-looking Discord message id (time in the high bits) newer than anything a channel was watched from, so the bridge treats it as new
-/// and takes it once. `n` tells apart ids made in the same millisecond.
-fn snowflake(n: u64) -> String {
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-    (((ms - 1_420_070_400_000) << 22) + n).to_string()
 }
 
 fn message(channel: &str, id: &str, user: &str, content: &str) -> Value {
@@ -774,28 +764,11 @@ async fn the_bridge_reconnects_to_discord_by_itself_and_keeps_working() {
     assert!(states.ends_with(&["up", "down", "up"]), "{states:?}");
     r.event_until_frame(
         "MESSAGE_CREATE",
-        message(&ch, &snowflake(1), "1", "after the drop"),
+        message(&ch, &snow(10), "1", "after the drop"),
         "a message after reconnecting",
         |f| deliver_text(f, "after the drop"),
     )
     .await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_message_delivered_twice_by_discord_reaches_the_agent_once() {
-    // A resumed connection can replay what was already taken; sending the same message again must not wake the agent a second time.
-    let mut r = rig("twice").await;
-    register(&r, "otter").await;
-    let ch = channel(&r).await;
-    let m = message(&ch, &snowflake(1), "1", "only once please");
-    r.event("MESSAGE_CREATE", m.clone());
-    r.frame("the message", |f| deliver_text(f, "only once please"))
-        .await;
-    r.event("MESSAGE_CREATE", m);
-    assert!(
-        r.quiet(|f| deliver_text(f, "only once please")).await,
-        "the same message was delivered a second time"
-    );
 }
 
 #[tokio::test]
