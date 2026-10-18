@@ -90,6 +90,7 @@ pub struct TerminalBroker {
     grant_secret: [u8; 32],
     sessions: Mutex<HashMap<String, TermSession>>,
     ice_servers: Vec<IceServerSpec>,
+    next_generation: AtomicU64,
     pub metrics: TermMetrics,
 }
 
@@ -126,6 +127,7 @@ impl TerminalBroker {
             grant_secret,
             sessions: Mutex::new(HashMap::new()),
             ice_servers,
+            next_generation: AtomicU64::new(1),
             metrics: TermMetrics::default(),
         }
     }
@@ -411,7 +413,7 @@ pub(super) async fn create_session_for(st: &AppState, who: Who, req: CreateSessi
         }
     };
 
-    let generation = 1u64;
+    let generation = st.terminals.next_generation.fetch_add(1, Ordering::Relaxed);
     let claims = TerminalGrantClaims {
         jti: jti.clone(),
         sub: user_id.clone(),
@@ -590,7 +592,11 @@ pub(super) async fn signal_session_for(
         let needs_open =
             req.offer_sdp.is_some() || req.reconnect.unwrap_or(false) || req.transport.is_some();
         if needs_open {
-            s.generation += 1;
+            s.generation = st
+                .terminals
+                .next_generation
+                .fetch_add(1, Ordering::Relaxed)
+                .max(s.generation + 1);
             s.jti = format!("jti-{}", &random_hex()[..24]);
             s.expires_at_ms = (now_s + TERMINAL_GRANT_TTL_SECS) * 1000;
             let claims = TerminalGrantClaims {

@@ -245,9 +245,7 @@ impl StreamManager {
     /// Forwards a WSS terminal envelope frame to an active session if the generation matches.
     pub async fn on_frame(&mut self, session_id: &str, generation: u64, payload: String) {
         if let Some(h) = self.sessions.get(session_id) {
-            if h.generation != generation
-                || !self.verifier.is_current_generation(&h.agent_id, generation)
-            {
+            if h.generation != generation {
                 return;
             }
             let _ =

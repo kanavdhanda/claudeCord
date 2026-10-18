@@ -1076,3 +1076,230 @@ async fn reconnect_generation_supersedes_old_stream_and_rejects_stale_frames() {
     mgr.close_for_agent("demo/otter");
     stop_server(&socket);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn concurrent_active_connections_and_potato_link_backpressure_resync() {
+    use claudecord::protocol::terminal::StreamSequencer;
+
+    let Some((term, socket)) = start_tmux("conc", &["cat"]) else {
+        return;
+    };
+    let (hub_tx, mut hub_rx) = mpsc::channel::<NodeFrame>(512);
+    let link = Link::from_sender(hub_tx);
+    let mut mgr = StreamManager::new("mac".into());
+    mgr.set_grant_key(test_key());
+
+    let now_ms = claudecord::now_ms();
+    let now_s = now_ms / 1000;
+
+    let mk_target = || {
+        Some(AgentTarget {
+            agent_id: "demo/otter".into(),
+            term: term.clone(),
+            cwd: PathBuf::from("/tmp"),
+            remove_env: vec!["HOME".into()],
+        })
+    };
+
+    // 1. Open 16 concurrent active connections (e.g. desktop + mobile + allowed teammates across sessions)
+    // up to the node cap (MAX_SESSIONS_PER_NODE = 16).
+    let mut keys = Vec::new();
+    for i in 1..=16u64 {
+        let (grant, e2e_b64) = make_grant(
+            &format!("jti-conc-{i}"),
+            "mac",
+            "demo/otter",
+            true,
+            i,
+            now_s,
+            now_s + 120,
+        );
+        let key: [u8; 32] = B64.decode(&e2e_b64).unwrap().try_into().unwrap();
+        keys.push((format!("sess-conc-{i}"), i, key));
+        mgr.open(
+            OpenParams {
+                session_id: format!("sess-conc-{i}"),
+                agent_id: "demo/otter".into(),
+                grant,
+                generation: i,
+                transport: "wss".into(),
+                offer_sdp: None,
+                e2e_key: Some(e2e_b64),
+                ice_servers: vec![],
+                cols: 80,
+                rows: 24,
+            },
+            mk_target(),
+            link.clone(),
+            now_ms,
+        )
+        .await;
+    }
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    while hub_rx.try_recv().is_ok() {}
+
+    // 2. Verify that a 17th concurrent session is rejected with "machine terminal session limit reached".
+    let (grant17, e2e17) = make_grant(
+        "jti-conc-17",
+        "mac",
+        "demo/otter",
+        true,
+        17,
+        now_s,
+        now_s + 120,
+    );
+    mgr.open(
+        OpenParams {
+            session_id: "sess-conc-17".into(),
+            agent_id: "demo/otter".into(),
+            grant: grant17,
+            generation: 17,
+            transport: "wss".into(),
+            offer_sdp: None,
+            e2e_key: Some(e2e17),
+            ice_servers: vec![],
+            cols: 80,
+            rows: 24,
+        },
+        mk_target(),
+        link.clone(),
+        now_ms,
+    )
+    .await;
+
+    let mut saw_limit_err = false;
+    while let Ok(frame) = hub_rx.try_recv() {
+        if let NodeFrame::TermState {
+            session_id,
+            state,
+            detail,
+            ..
+        } = frame
+            && session_id == "sess-conc-17"
+            && state == "failed"
+        {
+            assert!(
+                detail.unwrap_or_default().contains("limit reached"),
+                "17th concurrent session must report limit reached"
+            );
+            saw_limit_err = true;
+        }
+    }
+    assert!(saw_limit_err, "17th concurrent session must be rejected");
+
+    // 3. Verify that multiple concurrent active connections (e.g. session 1 on Desktop and session 2 on Mobile)
+    // can BOTH interact with the agent and receive live responses simultaneously.
+    let (ref sid1, gen1, ref key1) = keys[0];
+    let (ref sid2, gen2, ref key2) = keys[1];
+
+    let ping1 = TerminalEnvelope {
+        v: TERMINAL_PROTOCOL_VERSION,
+        generation: gen1,
+        seq: 1,
+        msg: TerminalMessage::Ping { ts: 1001 },
+    };
+    let ping2 = TerminalEnvelope {
+        v: TERMINAL_PROTOCOL_VERSION,
+        generation: gen2,
+        seq: 1,
+        msg: TerminalMessage::Ping { ts: 2002 },
+    };
+    mgr.on_frame(sid1, gen1, seal_envelope(&ping1, key1, sid1).unwrap())
+        .await;
+    mgr.on_frame(sid2, gen2, seal_envelope(&ping2, key2, sid2).unwrap())
+        .await;
+
+    let mut got_pong1 = false;
+    let mut got_pong2 = false;
+    for _ in 0..40 {
+        if got_pong1 && got_pong2 {
+            break;
+        }
+        if let Ok(Some(NodeFrame::TermFrame {
+            session_id,
+            generation,
+            payload,
+        })) = tokio::time::timeout(Duration::from_secs(2), hub_rx.recv()).await
+        {
+            if session_id == *sid1 && generation == gen1 {
+                let env = open_envelope(&payload, key1, sid1, gen1).unwrap();
+                if matches!(env.msg, TerminalMessage::Pong { ts: 1001 }) {
+                    got_pong1 = true;
+                }
+            } else if session_id == *sid2 && generation == gen2 {
+                let env = open_envelope(&payload, key2, sid2, gen2).unwrap();
+                if matches!(env.msg, TerminalMessage::Pong { ts: 2002 }) {
+                    got_pong2 = true;
+                }
+            }
+        }
+    }
+    assert!(
+        got_pong1 && got_pong2,
+        "both concurrent active sessions must independently exchange encrypted frames"
+    );
+
+    // 4. Potato connection test: verify 256 KiB backpressure queue shedding + Sync snapshot recovery.
+    let mut seq = StreamSequencer::new(1, 256 * 1024);
+    let mut accepted = 0usize;
+    let mut dropped = 0usize;
+    // Simulate a 1 MB output burst on a stalled "potato" connection without draining:
+    for _ in 0..32 {
+        if seq.try_enqueue(32 * 1024) {
+            accepted += 1;
+        } else {
+            dropped += 1;
+        }
+    }
+    assert_eq!(
+        accepted, 8,
+        "at most 256 KiB (8 x 32 KiB) is buffered on a stalled potato link"
+    );
+    assert_eq!(
+        dropped, 24,
+        "excess intermediate chunks are shed rather than stalling the session"
+    );
+
+    // When the potato connection recovers and sends Sync, the host immediately returns a fresh snapshot.
+    let sync_env = TerminalEnvelope {
+        v: TERMINAL_PROTOCOL_VERSION,
+        generation: gen1,
+        seq: 2,
+        msg: TerminalMessage::Sync { pane: "%0".into() },
+    };
+    mgr.on_frame(sid1, gen1, seal_envelope(&sync_env, key1, sid1).unwrap())
+        .await;
+
+    let mut saw_resync_snapshot = false;
+    for _ in 0..30 {
+        if let Ok(Some(NodeFrame::TermFrame {
+            session_id,
+            generation,
+            payload,
+        })) = tokio::time::timeout(Duration::from_secs(2), hub_rx.recv()).await
+            && session_id == *sid1
+            && generation == gen1
+        {
+            let env = open_envelope(&payload, key1, sid1, gen1).unwrap();
+            if let TerminalMessage::Output {
+                snapshot: true,
+                pane,
+                ..
+            } = env.msg
+                && pane == "%0"
+            {
+                saw_resync_snapshot = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_resync_snapshot,
+        "Sync request after potato-link packet drop must return a full pane snapshot"
+    );
+
+    mgr.close_for_agent("demo/otter");
+    stop_server(&socket);
+}
