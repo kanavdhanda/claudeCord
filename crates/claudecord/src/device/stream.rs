@@ -841,60 +841,93 @@ async fn run_session(
                     ).await;
                     return;
                 };
-                match ev {
-                    ControlModeEvent::Output { pane_id, data } => {
-                        if data.is_empty() {
-                            continue;
-                        }
-                        for chunk in data.chunks(crate::protocol::MAX_TERMINAL_OUTPUT_BYTES) {
-                            if !sequencer.try_enqueue(chunk.len()) {
+                let mut queued_ev = Some(ev);
+                while let Some(cur_ev) = queued_ev.take() {
+                    match cur_ev {
+                        ControlModeEvent::Output { pane_id, mut data } => {
+                            if data.is_empty() {
                                 continue;
                             }
-                            send_msg(
-                                TerminalMessage::Output {
-                                    pane: pane_id.clone(),
-                                    data: B64.encode(chunk),
-                                    snapshot: false,
-                                },
-                                &mut sequencer,
-                                &mut rtc_opt,
-                                webrtc_channel,
-                                &link,
-                                &mut bytes_tx,
-                            ).await;
-                            sequencer.on_dequeued(chunk.len());
-                        }
-                    }
-                    ControlModeEvent::WindowAdd { .. }
-                    | ControlModeEvent::WindowClose { .. }
-                    | ControlModeEvent::WindowRenamed { .. }
-                    | ControlModeEvent::SessionWindowChanged { .. } => {
-                        if let Some(tmux) = target.term.tmux()
-                            && let Ok(tabs) = tmux.list_tabs()
-                            && !tabs.is_empty()
-                        {
-                            let pane_still_exists = tabs.iter().any(|t| t.pane_id == active_pane);
-                            if !pane_still_exists {
-                                active_pane = tabs[0].pane_id.clone();
-                                if let Ok(snap) = tmux.capture_pane_ansi(&active_pane) {
-                                    send_msg(
-                                        TerminalMessage::Output {
-                                            pane: active_pane.clone(),
-                                            data: B64.encode(snap),
-                                            snapshot: true,
-                                        },
-                                        &mut sequencer,
-                                        &mut rtc_opt,
-                                        webrtc_channel,
-                                        &link,
-                                        &mut bytes_tx,
-                                    ).await;
+                            // Coalesce burst output for the same pane so slow/high-RTT connections receive fewer, denser frames.
+                            if let Some(rx) = cc_rx.as_mut() {
+                                while data.len() < crate::protocol::MAX_TERMINAL_OUTPUT_BYTES {
+                                    match rx.try_recv() {
+                                        Ok(ControlModeEvent::Output {
+                                            pane_id: next_pane,
+                                            data: next_data,
+                                        }) if next_pane == pane_id => {
+                                            data.extend_from_slice(&next_data);
+                                        }
+                                        Ok(other) => {
+                                            queued_ev = Some(other);
+                                            break;
+                                        }
+                                        Err(_) => break,
+                                    }
                                 }
                             }
+                            for chunk in data.chunks(crate::protocol::MAX_TERMINAL_OUTPUT_BYTES) {
+                                if !sequencer.try_enqueue(chunk.len()) {
+                                    continue;
+                                }
+                                send_msg(
+                                    TerminalMessage::Output {
+                                        pane: pane_id.clone(),
+                                        data: B64.encode(chunk),
+                                        snapshot: false,
+                                    },
+                                    &mut sequencer,
+                                    &mut rtc_opt,
+                                    webrtc_channel,
+                                    &link,
+                                    &mut bytes_tx,
+                                ).await;
+                                sequencer.on_dequeued(chunk.len());
+                            }
+                        }
+                        ControlModeEvent::WindowAdd { .. }
+                        | ControlModeEvent::WindowClose { .. }
+                        | ControlModeEvent::WindowRenamed { .. }
+                        | ControlModeEvent::SessionWindowChanged { .. } => {
+                            if let Some(tmux) = target.term.tmux()
+                                && let Ok(tabs) = tmux.list_tabs()
+                                && !tabs.is_empty()
+                            {
+                                let pane_still_exists = tabs.iter().any(|t| t.pane_id == active_pane);
+                                if !pane_still_exists {
+                                    active_pane = tabs[0].pane_id.clone();
+                                    if let Ok(snap) = tmux.capture_pane_ansi(&active_pane) {
+                                        send_msg(
+                                            TerminalMessage::Output {
+                                                pane: active_pane.clone(),
+                                                data: B64.encode(snap),
+                                                snapshot: true,
+                                            },
+                                            &mut sequencer,
+                                            &mut rtc_opt,
+                                            webrtc_channel,
+                                            &link,
+                                            &mut bytes_tx,
+                                        ).await;
+                                    }
+                                }
+                                send_msg(
+                                    TerminalMessage::Tabs {
+                                        tabs,
+                                        active_pane: active_pane.clone(),
+                                    },
+                                    &mut sequencer,
+                                    &mut rtc_opt,
+                                    webrtc_channel,
+                                    &link,
+                                    &mut bytes_tx,
+                                ).await;
+                            }
+                        }
+                        ControlModeEvent::Exit { reason } => {
                             send_msg(
-                                TerminalMessage::Tabs {
-                                    tabs,
-                                    active_pane: active_pane.clone(),
+                                TerminalMessage::Close {
+                                    reason: reason.unwrap_or_else(|| "session exited".into()),
                                 },
                                 &mut sequencer,
                                 &mut rtc_opt,
@@ -902,22 +935,10 @@ async fn run_session(
                                 &link,
                                 &mut bytes_tx,
                             ).await;
+                            return;
                         }
+                        _ => {}
                     }
-                    ControlModeEvent::Exit { reason } => {
-                        send_msg(
-                            TerminalMessage::Close {
-                                reason: reason.unwrap_or_else(|| "session exited".into()),
-                            },
-                            &mut sequencer,
-                            &mut rtc_opt,
-                            webrtc_channel,
-                            &link,
-                            &mut bytes_tx,
-                        ).await;
-                        return;
-                    }
-                    _ => {}
                 }
             },
             pty_chunk = async {

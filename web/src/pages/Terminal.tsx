@@ -545,6 +545,7 @@ export function TerminalPage() {
   const screensRef = useRef<Map<string, VtScreen>>(new Map())
   const activePaneRef = useRef<string>('%0')
   const seqOutRef = useRef<number>(1)
+  const seqInRef = useRef<number>(0)
   const sessionRef = useRef<TerminalSession | null>(null)
   const e2eKeyRef = useRef<CryptoKey | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
@@ -646,6 +647,18 @@ export function TerminalPage() {
   const handleIncomingEnvelope = (env: any) => {
     if (!env || !env.msg) return
     const msg = env.msg
+    if (typeof env.seq === 'number') {
+      // Mosh-style state sync: if intermediate output chunks were dropped due to
+      // backpressure on a slow/lossy connection, request a full pane snapshot
+      // unless this frame is already a full snapshot.
+      const prevSeq = seqInRef.current
+      if (prevSeq > 0 && env.seq > prevSeq + 1 && !(msg.op === 'output' && msg.snapshot)) {
+        seqInRef.current = env.seq
+        void sendMessage({ op: 'sync', pane: activePaneRef.current })
+      } else if (env.seq > prevSeq) {
+        seqInRef.current = env.seq
+      }
+    }
     switch (msg.op) {
       case 'output': {
         const pane = msg.pane || '%0'
@@ -730,12 +743,14 @@ export function TerminalPage() {
     let cancelled = false
     let pingTimer: number | null = null
     let fallbackTimer: number | null = null
+    let reconnectTimer: number | null = null
 
     const start = async () => {
       setConnState('connecting')
       setTransport('connecting')
       setErrBanner(null)
       seqOutRef.current = 1
+      seqInRef.current = 0
 
       let pc: RTCPeerConnection | null = null
       let offerSdp: string | undefined
@@ -851,6 +866,9 @@ export function TerminalPage() {
             setErrBanner('Terminal session grant was revoked or expired.')
           } else if (!dcRef.current || dcRef.current.readyState !== 'open') {
             setConnState('reconnecting')
+            reconnectTimer = window.setTimeout(() => {
+              if (!cancelled) setReconnectTick((n) => n + 1)
+            }, 1500)
           }
         }
 
@@ -871,6 +889,7 @@ export function TerminalPage() {
       cancelled = true
       if (pingTimer) window.clearInterval(pingTimer)
       if (fallbackTimer) window.clearTimeout(fallbackTimer)
+      if (reconnectTimer) window.clearTimeout(reconnectTimer)
       dcRef.current?.close()
       pcRef.current?.close()
       wsRef.current?.close()
