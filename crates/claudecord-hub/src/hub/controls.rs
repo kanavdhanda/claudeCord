@@ -336,6 +336,13 @@ say: None,
         let scope = project.unwrap_or("");
         self.require(scope, &by.id, Role::Owner)?;
         let mut fx = Vec::new();
+        let count = self.quit_agents(project, &mut fx);
+        Self::audit(scope, &by.name, "killall".into(), now, &mut fx);
+        Ok((count, fx))
+    }
+
+    /// Asks every device with agents (in one project, or in all) to quit them; returns how many agents that is.
+    fn quit_agents(&self, project: Option<&str>, fx: &mut Vec<Effect>) -> usize {
         let targets: Vec<&AgentRow> = self
             .agents
             .values()
@@ -357,9 +364,94 @@ say: None,
                 });
             }
         }
-        let count = targets.len();
-        Self::audit(scope, &by.name, "killall".into(), now, &mut fx);
-        Ok((count, fx))
+        targets.len()
+    }
+
+    /// `/timer set`: at `at` every agent in the project is stopped (or only paused, if `pause`), whatever they are doing. Owner only, like
+    /// `/killall`. A project has one timer; setting another replaces it. It is saved, so it still goes off after a restart.
+    pub fn set_timer(
+        &mut self,
+        by: &Human,
+        project: &str,
+        at: i64,
+        pause: bool,
+        now: i64,
+    ) -> Result<Vec<Effect>, Denied> {
+        self.require(project, &by.id, Role::Owner)?;
+        self.stop_at.insert(
+            project.to_string(),
+            StopTimer {
+                at,
+                pause,
+                by: by.name.clone(),
+            },
+        );
+        let mut fx = Vec::new();
+        let what = if pause { "pause" } else { "stop" };
+        Self::audit(
+            project,
+            &by.name,
+            format!("timer {what} at {at}"),
+            now,
+            &mut fx,
+        );
+        Ok(fx)
+    }
+
+    /// `/timer off`: cancels the project's timer. Returns whether there was one. Owner only.
+    pub fn clear_timer(
+        &mut self,
+        by: &Human,
+        project: &str,
+        now: i64,
+    ) -> Result<(bool, Vec<Effect>), Denied> {
+        self.require(project, &by.id, Role::Owner)?;
+        let mut fx = Vec::new();
+        let had = self.stop_at.remove(project).is_some();
+        if had {
+            Self::audit(project, &by.name, "timer off".into(), now, &mut fx);
+        }
+        Ok((had, fx))
+    }
+
+    /// The project's stop timer, if it has one.
+    pub fn timer_of(&self, project: &str) -> Option<&StopTimer> {
+        self.stop_at.get(project)
+    }
+
+    /// Carries out every stop timer that has run out. Called as time passes (`tick`).
+    pub(super) fn fire_timers(&mut self, now: i64, fx: &mut Vec<Effect>) {
+        let due: Vec<(String, StopTimer)> = self
+            .stop_at
+            .iter()
+            .filter(|(_, t)| t.at <= now)
+            .map(|(p, t)| (p.clone(), t.clone()))
+            .collect();
+        for (project, t) in due {
+            self.stop_at.remove(&project);
+            let n = if t.pause {
+                self.hold_agents(true, &project, None, fx)
+            } else {
+                self.quit_agents(Some(&project), fx)
+            };
+            Self::notice(
+                &project,
+                format!(
+                    "The timer {} set ran out: {} {n} agent(s).",
+                    t.by,
+                    if t.pause { "paused" } else { "stopped" }
+                ),
+                true,
+                fx,
+            );
+            Self::audit(
+                &project,
+                "timer",
+                format!("timer fired ({n} agents)"),
+                now,
+                fx,
+            );
+        }
     }
 
     /// `/pause` and `/resume`: holds or releases agents. Held agents keep their messages queued on the hub, and
@@ -374,6 +466,29 @@ say: None,
     ) -> Result<(usize, Vec<Effect>), Denied> {
         self.require(project, &by.id, Role::Operator)?;
         let mut fx = Vec::new();
+        let n = self.hold_agents(on, project, name, &mut fx);
+        if !on {
+            let ids: Vec<String> = self
+                .agents_of_project(project)
+                .into_iter()
+                .filter(|a| name.is_none_or(|n| a.name.eq_ignore_ascii_case(n)))
+                .map(|a| a.agent_id.clone())
+                .collect();
+            for id in ids {
+                self.flush(&id, now, &mut fx);
+            }
+        }
+        Ok((n, fx))
+    }
+
+    /// Holds or releases the agents of a project (or the one named), telling their devices. Returns how many.
+    fn hold_agents(
+        &mut self,
+        on: bool,
+        project: &str,
+        name: Option<&str>,
+        fx: &mut Vec<Effect>,
+    ) -> usize {
         let low = name.map(str::to_lowercase);
         let targets: Vec<AgentRow> = self
             .agents_of_project(project)
@@ -389,7 +504,7 @@ say: None,
                     agent_id: Some(a.agent_id.clone()),
                     project: None,
                 },
-                &mut fx,
+                fx,
             );
             self.status.insert(
                 a.agent_id.clone(),
@@ -402,12 +517,9 @@ say: None,
                     None,
                 ),
             );
-            if !on {
-                self.flush(&a.agent_id, now, &mut fx);
-            }
         }
-        Self::refresh(project, &mut fx);
-        Ok((targets.len(), fx))
+        Self::refresh(project, fx);
+        targets.len()
     }
 
     /// `/spawn`: asks a device to start an agent. The device only starts agents in folders it registered itself.

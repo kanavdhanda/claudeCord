@@ -238,6 +238,15 @@ pub enum HandoffState {
     Consumed,
 }
 
+/// A project's stop timer: at `at` (epoch ms) every agent in the project is stopped, or only paused if `pause` is set.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StopTimer {
+    pub at: i64,
+    pub pause: bool,
+    /// Who set it, for the notice when it goes off.
+    pub by: String,
+}
+
 /// An agent's saved state, written when its session is about to run out so a fresh session can continue cheaply.
 /// Only the latest one per agent is kept.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

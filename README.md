@@ -114,7 +114,7 @@ includes every agent's own posts) are never treated as a person.
 
 ## Slash commands in Discord
 
-`/agents` `/devices` `/status` `/pause` `/resume` `/stop` `/killall` `/btw` `/grant` `/revoke` `/role` `/dump` `/pickup` `/raw`
+`/agents` `/devices` `/status` `/pause` `/resume` `/stop` `/killall` `/timer` `/btw` `/grant` `/revoke` `/role` `/dump` `/pickup` `/raw`
 `/spawn` `/clear` `/lead` `/screen`. Roles are checked by the hub for each one. `/clear agent [name]` (operator) starts one agent over with a clean memory (default: the lead) and leaves the channel alone, and closes its open questions. `/screen [agent]` posts a picture of that agent's terminal (tmux agents; it is also posted by itself, at most once per five minutes per agent, when an agent finishes without answering, looks stuck, asks for permission, hits a usage limit or its program ends). `/lead agent:NAME` (owner) chooses which agent leads; if the lead leaves, the one that has been in the project longest takes over. `/clear chat` (owner) starts a fresh chat:
 it deletes the channel's recent messages (not pinned ones) and starts every agent over.
 

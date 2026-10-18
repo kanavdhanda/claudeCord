@@ -56,6 +56,27 @@ pub fn definitions() -> Value {
         ),
         cmd("killall", "Stop every agent here (owner)", vec![]),
         cmd(
+            "timer",
+            "Stop every agent here after a set time (owner)",
+            vec![
+                sub(
+                    "set",
+                    "Stop all agents after a while, e.g. 90m, 2h, 1h30m",
+                    vec![
+                        opt(
+                            "after",
+                            STRING,
+                            "How long from now: 90m, 2h, 1h30m, 1d",
+                            true,
+                        ),
+                        opt("action", STRING, "stop (default) or pause", false),
+                    ],
+                ),
+                sub("off", "Cancel the timer", vec![]),
+                sub("status", "Show when the timer goes off", vec![]),
+            ],
+        ),
+        cmd(
             "move",
             "Move an agent to another project (owner of both)",
             vec![
@@ -200,6 +221,99 @@ fn status_word(s: AgentStatus) -> &'static str {
     }
 }
 
+/// The longest a stop timer may be set for.
+const TIMER_MAX_MS: i64 = 7 * 24 * 3_600_000;
+
+/// How long a person meant by `90m`, `2h`, `1h30m`, `1d` or a bare number of minutes, in milliseconds.
+pub fn parse_duration(text: &str) -> Option<i64> {
+    let text = text.trim().to_lowercase();
+    if text.is_empty() {
+        return None;
+    }
+    let (mut total, mut digits) = (0i64, String::new());
+    for c in text.chars().filter(|c| !c.is_whitespace()) {
+        if c.is_ascii_digit() {
+            digits.push(c);
+            continue;
+        }
+        let unit: i64 = match c {
+            'd' => 86_400_000,
+            'h' => 3_600_000,
+            'm' => 60_000,
+            _ => return None,
+        };
+        total = total.checked_add(digits.parse::<i64>().ok()?.checked_mul(unit)?)?;
+        digits.clear();
+    }
+    if !digits.is_empty() {
+        // No unit on the last number: minutes.
+        total = total.checked_add(digits.parse::<i64>().ok()?.checked_mul(60_000)?)?;
+    }
+    (total > 0).then_some(total)
+}
+
+/// `/timer set|off|status`.
+fn timer(
+    core: &mut HubCore,
+    sub: Option<&str>,
+    o: &Opts,
+    by: &Human,
+    project: &str,
+    now: i64,
+) -> (String, Vec<Effect>) {
+    let fail = |d: Denied| (denied_text(&d), vec![]);
+    match sub {
+        Some("set") => {
+            let Some(ms) = o.get("after").and_then(|t| parse_duration(t)) else {
+                return (
+                    "I could not read that time. Try 90m, 2h, 1h30m or 1d.".into(),
+                    vec![],
+                );
+            };
+            if !(60_000..=TIMER_MAX_MS).contains(&ms) {
+                return (
+                    "The timer must be between 1 minute and 7 days.".into(),
+                    vec![],
+                );
+            }
+            let pause = match o.get("action").map(|a| a.trim().to_lowercase()).as_deref() {
+                None | Some("") | Some("stop") => false,
+                Some("pause") => true,
+                Some(_) => return ("The action is `stop` or `pause`.".into(), vec![]),
+            };
+            match core.set_timer(by, project, now + ms, pause, now) {
+                Ok(fx) => (
+                    format!(
+                        "All agents here will be {} <t:{}:R> (<t:{}:t>).",
+                        if pause { "paused" } else { "stopped" },
+                        (now + ms) / 1000,
+                        (now + ms) / 1000
+                    ),
+                    fx,
+                ),
+                Err(d) => fail(d),
+            }
+        }
+        Some("off") => match core.clear_timer(by, project, now) {
+            Ok((true, fx)) => ("The timer is cancelled.".into(), fx),
+            Ok((false, _)) => ("There is no timer set here.".into(), vec![]),
+            Err(d) => fail(d),
+        },
+        _ => (
+            match core.timer_of(project) {
+                Some(t) => format!(
+                    "All agents here will be {} <t:{}:R>, as set by {}.",
+                    if t.pause { "paused" } else { "stopped" },
+                    t.at / 1000,
+                    t.by
+                ),
+                None => "There is no timer set here.".into(),
+            },
+            vec![],
+        ),
+    }
+}
+
 /// Runs one slash command and returns the reply to show, plus anything the core wants carried out.
 pub fn handle(
     core: &mut HubCore,
@@ -301,6 +415,7 @@ pub fn handle(
             Ok((n, fx)) => (format!("Asked {n} agent(s) to quit."), fx),
             Err(d) => fail(d),
         },
+        "timer" => timer(core, get("sub"), o, by, project, now),
         "tasks" => {
             let tasks = core.tasks_of(project);
             let filter = get("agent");

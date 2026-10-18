@@ -839,6 +839,138 @@ fn killall_is_owner_only() {
     );
 }
 
+#[test]
+fn a_stop_timer_is_owner_only_and_stops_every_agent_when_it_runs_out() {
+    let mut w = World::new();
+    w.join("mac", 1, "otter");
+    assert!(
+        w.core
+            .set_timer(&w.sam.clone(), "p", T0 + 60_000, false, T0)
+            .is_err()
+    );
+    assert!(w.core.timer_of("p").is_none());
+    w.core
+        .set_timer(&w.kd.clone(), "p", T0 + 60_000, false, T0)
+        .unwrap();
+    assert_eq!(w.core.timer_of("p").map(|t| t.at), Some(T0 + 60_000));
+    // Not yet.
+    let early = w.core.tick(T0 + 59_999);
+    assert!(
+        !frames(&early)
+            .iter()
+            .any(|f| matches!(f, HubFrame::Killall { .. }))
+    );
+    // Now: the device is told to quit the project's agents, the chat is told, and the timer is spent.
+    let fx = w.core.tick(T0 + 60_000);
+    assert!(
+        frames(&fx)
+            .iter()
+            .any(|f| matches!(f, HubFrame::Killall { project: Some(p) } if p == "p"))
+    );
+    assert!(notices(&fx).iter().any(|t| t.contains("ran out")));
+    assert!(w.core.timer_of("p").is_none());
+    let again = w.core.tick(T0 + 120_000);
+    assert!(
+        !frames(&again)
+            .iter()
+            .any(|f| matches!(f, HubFrame::Killall { .. }))
+    );
+}
+
+#[test]
+fn a_pause_timer_holds_the_agents_instead_of_quitting_them() {
+    let mut w = World::new();
+    w.join("mac", 1, "otter");
+    w.core
+        .set_timer(&w.kd.clone(), "p", T0 + 1_000, true, T0)
+        .unwrap();
+    let fx = w.core.tick(T0 + 1_000);
+    let sent = frames(&fx);
+    assert!(
+        sent.iter()
+            .any(|f| matches!(f, HubFrame::Hold { on: true, .. }))
+    );
+    assert!(!sent.iter().any(|f| matches!(f, HubFrame::Killall { .. })));
+}
+
+#[test]
+fn a_cancelled_timer_never_goes_off_and_a_new_one_replaces_the_old() {
+    let mut w = World::new();
+    w.join("mac", 1, "otter");
+    let kd = w.kd.clone();
+    assert!(!w.core.clear_timer(&kd, "p", T0).unwrap().0);
+    w.core.set_timer(&kd, "p", T0 + 1_000, false, T0).unwrap();
+    w.core.set_timer(&kd, "p", T0 + 9_000, false, T0).unwrap();
+    assert_eq!(w.core.timer_of("p").map(|t| t.at), Some(T0 + 9_000));
+    assert!(w.core.clear_timer(&kd, "p", T0).unwrap().0);
+    let fx = w.core.tick(T0 + 10_000);
+    assert!(
+        !frames(&fx)
+            .iter()
+            .any(|f| matches!(f, HubFrame::Killall { .. }))
+    );
+}
+
+#[test]
+fn a_stop_timer_survives_a_save_and_restore() {
+    let mut w = World::new();
+    w.join("mac", 1, "otter");
+    w.core
+        .set_timer(&w.kd.clone(), "p", T0 + 5_000, true, T0)
+        .unwrap();
+    let saved = w.core.snapshot();
+    let mut moved = World::new();
+    assert!(moved.core.restore(&saved));
+    let t = moved.core.timer_of("p").expect("the timer was saved");
+    assert_eq!((t.at, t.pause), (T0 + 5_000, true));
+}
+
+#[test]
+fn the_timer_command_sets_shows_and_cancels_a_timer_and_refuses_what_it_cannot_read() {
+    use claudecord::discord::commands::{Opts, handle};
+    let mut w = World::new();
+    w.join("mac", 1, "otter");
+    let (kd, sam) = (w.kd.clone(), w.sam.clone());
+    let run = |w: &mut World, by: &Human, sub: &str, extra: &[(&str, &str)]| {
+        let mut o = Opts::new();
+        o.insert("sub".into(), sub.into());
+        for (k, v) in extra {
+            o.insert((*k).into(), (*v).into());
+        }
+        handle(&mut w.core, "timer", &o, by, "p", T0).0
+    };
+    assert!(run(&mut w, &kd, "status", &[]).contains("no timer"));
+    assert!(run(&mut w, &kd, "set", &[("after", "soon")]).contains("could not read"));
+    assert!(run(&mut w, &kd, "set", &[("after", "10d")]).contains("between"));
+    assert!(
+        run(&mut w, &kd, "set", &[("after", "1h"), ("action", "burn")])
+            .contains("`stop` or `pause`")
+    );
+    assert!(w.core.timer_of("p").is_none());
+    // An operator who is not an owner may not.
+    assert!(!run(&mut w, &sam, "set", &[("after", "1h")]).contains("will be"));
+    assert!(w.core.timer_of("p").is_none());
+    assert!(run(&mut w, &kd, "set", &[("after", "1h30m")]).contains("will be stopped"));
+    assert_eq!(w.core.timer_of("p").map(|t| t.at), Some(T0 + 90 * 60_000));
+    assert!(run(&mut w, &sam, "status", &[]).contains("will be stopped"));
+    assert!(run(&mut w, &kd, "off", &[]).contains("cancelled"));
+    assert!(run(&mut w, &kd, "off", &[]).contains("no timer"));
+}
+
+#[test]
+fn durations_are_read_the_way_people_write_them() {
+    use claudecord::discord::commands::parse_duration as d;
+    assert_eq!(d("90m"), Some(90 * 60_000));
+    assert_eq!(d("2h"), Some(2 * 3_600_000));
+    assert_eq!(d("1h30m"), Some(90 * 60_000));
+    assert_eq!(d("1d"), Some(86_400_000));
+    assert_eq!(d("45"), Some(45 * 60_000));
+    assert_eq!(d(" 2 H "), Some(2 * 3_600_000));
+    for bad in ["", "soon", "h", "0m", "-5m", "2x", "1.5h"] {
+        assert_eq!(d(bad), None, "{bad:?}");
+    }
+}
+
 // Tasks, ownership, loop guard
 
 #[test]

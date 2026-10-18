@@ -214,7 +214,7 @@ async fn on_start_the_owner_is_known_and_the_slash_commands_are_registered() {
         .collect();
     for want in [
         "agents", "pause", "resume", "stop", "killall", "btw", "grant", "role", "raw", "spawn",
-        "dump", "pickup", "devices",
+        "dump", "pickup", "devices", "timer",
     ] {
         assert!(names.contains(&want), "missing /{want}");
     }
