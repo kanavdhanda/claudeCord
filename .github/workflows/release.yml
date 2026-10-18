@@ -72,7 +72,7 @@ jobs:
       - run: cargo build --release --target ${{ matrix.target }} --no-default-features --bin claudecord
       - run: cp target/${{ matrix.target }}/release/claudecord${{ matrix.ext }} claudecord-${{ matrix.name }}${{ matrix.ext }}
         shell: bash
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bin-${{ matrix.name }}
           path: claudecord-${{ matrix.name }}${{ matrix.ext }}
@@ -101,7 +101,7 @@ jobs:
           # The manylinux build runs in a container, which only sees the variables it is handed.
           docker-options: -e CLAUDECORD_HUB
           args: --release --out dist ${{ matrix.extra }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheel-${{ matrix.target }}
           path: dist
@@ -122,7 +122,7 @@ jobs:
           for f in LICENSE assets/fonts/DejaVuSans.ttf assets/fonts/DejaVuSansMono.ttf assets/fonts/DejaVuSansMono-Bold.ttf; do
             tar tzf "$t" | grep -q "/$f$" || { echo "the source package is missing $f"; exit 1; }
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sdist
           path: dist
