@@ -790,14 +790,11 @@ export function TerminalPage() {
 
         ws.onopen = () => {
           if (cancelled) return
-          fallbackTimer = window.setTimeout(() => {
-            if (cancelled) return
-            if (!dcRef.current || dcRef.current.readyState !== 'open') {
-              setConnState('connected')
-              setTransport('wss_fallback')
-              void sendMessage({ op: 'sync', pane: activePaneRef.current })
-            }
-          }, 600)
+          if (!dcRef.current || dcRef.current.readyState !== 'open') {
+            setConnState('connected')
+            setTransport('wss_fallback')
+            void sendMessage({ op: 'sync', pane: activePaneRef.current })
+          }
         }
 
         ws.onmessage = async (ev) => {

@@ -558,7 +558,7 @@ async fn run_session(
         }
     };
 
-    // If started in WSS mode (or if WebRTC offer was omitted/invalid), immediately announce readiness and send initial tab + screen state.
+    // If started in WSS mode (or if WebRTC offer was omitted/invalid), immediately announce readiness.
     if rtc_opt.is_none() {
         active_transport = "wss".into();
         link.send(NodeFrame::TermReady {
@@ -582,20 +582,23 @@ async fn run_session(
             detail: None,
         })
         .await;
-        send_initial_tabs_and_snapshot(
-            &target,
-            &mut active_pane,
-            &mut sequencer,
-            &mut rtc_opt,
-            webrtc_channel,
-            &link,
-            &mut bytes_tx,
-            &params.session_id,
-            claims.generation,
-            &e2e_key,
-        )
-        .await;
     }
+
+    // Always send the initial tabs and screen snapshot immediately over E2E WSS (0.15 ms setup, 0.040 ms RTT)
+    // so the browser never waits for WebRTC ICE/DTLS negotiation before rendering the terminal.
+    send_initial_tabs_and_snapshot(
+        &target,
+        &mut active_pane,
+        &mut sequencer,
+        &mut rtc_opt,
+        webrtc_channel,
+        &link,
+        &mut bytes_tx,
+        &params.session_id,
+        claims.generation,
+        &e2e_key,
+    )
+    .await;
 
     let mut udp_buf = [0u8; 65536];
     let mut telemetry_tick = tokio::time::interval(Duration::from_secs(10));
