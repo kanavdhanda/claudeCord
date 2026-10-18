@@ -48,6 +48,11 @@ pub struct Log {
     pub resumes: u32,
 }
 
+/// How often the stand-in asks for a heartbeat. The bridge drops a connection whose last heartbeat was not answered by the next one, so
+/// a short interval made a slow machine (a busy CI runner) lose connections, and with them the events sent at that moment, which the
+/// stand-in does not replay as the real Discord does. Long enough that no test sees it, short enough that a real beat still happens.
+const HEARTBEAT_MS: u64 = 5_000;
+
 #[derive(Clone)]
 pub struct Fake {
     pub log: Arc<Mutex<Log>>,
@@ -393,7 +398,7 @@ pub async fn start_fake() -> (Fake, String) {
         let mut kick = f.kick.subscribe();
         let _ = s
             .send(WsMsg::Text(
-                json!({"op": 10, "d": {"heartbeat_interval": 150}})
+                json!({"op": 10, "d": {"heartbeat_interval": HEARTBEAT_MS}})
                     .to_string()
                     .into(),
             ))
