@@ -38,6 +38,8 @@ struct Snapshot {
     device_seq: HashMap<String, [u64; 2]>,
     #[serde(default)]
     chat_last: HashMap<String, u64>,
+    #[serde(default)]
+    stop_at: HashMap<String, StopTimer>,
 }
 
 impl HubCore {
@@ -68,6 +70,7 @@ impl HubCore {
             seq: self.seq,
             device_seq: (*self.device_seq).clone(),
             chat_last: (*self.chat_last).clone(),
+            stop_at: (*self.stop_at).clone(),
         };
         serde_json::to_string(&s).expect("snapshot is plain data")
     }
@@ -103,6 +106,7 @@ impl HubCore {
         self.counters.load(s.counters);
         self.device_seq.load(s.device_seq);
         self.chat_last.load(s.chat_last);
+        self.stop_at.load(s.stop_at);
         self.seq = s.seq;
         // What was just loaded is what is on disk; only changes from here on need saving.
         self.forget_changes();
@@ -186,6 +190,7 @@ impl HubCore {
             "counters" => self.counters.rows(touched),
             "device_seq" => self.device_seq.rows(touched),
             "chat_last" => self.chat_last.rows(touched),
+            "stop_at" => self.stop_at.rows(touched),
             "briefed" => self.briefed.rows(touched),
             "roster_dirty" => self.roster_dirty.rows(touched),
             _ => (Vec::new(), Vec::new()),
@@ -207,6 +212,7 @@ impl HubCore {
             "counters" => self.counters.all_rows(),
             "device_seq" => self.device_seq.all_rows(),
             "chat_last" => self.chat_last.all_rows(),
+            "stop_at" => self.stop_at.all_rows(),
             "briefed" => self.briefed.all_rows(),
             "roster_dirty" => self.roster_dirty.all_rows(),
             "owners" => vec![self.owners.row()],
@@ -243,6 +249,7 @@ impl HubCore {
         let mut counters = HashMap::new();
         let mut device_seq = HashMap::new();
         let mut chat_last = HashMap::new();
+        let mut stop_at = HashMap::new();
         let mut briefed = HashSet::new();
         let mut roster_dirty = HashSet::new();
         for (row, body) in rows {
@@ -290,6 +297,9 @@ impl HubCore {
                             device_seq.extend(parse(&row, &body).map(|v: [u64; 2]| (key, v)))
                         }
                         "chat_last" => chat_last.extend(parse(&row, &body).map(|v: u64| (key, v))),
+                        "stop_at" => {
+                            stop_at.extend(parse(&row, &body).map(|v: StopTimer| (key, v)))
+                        }
                         "briefed" => {
                             briefed.insert(key);
                         }
@@ -318,6 +328,7 @@ impl HubCore {
         self.counters.load(counters);
         self.device_seq.load(device_seq);
         self.chat_last.load(chat_last);
+        self.stop_at.load(stop_at);
         self.briefed.load(briefed);
         self.roster_dirty.load(roster_dirty);
         self.forget_changes();
@@ -325,7 +336,7 @@ impl HubCore {
 }
 
 /// Every collection that is saved as rows.
-const COLLECTIONS: [&str; 17] = [
+const COLLECTIONS: [&str; 18] = [
     "agents",
     "by_project",
     "members",
@@ -339,6 +350,7 @@ const COLLECTIONS: [&str; 17] = [
     "counters",
     "device_seq",
     "chat_last",
+    "stop_at",
     "briefed",
     "roster_dirty",
     "owners",

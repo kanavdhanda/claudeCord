@@ -396,6 +396,18 @@ impl Rest {
         embed: Value,
         reply_to_mid: Option<&str>,
     ) -> Result<String> {
+        self.send_embed_with_components(channel, embed, reply_to_mid, None)
+            .await
+    }
+
+    /// Sends an embed message as the bot (with optional reply reference and components) and returns its id.
+    pub async fn send_embed_with_components(
+        &self,
+        channel: &str,
+        embed: Value,
+        reply_to_mid: Option<&str>,
+        components: Option<Value>,
+    ) -> Result<String> {
         let mut body = json!({
             "embeds": [embed],
             "allowed_mentions": {"parse": []}
@@ -405,6 +417,9 @@ impl Rest {
                 "message_id": mid,
                 "fail_if_not_exists": false
             });
+        }
+        if let Some(c) = components {
+            body["components"] = c;
         }
         let v = self
             .call(
@@ -428,6 +443,22 @@ impl Rest {
         components: Value,
     ) -> Result<()> {
         self.call(Method::PATCH, &format!("/channels/{channel}/messages/{message}"), Some(json!({"content": content.chars().take(1990).collect::<String>(), "components": components}))).await.map(|_| ())
+    }
+
+    /// Changes only a message's buttons (an empty list removes the buttons) without touching its content or embeds.
+    pub async fn edit_components(
+        &self,
+        channel: &str,
+        message: &str,
+        components: Value,
+    ) -> Result<()> {
+        self.call(
+            Method::PATCH,
+            &format!("/channels/{channel}/messages/{message}"),
+            Some(json!({"components": components})),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Adds a reaction to a message. `emoji` is the character itself.

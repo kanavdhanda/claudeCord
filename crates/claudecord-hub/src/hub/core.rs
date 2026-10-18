@@ -108,6 +108,8 @@ pub struct HubCore {
     /// The newest chat message (a Discord snowflake) taken from each channel. It is saved in the same commit as the message it belongs to, so
     /// a message read twice (a resumed connection, a read-back after an outage, a restart) is taken once.
     pub(super) chat_last: TrackedMap<u64>,
+    /// The stop timer of each project that has one (see `StopTimer`). Saved, so a restart does not forget it.
+    pub(super) stop_at: TrackedMap<StopTimer>,
     /// What has changed since the last save (see `tracked`).
     pub(super) dirty: Log,
     /// The `seq` last written, so it is written again only when it moved.
@@ -163,6 +165,7 @@ impl HubCore {
             counters: TrackedMap::new("counters", &dirty),
             device_seq: TrackedMap::new("device_seq", &dirty),
             chat_last: TrackedMap::new("chat_last", &dirty),
+            stop_at: TrackedMap::new("stop_at", &dirty),
             metrics: Metrics::new(1440),
             min_client_version: crate::protocol::MIN_CLIENT_VERSION.to_string(),
         }
