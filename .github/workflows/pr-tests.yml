@@ -14,7 +14,7 @@ jobs:
   tests-came-with-the-change:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - run: python3 scripts/tests_gate.py --self-check
