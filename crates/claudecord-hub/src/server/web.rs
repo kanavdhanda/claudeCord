@@ -69,6 +69,7 @@ pub async fn style() -> Response {
 
 /// Who is looking at the dashboard: someone holding a dashboard token sees everything, someone signed in with Discord sees
 /// the projects their account has a role in.
+#[derive(Clone)]
 pub(super) enum Who {
     Everything,
     Account(String),
@@ -76,10 +77,18 @@ pub(super) enum Who {
 
 impl Who {
     /// Whether this viewer may see a project's data, given the core.
-    fn may_see(&self, c: &crate::hub::HubCore, project: &str) -> bool {
+    pub(super) fn may_see(&self, c: &crate::hub::HubCore, project: &str) -> bool {
         match self {
             Who::Everything => true,
             Who::Account(id) => c.role_of(project, id).is_some(),
+        }
+    }
+
+    /// Identifier recorded as the subject of audit rows and short-lived terminal grants.
+    pub(super) fn user_id(&self) -> String {
+        match self {
+            Who::Everything => "dashboard".into(),
+            Who::Account(id) => id.clone(),
         }
     }
 }

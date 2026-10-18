@@ -448,6 +448,224 @@ impl TmuxTerminal {
         // A failed paste means the session is gone, which the next look will show. The caller just tries again later.
         loaded.map_err(|_| Wait::AgentBusy)
     }
+
+    /// Returns the private tmux socket and session name for Control Mode (`-CC`) attachment.
+    pub fn socket_and_session(&self) -> (&str, &str) {
+        (&self.socket, &self.session)
+    }
+
+    /// Lists all windows (tabs) in this session, marking the lowest-index window as the primary coding agent tab.
+    pub fn list_tabs(&self) -> std::io::Result<Vec<claudecord_protocol::TerminalTab>> {
+        let out = Self::tmux(
+            &self.socket,
+            &[
+                "list-windows",
+                "-t",
+                &self.session,
+                "-F",
+                "#{window_id}\t#{pane_id}\t#{window_index}\t#{window_name}",
+            ],
+        )?;
+        let mut tabs = Vec::new();
+        for (pos, line) in out.lines().enumerate() {
+            let mut parts = line.splitn(4, '\t');
+            let (Some(win_id), Some(pane_id), Some(idx_s), Some(name)) =
+                (parts.next(), parts.next(), parts.next(), parts.next())
+            else {
+                continue;
+            };
+            if !claudecord_protocol::is_valid_window_id(win_id)
+                || !claudecord_protocol::is_valid_pane_id(pane_id)
+            {
+                continue;
+            }
+            let index = idx_s.trim().parse::<u16>().unwrap_or(pos as u16);
+            tabs.push(claudecord_protocol::TerminalTab {
+                window_id: win_id.to_string(),
+                pane_id: pane_id.to_string(),
+                index,
+                name: if name.trim().is_empty() {
+                    "shell".into()
+                } else {
+                    name.trim().chars().take(60).collect()
+                },
+                is_agent: pos == 0,
+            });
+        }
+        Ok(tabs)
+    }
+
+    /// Captures the current visible screen of `pane_id` with ANSI colours and cursor position for initial or tab-switch rendering.
+    pub fn capture_pane_ansi(&self, pane_id: &str) -> std::io::Result<Vec<u8>> {
+        if !claudecord_protocol::is_valid_pane_id(pane_id) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid pane id",
+            ));
+        }
+        let cursor = Self::tmux(
+            &self.socket,
+            &[
+                "display-message",
+                "-p",
+                "-t",
+                pane_id,
+                "#{cursor_x} #{cursor_y}",
+            ],
+        )
+        .unwrap_or_default();
+        let mut cx = 0u16;
+        let mut cy = 0u16;
+        let mut cit = cursor
+            .split_whitespace()
+            .filter_map(|n| n.parse::<u16>().ok());
+        if let (Some(x), Some(y)) = (cit.next(), cit.next()) {
+            cx = x;
+            cy = y;
+        }
+        let raw = Self::tmux(&self.socket, &["capture-pane", "-e", "-p", "-t", pane_id])?;
+        let lines: Vec<&str> = raw.split('\n').collect();
+        // Trim only trailing newline added by capture-pane -p.
+        let slice = if lines.last().is_some_and(|l| l.is_empty()) && lines.len() > 1 {
+            &lines[..lines.len() - 1]
+        } else {
+            &lines[..]
+        };
+        let mut out = String::from("\x1b[2J\x1b[H");
+        out.push_str(&slice.join("\r\n"));
+        out.push_str(&format!(
+            "\x1b[{};{}H",
+            cy.saturating_add(1),
+            cx.saturating_add(1)
+        ));
+        Ok(out.into_bytes())
+    }
+
+    /// Opens a new detached shell window (tab) alongside the coding agent in `cwd` with `remove_env` scrubbed and `remain-on-exit off`.
+    pub fn open_tab(
+        &self,
+        cwd: &std::path::Path,
+        remove_env: &[String],
+    ) -> std::io::Result<claudecord_protocol::TerminalTab> {
+        let existing = self.list_tabs()?;
+        if existing.len() >= claudecord_protocol::MAX_TERMINAL_TABS {
+            return Err(std::io::Error::other(
+                "maximum number of terminal tabs reached",
+            ));
+        }
+        let shell = std::env::var("SHELL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "/bin/sh".into());
+        let mut cmd = String::from("exec env");
+        for n in remove_env {
+            cmd.push_str(&format!(" -u {}", quote(n)));
+        }
+        cmd.push(' ');
+        cmd.push_str(&quote(&shell));
+        let out = Self::tmux(
+            &self.socket,
+            &[
+                "new-window",
+                "-d",
+                "-t",
+                &self.session,
+                "-c",
+                &cwd.to_string_lossy(),
+                "-P",
+                "-F",
+                "#{window_id}\t#{pane_id}\t#{window_index}\t#{window_name}",
+                &cmd,
+            ],
+        )?;
+        let line = out.lines().next().unwrap_or("");
+        let mut parts = line.splitn(4, '\t');
+        let (Some(win_id), Some(pane_id), Some(idx_s), Some(name)) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return Err(std::io::Error::other("unexpected new-window output"));
+        };
+        // Secondary shell tabs close cleanly on Ctrl-D / exit without triggering remain-on-exit or killing the agent session.
+        let _ = Self::tmux(
+            &self.socket,
+            &["set-option", "-w", "-t", win_id, "remain-on-exit", "off"],
+        );
+        Ok(claudecord_protocol::TerminalTab {
+            window_id: win_id.to_string(),
+            pane_id: pane_id.to_string(),
+            index: idx_s.trim().parse::<u16>().unwrap_or(1),
+            name: if name.trim().is_empty() {
+                "shell".into()
+            } else {
+                name.trim().chars().take(60).collect()
+            },
+            is_agent: false,
+        })
+    }
+
+    /// Closes a secondary shell tab (`pane_id`). Refuses to close the primary coding agent tab (`is_agent`).
+    pub fn close_tab(&self, pane_id: &str) -> std::io::Result<()> {
+        if !claudecord_protocol::is_valid_pane_id(pane_id) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid pane id",
+            ));
+        }
+        let tabs = self.list_tabs()?;
+        let Some(tab) = tabs.into_iter().find(|t| t.pane_id == pane_id) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "tab not found in session",
+            ));
+        };
+        if tab.is_agent {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "cannot close the primary agent tab",
+            ));
+        }
+        Self::tmux(&self.socket, &["kill-window", "-t", &tab.window_id]).map(|_| ())
+    }
+
+    /// Sends raw keystroke bytes to `pane_id` using `send-keys -H` (two hex digits per byte, no shell escaping hazards).
+    pub fn send_pane_bytes(&self, pane_id: &str, bytes: &[u8], now: i64) -> std::io::Result<()> {
+        if !claudecord_protocol::is_valid_pane_id(pane_id)
+            || bytes.is_empty()
+            || bytes.len() > claudecord_protocol::MAX_TERMINAL_INPUT_BYTES
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid pane input",
+            ));
+        }
+        self.seen.locked().next_look = now;
+        self.guard.locked().on_input(bytes, now);
+        let hex_args: Vec<String> = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let mut args = vec!["send-keys", "-H", "-t", pane_id];
+        for h in &hex_args {
+            args.push(h.as_str());
+        }
+        Self::tmux(&self.socket, &args).map(|_| ())
+    }
+
+    /// Resizes the window containing `pane_id` after validating dimensions.
+    pub fn resize_pane(&self, pane_id: &str, cols: u16, rows: u16) -> std::io::Result<()> {
+        if !claudecord_protocol::is_valid_pane_id(pane_id)
+            || !claudecord_protocol::valid_dimensions(cols, rows)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid resize dimensions",
+            ));
+        }
+        let c = cols.to_string();
+        let r = rows.to_string();
+        Self::tmux(
+            &self.socket,
+            &["resize-window", "-t", pane_id, "-x", &c, "-y", &r],
+        )
+        .map(|_| ())
+    }
 }
 
 /// Stops a whole private tmux server, and every session on it. Used when the daemon shuts down.

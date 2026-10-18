@@ -11,6 +11,7 @@ import { Login } from './pages/Login'
 import { Machines } from './pages/Machines'
 import { Overview } from './pages/Overview'
 import { Setup } from './pages/Setup'
+import { TerminalPage } from './pages/Terminal'
 
 const MeContext = createContext<Me | null>(null)
 export const useMe = () => useContext(MeContext)!
@@ -57,6 +58,7 @@ export function App() {
         <main className="main">
           <Routes>
             <Route path="/" element={<Overview />} />
+            <Route path="/terminal/:project/:agent" element={<TerminalPage />} />
             <Route path="/insights" element={<Insights />} />
             <Route path="/setup" element={<Setup />} />
             <Route path="/bots" element={<Bots />} />

@@ -404,6 +404,8 @@ struct State {
     say_seq: u64,
     /// Set by `handle` for a `say`: the answer to the caller comes from this, later, and the daemon's loop carries on meanwhile.
     defer: Option<oneshot::Receiver<(String, Option<String>)>>,
+    /// Active browser terminal streaming sessions and host-side grant verifier.
+    streams: super::stream::StreamManager,
 }
 
 /// Runs the daemon until told to shut down. Listens on the socket in `dir`, connects to the hub from `cfg`.
@@ -459,6 +461,7 @@ pub async fn run(cfg: Config, dir: PathBuf, opts: Options) -> std::io::Result<()
         says: HashMap::new(),
         say_seq: 0,
         defer: None,
+        streams: super::stream::StreamManager::new(cfg.node_name.clone()),
     };
     let mut tick = tokio::time::interval(opts.tick);
     let mut stop = Box::pin(crate::task::shutdown_signal());
@@ -937,7 +940,77 @@ impl State {
                     );
                 }
             }
-            HubFrame::Welcome { .. } | HubFrame::Error { .. } | HubFrame::Ack { .. } => {}
+            HubFrame::Welcome { grant_key, .. } => {
+                if let Some(k) = grant_key {
+                    self.streams.set_grant_key_b64(&k);
+                }
+            }
+            HubFrame::TermOpen {
+                session_id,
+                agent_id,
+                grant,
+                generation,
+                transport,
+                offer_sdp,
+                e2e_key,
+                ice_servers,
+                cols,
+                rows,
+            } => {
+                let target = self
+                    .agents
+                    .get(&agent_id)
+                    .map(|a| super::stream::AgentTarget {
+                        agent_id: a.spec.agent_id.clone(),
+                        term: a.proc.clone(),
+                        cwd: a.cwd.clone(),
+                        remove_env: a.launch.secrets.clone(),
+                    });
+                self.streams
+                    .open(
+                        super::stream::OpenParams {
+                            session_id,
+                            agent_id,
+                            grant,
+                            generation,
+                            transport,
+                            offer_sdp,
+                            e2e_key,
+                            ice_servers,
+                            cols,
+                            rows,
+                        },
+                        target,
+                        self.link.clone(),
+                        crate::now_ms(),
+                    )
+                    .await;
+            }
+            HubFrame::TermIce {
+                session_id,
+                candidate,
+            } => {
+                self.streams.on_ice(&session_id, candidate).await;
+            }
+            HubFrame::TermFrame {
+                session_id,
+                generation,
+                payload,
+            } => {
+                self.streams
+                    .on_frame(&session_id, generation, payload)
+                    .await;
+            }
+            HubFrame::TermClose {
+                session_id,
+                jti,
+                reason,
+            } => {
+                self.streams
+                    .on_close(&session_id, jti.as_deref(), reason)
+                    .await;
+            }
+            HubFrame::Error { .. } | HubFrame::Ack { .. } => {}
         }
     }
 
@@ -1158,6 +1231,7 @@ impl State {
 
     /// Quits an agent and tells the hub it is gone.
     async fn stop(&mut self, agent_id: &str) {
+        self.streams.close_for_agent(agent_id);
         if let Some(a) = self.agents.remove(agent_id) {
             a.proc.kill();
             self.link

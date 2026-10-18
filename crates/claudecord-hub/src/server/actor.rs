@@ -142,6 +142,7 @@ pub(crate) async fn run(
     mut inbox: mpsc::Receiver<Input>,
     chat: broadcast::Sender<Chat>,
     cfg: Config,
+    terminals: Arc<super::terminal::TerminalBroker>,
 ) {
     let mut disk = Disk::new(store);
     load_core(&mut core, disk.reader());
@@ -197,6 +198,7 @@ pub(crate) async fn run(
                                     node_id: node.clone(),
                                     hub_version: Some(env!("CARGO_PKG_VERSION").into()),
                                     min_version: Some(core.min_client_version.clone()),
+                                    grant_key: Some(terminals.node_grant_key_b64(&node)),
                                 },
                             }], &mut conns, &chat, cfg.max_out_bytes);
                             fx.extend(guard(&mut core, disk.reader(), &conns, &mut report, Some(&node), |c| c.node_connected(&node, conn)).unwrap_or_default());
@@ -212,6 +214,7 @@ pub(crate) async fn run(
                                 // and the ack is held with the rest of the batch until the change it caused is on disk.
                                 let fresh = stamp.is_none_or(|(e, n)| core.accept_seq(&node, e, n));
                                 if fresh {
+                                    terminals.on_node_frame(&node, &frame);
                                     fx.extend(guard(&mut core, disk.reader(), &conns, &mut report, Some(&node), |c| c.on_node_frame(&node, frame, now)).unwrap_or_default());
                                 }
                                 if let Some((_, n)) = stamp && let Some(conn) = core.conn_of(&node) {

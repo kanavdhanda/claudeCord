@@ -78,6 +78,29 @@ export const api = {
     post<{ ok: boolean }>(`/api/v1/pick/${encodeURIComponent(code)}`, { project, agent: agent || undefined, adapter, role: role || undefined, command: command || undefined }),
   spawn: (project: string, name: string, adapter: string, node?: string, command?: string) =>
     post<{ node: string }>('/api/v1/spawn', { project, name, adapter, node, command: command || undefined }),
+  openTerminal: (project: string, agent: string, cols: number, rows: number, offerSdp?: string) =>
+    post<TerminalSession>('/api/v1/terminal/sessions', { project, agent, cols, rows, transport: 'auto', offerSdp }),
+  signalTerminal: (sessionId: string, body: { offerSdp?: string; candidate?: string; transport?: string; cols?: number; rows?: number; reconnect?: boolean }) =>
+    post<{ ok: boolean; sessionId: string; generation: number; grant: string }>(`/api/v1/terminal/sessions/${encodeURIComponent(sessionId)}/signal`, body),
+  revokeTerminal: (sessionId: string, reason?: string) =>
+    post<{ ok: boolean; sessionId: string; revoked: boolean }>(`/api/v1/terminal/sessions/${encodeURIComponent(sessionId)}/revoke`, { reason }),
+}
+
+export type IceServer = { urls: string[]; username?: string; credential?: string }
+export type TerminalSession = {
+  sessionId: string
+  project: string
+  agentId: string
+  node: string
+  jti: string
+  grant: string
+  generation: number
+  read: boolean
+  write: boolean
+  expiresAtMs: number
+  e2eKey: string
+  iceServers: IceServer[]
+  wsPath: string
 }
 
 export type Summary = {

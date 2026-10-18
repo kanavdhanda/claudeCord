@@ -19,6 +19,7 @@ pub mod gateway;
 pub mod health;
 pub mod login;
 pub mod session;
+pub mod terminal;
 pub mod web;
 
 use crate::hub::{Chat, HubCore};
@@ -297,6 +298,8 @@ pub(crate) struct AppState {
     open: Arc<std::sync::atomic::AtomicUsize>,
     /// Dashboard sign-ins by session id (see `login`).
     pub(crate) sessions: login::Sessions,
+    /// Terminal streaming broker for grants, signaling, and E2E WSS fallback relay.
+    pub(crate) terminals: Arc<terminal::TerminalBroker>,
 }
 
 /// Starts the hub: opens nothing on disk itself (the caller gives it a store and a core), binds the port, starts the
@@ -327,6 +330,20 @@ pub async fn start(cfg: Config, core: HubCore, store: Store) -> std::io::Result<
         .route("/app.css", get(web::style))
         .route("/api/v1/state", get(web::state))
         .route("/api/v1/history", get(web::history))
+        .route(
+            "/api/v1/terminal/sessions",
+            axum::routing::post(terminal::create_session),
+        )
+        .route(
+            "/api/v1/terminal/sessions/{id}/signal",
+            axum::routing::post(terminal::signal_session),
+        )
+        .route(
+            "/api/v1/terminal/sessions/{id}/revoke",
+            axum::routing::post(terminal::revoke_session),
+        )
+        .route("/api/v1/terminal/ws", get(terminal::ws_upgrade))
+        .route("/api/v1/terminal/metrics", get(terminal::metrics))
         .route("/auth/login", get(login::start))
         .route("/auth/callback", get(login::callback))
         .route("/auth/me", get(login::me))
@@ -355,6 +372,7 @@ pub fn spawn_core(cfg: Config, core: HubCore, store: Store) -> Hub {
     let (to_actor, from_world) = mpsc::channel(4096);
     let (chat_tx, _) = broadcast::channel(1024);
     let reader = Arc::new(Mutex::new(store.fork()));
+    let terminals = Arc::new(terminal::TerminalBroker::new());
     // Starting counts as up (and a crash since the last heartbeat counts as down until now).
     let uptime = store.fork().zip(store.fork()).map(|(log, beat)| {
         crate::uptime::recover(&log, now_ms());
@@ -367,6 +385,7 @@ pub fn spawn_core(cfg: Config, core: HubCore, store: Store) -> Hub {
         from_world,
         chat_tx.clone(),
         cfg.clone(),
+        terminals.clone(),
     ));
     let state = AppState {
         to_actor: to_actor.clone(),
@@ -379,6 +398,7 @@ pub fn spawn_core(cfg: Config, core: HubCore, store: Store) -> Hub {
         next_conn: Arc::new(std::sync::atomic::AtomicU64::new(1)),
         open: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         sessions: Arc::new(Mutex::new(HashMap::new())),
+        terminals,
     };
     watchdog(HubHandle {
         to_actor: to_actor.clone(),

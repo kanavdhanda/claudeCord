@@ -204,6 +204,20 @@ pub(crate) fn router(gw: Gateway) -> Router {
         .route("/api/v1/export", get(export))
         .route("/api/v1/machines", get(machines))
         .route("/api/v1/machines/revoke", post(machine_revoke))
+        .route(
+            "/api/v1/terminal/sessions",
+            post(super::terminal::gw_create_session),
+        )
+        .route(
+            "/api/v1/terminal/sessions/{id}/signal",
+            post(super::terminal::gw_signal_session),
+        )
+        .route(
+            "/api/v1/terminal/sessions/{id}/revoke",
+            post(super::terminal::gw_revoke_session),
+        )
+        .route("/api/v1/terminal/ws", get(super::terminal::gw_ws_upgrade))
+        .route("/api/v1/terminal/metrics", get(super::terminal::gw_metrics))
         .merge(crate::server::bots::routes())
         .route("/app.js", get(super::app::script))
         .route("/app.css", get(super::app::style))

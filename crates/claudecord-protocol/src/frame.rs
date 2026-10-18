@@ -383,6 +383,91 @@ pub enum NodeFrame {
         )]
         thread: Option<String>,
     },
+    /// Host agent confirms a terminal streaming session is authorized and ready (with WebRTC SDP answer/candidates or WSS readiness).
+    #[serde(rename = "term.ready", rename_all = "camelCase")]
+    TermReady {
+        session_id: String,
+        agent_id: String,
+        #[serde(deserialize_with = "uint")]
+        generation: u64,
+        transport: String,
+        #[serde(
+            default,
+            deserialize_with = "opt::de",
+            skip_serializing_if = "Option::is_none"
+        )]
+        answer_sdp: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        candidates: Vec<String>,
+        #[serde(
+            default,
+            deserialize_with = "opt::de",
+            skip_serializing_if = "Option::is_none"
+        )]
+        dtls_fingerprint: Option<String>,
+    },
+    /// Terminal envelope frame relayed from host agent to browser when using WSS fallback.
+    #[serde(rename = "term.frame", rename_all = "camelCase")]
+    TermFrame {
+        session_id: String,
+        #[serde(deserialize_with = "uint")]
+        generation: u64,
+        payload: String,
+    },
+    /// Sanitized terminal transport and telemetry state reported by the host agent (never contains terminal payloads).
+    #[serde(rename = "term.state", rename_all = "camelCase")]
+    TermState {
+        session_id: String,
+        agent_id: String,
+        state: String,
+        transport: String,
+        #[serde(
+            default,
+            deserialize_with = "opt::de",
+            skip_serializing_if = "Option::is_none"
+        )]
+        rtt_ms: Option<u64>,
+        #[serde(deserialize_with = "uint")]
+        bytes_tx: u64,
+        #[serde(deserialize_with = "uint")]
+        bytes_rx: u64,
+        #[serde(
+            default,
+            deserialize_with = "opt::de",
+            skip_serializing_if = "Option::is_none"
+        )]
+        detail: Option<String>,
+    },
+}
+
+/// Configured STUN or TURN server descriptor for WebRTC ICE negotiation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IceServerSpec {
+    pub urls: Vec<String>,
+    #[serde(
+        default,
+        deserialize_with = "opt::de",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub username: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "opt::de",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub credential: Option<String>,
+}
+
+impl IceServerSpec {
+    /// Validates STUN/TURN server entry bounds.
+    pub fn is_valid(&self) -> bool {
+        !self.urls.is_empty()
+            && self.urls.len() <= 8
+            && self.urls.iter().all(|u| !u.is_empty() && within(u, 256))
+            && within_opt(&self.username, 128)
+            && within_opt(&self.credential, 256)
+    }
 }
 
 /// Whether a string is at most `max` characters, counted the way JavaScript counts.
@@ -497,6 +582,64 @@ impl NodeFrame {
                     && within_opt(caption, 1000)
                     && within_opt(thread, 90)
             }
+            TermReady {
+                session_id,
+                agent_id,
+                generation,
+                transport,
+                answer_sdp,
+                candidates,
+                dtls_fingerprint,
+            } => {
+                !session_id.is_empty()
+                    && within(session_id, 80)
+                    && !agent_id.is_empty()
+                    && within(agent_id, 200)
+                    && *generation > 0
+                    && matches!(
+                        transport.as_str(),
+                        "auto"
+                            | "webrtc"
+                            | "webrtc_direct"
+                            | "webrtc_turn_udp"
+                            | "webrtc_turn_tcp"
+                            | "wss"
+                            | "wss_fallback"
+                    )
+                    && within_opt(answer_sdp, 16_384)
+                    && candidates.len() <= 32
+                    && candidates.iter().all(|c| !c.is_empty() && within(c, 512))
+                    && within_opt(dtls_fingerprint, 160)
+            }
+            TermFrame {
+                session_id,
+                generation,
+                payload,
+            } => {
+                !session_id.is_empty()
+                    && within(session_id, 80)
+                    && *generation > 0
+                    && !payload.is_empty()
+                    && within(payload, crate::terminal::MAX_TERMINAL_ENVELOPE_CHARS * 2)
+            }
+            TermState {
+                session_id,
+                agent_id,
+                state,
+                transport,
+                detail,
+                ..
+            } => {
+                !session_id.is_empty()
+                    && within(session_id, 80)
+                    && !agent_id.is_empty()
+                    && within(agent_id, 200)
+                    && !state.is_empty()
+                    && within(state, 40)
+                    && !transport.is_empty()
+                    && within(transport, 40)
+                    && within_opt(detail, 300)
+            }
         }
     }
 
@@ -519,6 +662,13 @@ pub enum HubFrame {
         hub_version: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         min_version: Option<String>,
+        /// Optional per-machine HMAC key (base64url) used by the host agent to verify short-lived terminal session grants.
+        #[serde(
+            default,
+            deserialize_with = "opt::de",
+            skip_serializing_if = "Option::is_none"
+        )]
+        grant_key: Option<String>,
     },
     /// The newest version of claudeCord, sent to a machine that told the hub (in its hello) it runs an older one. The machine decides how to
     /// word the update (it knows how it was installed). A machine that does not know this frame ignores it.
@@ -665,6 +815,58 @@ pub enum HubFrame {
         )]
         project: Option<String>,
     },
+    /// Opens or renegotiates an interactive terminal streaming session on a specifically authorized agent tmux session.
+    #[serde(rename = "term.open", rename_all = "camelCase")]
+    TermOpen {
+        session_id: String,
+        agent_id: String,
+        grant: String,
+        #[serde(deserialize_with = "uint")]
+        generation: u64,
+        transport: String,
+        #[serde(
+            default,
+            deserialize_with = "opt::de",
+            skip_serializing_if = "Option::is_none"
+        )]
+        offer_sdp: Option<String>,
+        #[serde(
+            default,
+            deserialize_with = "opt::de",
+            skip_serializing_if = "Option::is_none"
+        )]
+        e2e_key: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ice_servers: Vec<IceServerSpec>,
+        cols: u16,
+        rows: u16,
+    },
+    /// Trickle ICE candidate from browser to host agent during WebRTC establishment.
+    #[serde(rename = "term.ice", rename_all = "camelCase")]
+    TermIce {
+        session_id: String,
+        candidate: String,
+    },
+    /// Terminal envelope frame relayed from browser to host agent when using WSS fallback.
+    #[serde(rename = "term.frame", rename_all = "camelCase")]
+    TermFrame {
+        session_id: String,
+        #[serde(deserialize_with = "uint")]
+        generation: u64,
+        payload: String,
+    },
+    /// Closes or revokes an active terminal streaming session without killing the underlying tmux session.
+    #[serde(rename = "term.close", rename_all = "camelCase")]
+    TermClose {
+        session_id: String,
+        #[serde(
+            default,
+            deserialize_with = "opt::de",
+            skip_serializing_if = "Option::is_none"
+        )]
+        jti: Option<String>,
+        reason: String,
+    },
 }
 
 /// The epoch and sequence number a machine put on a frame, if it did. A machine numbers what it sends (1, 2, 3...) under an epoch chosen
@@ -696,6 +898,71 @@ impl HubFrame {
                     && pick.as_deref().is_none_or(|p| {
                         p.len() <= 64 && p.bytes().all(|b| b.is_ascii_alphanumeric())
                     })
+            }
+            Self::TermOpen {
+                session_id,
+                agent_id,
+                grant,
+                generation,
+                transport,
+                offer_sdp,
+                e2e_key,
+                ice_servers,
+                cols,
+                rows,
+            } => {
+                !session_id.is_empty()
+                    && within(session_id, 80)
+                    && !agent_id.is_empty()
+                    && within(agent_id, 200)
+                    && !grant.is_empty()
+                    && within(grant, 4096)
+                    && *generation > 0
+                    && matches!(
+                        transport.as_str(),
+                        "auto"
+                            | "webrtc"
+                            | "webrtc_direct"
+                            | "webrtc_turn_udp"
+                            | "webrtc_turn_tcp"
+                            | "wss"
+                            | "wss_fallback"
+                    )
+                    && within_opt(offer_sdp, 16_384)
+                    && within_opt(e2e_key, 128)
+                    && ice_servers.len() <= 8
+                    && ice_servers.iter().all(IceServerSpec::is_valid)
+                    && crate::terminal::valid_dimensions(*cols, *rows)
+            }
+            Self::TermIce {
+                session_id,
+                candidate,
+            } => {
+                !session_id.is_empty()
+                    && within(session_id, 80)
+                    && !candidate.is_empty()
+                    && within(candidate, 512)
+            }
+            Self::TermFrame {
+                session_id,
+                generation,
+                payload,
+            } => {
+                !session_id.is_empty()
+                    && within(session_id, 80)
+                    && *generation > 0
+                    && !payload.is_empty()
+                    && within(payload, crate::terminal::MAX_TERMINAL_ENVELOPE_CHARS * 2)
+            }
+            Self::TermClose {
+                session_id,
+                jti,
+                reason,
+            } => {
+                !session_id.is_empty()
+                    && within(session_id, 80)
+                    && within_opt(jti, 80)
+                    && within(reason, 200)
             }
             _ => true,
         }

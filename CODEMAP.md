@@ -115,6 +115,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | `crates/claudecord-hub/src/server/login.rs` | "Sign in with Discord" for the dashboard, the standard OAuth2 code flow. |
 | `crates/claudecord-hub/src/server/mod.rs` | The hub as a running server: one small web server that accepts devices over WebSocket, feeds what they send to the hub core, and carries out what the core asks for. |
 | `crates/claudecord-hub/src/server/session.rs` | One device's WebSocket, from upgrade to close. |
+| `crates/claudecord-hub/src/server/terminal.rs` | Terminal streaming control plane, short-lived grant issuance, WebRTC signaling, and E2E-encrypted WebSocket fallback relay. |
 | `crates/claudecord-hub/src/server/web.rs` | The dashboard: a read-only web page that shows machines, agents, what is waiting on a person, tasks and the conversation, served by the hub itself (no separate program, nothing to install). |
 
 ## crates/claudecord-hub/src/store
@@ -137,6 +138,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 |---|---|
 | `crates/claudecord-protocol/src/frame.rs` | The frames a device and the hub exchange, and the rules a frame must meet to be accepted. |
 | `crates/claudecord-protocol/src/lib.rs` | Wire protocol types, framing, and text sanitization for claudeCord. |
+| `crates/claudecord-protocol/src/terminal.rs` | The interactive terminal streaming protocol, short-lived session grants, end-to-end payload encryption, and tmux Control Mode (`-CC`) framing parser. |
 | `crates/claudecord-protocol/src/text.rs` | Everything pasted into an agent's terminal passes through here. |
 
 ## crates/claudecord-test-facade/src
@@ -186,6 +188,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | `crates/claudecord/src/device/mod.rs` | Everything that runs on a machine with agents: remembering who the machine is, keeping a connection to the hub, and (later in this folder) owning the agents' terminals. |
 | `crates/claudecord/src/device/pty.rs` | One agent's terminal. |
 | `crates/claudecord/src/device/shot.rs` | Draws a terminal screen as a PNG. |
+| `crates/claudecord/src/device/stream.rs` | Real-time interactive terminal streaming on the host agent: independently verifies short-lived session grants, attaches to existing claudeCord-managed tmux sessions via Control Mode (`tmux -CC`), manages multi-window tabs without disrupting the primary coding agent, and serves the transport-independent terminal protocol over Direct/TURN WebRTC DataChannel (`str0m`) or E2E-encrypted Hub WSS fallback. |
 | `crates/claudecord/src/device/terminal.rs` | The one thing the daemon needs from an agent's terminal, whichever way it is provided: start it, type into it, paste a message safely, look at its screen, notice when it ends, stop it, and let a person get in front of it. |
 | `crates/claudecord/src/device/tmux.rs` | The tmux backend: each agent runs in its own tmux session on a private tmux server (its own socket), so a person can attach with plain `tmux attach`, scroll, and detach as they always do, and the agent keeps running when they leave. |
 

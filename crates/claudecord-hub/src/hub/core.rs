@@ -703,12 +703,15 @@ impl HubCore {
             | NodeFrame::AgentTeam { agent_id }
             | NodeFrame::AgentThreads { agent_id, .. }
             | NodeFrame::AgentAnswer { agent_id, .. }
-            | NodeFrame::FileChunk { agent_id, .. } => Some(agent_id.as_str()),
+            | NodeFrame::FileChunk { agent_id, .. }
+            | NodeFrame::TermReady { agent_id, .. }
+            | NodeFrame::TermState { agent_id, .. } => Some(agent_id.as_str()),
             NodeFrame::Hello { .. }
             | NodeFrame::AgentRegister { .. }
             | NodeFrame::AgentsHere { .. }
             | NodeFrame::SpawnFailed { .. }
-            | NodeFrame::NodeInfo { .. } => None,
+            | NodeFrame::NodeInfo { .. }
+            | NodeFrame::TermFrame { .. } => None,
         };
         if claimed
             .and_then(|id| self.agents.get(id))
@@ -985,6 +988,45 @@ impl HubCore {
                     .collect();
                 for id in stale {
                     self.drop_agent(&id, &mut fx);
+                }
+            }
+            NodeFrame::TermReady { transport, .. } => {
+                self.metrics.inc("term_ready", 1.0, now);
+                if transport.starts_with("webrtc") {
+                    self.metrics.inc("term_webrtc", 1.0, now);
+                } else {
+                    self.metrics.inc("term_wss", 1.0, now);
+                }
+            }
+            NodeFrame::TermFrame { .. } => {
+                self.metrics.inc("term_frames", 1.0, now);
+            }
+            NodeFrame::TermState {
+                session_id,
+                agent_id,
+                state,
+                transport,
+                detail,
+                ..
+            } => {
+                self.metrics.inc("term_state", 1.0, now);
+                if transport == "wss_fallback" {
+                    self.metrics.inc("term_fallback", 1.0, now);
+                }
+                if matches!(state.as_str(), "failed" | "revoked" | "closed")
+                    && let Some(a) = self.agents.get(&agent_id)
+                {
+                    let detail = detail.unwrap_or_default();
+                    fx.push(Effect::Persist(Persist::Audit {
+                        project: a.project.clone(),
+                        who: node.to_string(),
+                        what: format!(
+                            "terminal session {session_id} for {agent_id} {state} ({transport}) {detail}"
+                        )
+                        .trim()
+                        .to_string(),
+                        at: now,
+                    }));
                 }
             }
         }

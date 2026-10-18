@@ -528,7 +528,7 @@ async fn session(
                     last_seen = tokio::time::Instant::now();
                     match m {
                         Message::Text(t) => match HubFrame::parse(t.as_str()) {
-                            Some(HubFrame::Welcome { node_id, hub_version, min_version }) => {
+                            Some(HubFrame::Welcome { node_id, hub_version, min_version, grant_key }) => {
                                 if let Some(hv) = &hub_version {
                                     crate::info!(
                                         "device",
@@ -537,6 +537,19 @@ async fn session(
                                     );
                                 }
                                 if events.send(LinkEvent::Up).await.is_err() { return replaced; }
+                                if grant_key.is_some()
+                                    && events
+                                        .send(LinkEvent::Frame(HubFrame::Welcome {
+                                            node_id,
+                                            hub_version,
+                                            min_version,
+                                            grant_key,
+                                        }))
+                                        .await
+                                        .is_err()
+                                {
+                                    return replaced;
+                                }
                             }
                             Some(HubFrame::Ack { n }) => unacked.ack(n),
                             Some(HubFrame::Error { message }) if message.contains("replaced") => replaced = true,

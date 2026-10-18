@@ -126,5 +126,44 @@
    "t": "nope"
   },
   "valid": false
+ },
+ {
+  "input": {
+   "t": "term.open",
+   "sessionId": "ts-123",
+   "agentId": "p/a",
+   "grant": "header.payload.sig",
+   "generation": 1,
+   "transport": "auto",
+   "cols": 120,
+   "rows": 36
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "term.ice",
+   "sessionId": "ts-123",
+   "candidate": "candidate:1 1 UDP 2122252543 127.0.0.1 50000 typ host"
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "term.frame",
+   "sessionId": "ts-123",
+   "generation": 1,
+   "payload": "e2e1.AAAAAAAAAAAAAAAA.BBBB"
+  },
+  "valid": true
+ },
+ {
+  "input": {
+   "t": "term.close",
+   "sessionId": "ts-123",
+   "jti": "jti-123",
+   "reason": "revoked by user"
+  },
+  "valid": true
  }
 ]

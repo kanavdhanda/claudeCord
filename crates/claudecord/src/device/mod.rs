@@ -25,5 +25,6 @@ pub mod link;
 pub mod logs;
 pub mod pty;
 pub mod shot;
+pub mod stream;
 pub mod terminal;
 pub mod tmux;
