@@ -1502,8 +1502,10 @@ impl State {
                 && !a.queue.is_empty()
                 && state.limit.is_none()
                 && state.prompt.is_none()
-                // Not before the agent's input box is showing, or start-up would swallow the message (unless forced now/steer).
-                && (state.ready || a.status != AgentStatus::Starting || a.urgency != Urgency::Queue)
+                // Not before the agent's input box is showing, or start-up would swallow the message (unless a person forced now/steer; a `say` is direct and always waits).
+                && (state.ready
+                    || a.status != AgentStatus::Starting
+                    || (a.urgency != Urgency::Queue && a.direct.is_none()))
             {
                 // One thread at a time: what waited in different threads is not mixed into one prompt, so the agent answers each where it was asked.
                 let n = a
