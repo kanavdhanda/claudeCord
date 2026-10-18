@@ -902,3 +902,177 @@ async fn security_negative_matrix_enforces_replay_expiry_read_only_and_frame_lim
     mgr.close_for_agent("demo/otter");
     stop_server(&socket);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reconnect_generation_supersedes_old_stream_and_rejects_stale_frames() {
+    let Some((term, socket)) = start_tmux("gen", &["cat"]) else {
+        return;
+    };
+    let (hub_tx, mut hub_rx) = mpsc::channel::<NodeFrame>(256);
+    let link = Link::from_sender(hub_tx);
+    let mut mgr = StreamManager::new("mac".into());
+    mgr.set_grant_key(test_key());
+
+    let now_ms = claudecord::now_ms();
+    let now_s = now_ms / 1000;
+
+    let mk_target = || {
+        Some(AgentTarget {
+            agent_id: "demo/otter".into(),
+            term: term.clone(),
+            cwd: PathBuf::from("/tmp"),
+            remove_env: vec!["HOME".into()],
+        })
+    };
+
+    // Open generation 1.
+    let (grant1, e2e_b64) = make_grant(
+        "jti-gen-1",
+        "mac",
+        "demo/otter",
+        true,
+        1,
+        now_s,
+        now_s + 120,
+    );
+    mgr.open(
+        OpenParams {
+            session_id: "sess-gen".into(),
+            agent_id: "demo/otter".into(),
+            grant: grant1,
+            generation: 1,
+            transport: "wss".into(),
+            offer_sdp: None,
+            e2e_key: Some(e2e_b64.clone()),
+            ice_servers: vec![],
+            cols: 80,
+            rows: 24,
+        },
+        mk_target(),
+        link.clone(),
+        now_ms,
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    while hub_rx.try_recv().is_ok() {}
+
+    // Reconnect with generation 2 -> supersedes generation 1.
+    let (grant2, _) = make_grant(
+        "jti-gen-2",
+        "mac",
+        "demo/otter",
+        true,
+        2,
+        now_s,
+        now_s + 120,
+    );
+    mgr.open(
+        OpenParams {
+            session_id: "sess-gen".into(),
+            agent_id: "demo/otter".into(),
+            grant: grant2,
+            generation: 2,
+            transport: "wss".into(),
+            offer_sdp: None,
+            e2e_key: Some(e2e_b64.clone()),
+            ice_servers: vec![],
+            cols: 80,
+            rows: 24,
+        },
+        mk_target(),
+        link.clone(),
+        now_ms,
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    while hub_rx.try_recv().is_ok() {}
+
+    // Stale generation (generation 1) grant is rejected by HostGrantVerifier.
+    let (stale_grant, _) = make_grant(
+        "jti-gen-stale",
+        "mac",
+        "demo/otter",
+        true,
+        1,
+        now_s,
+        now_s + 120,
+    );
+    mgr.open(
+        OpenParams {
+            session_id: "sess-gen-stale".into(),
+            agent_id: "demo/otter".into(),
+            grant: stale_grant,
+            generation: 1,
+            transport: "wss".into(),
+            offer_sdp: None,
+            e2e_key: Some(e2e_b64.clone()),
+            ice_servers: vec![],
+            cols: 80,
+            rows: 24,
+        },
+        mk_target(),
+        link.clone(),
+        now_ms,
+    )
+    .await;
+    match hub_rx.recv().await.unwrap() {
+        NodeFrame::TermState {
+            session_id,
+            state,
+            detail,
+            ..
+        } => {
+            assert_eq!(session_id, "sess-gen-stale");
+            assert_eq!(state, "failed");
+            assert!(detail.unwrap_or_default().contains("stale"));
+        }
+        other => panic!("expected stale generation failure, got {other:?}"),
+    }
+
+    // Stale generation frame (generation 1) sent to active generation 2 session is dropped,
+    // while generation 2 Ping receives a generation 2 Pong.
+    let e2e_key: [u8; 32] = B64.decode(&e2e_b64).unwrap().try_into().unwrap();
+    let stale_ping = TerminalEnvelope {
+        v: TERMINAL_PROTOCOL_VERSION,
+        generation: 1,
+        seq: 1,
+        msg: TerminalMessage::Ping { ts: 111 },
+    };
+    let sealed_stale = seal_envelope(&stale_ping, &e2e_key, "sess-gen").unwrap();
+    mgr.on_frame("sess-gen", 1, sealed_stale).await;
+
+    let valid_ping = TerminalEnvelope {
+        v: TERMINAL_PROTOCOL_VERSION,
+        generation: 2,
+        seq: 1,
+        msg: TerminalMessage::Ping { ts: 222 },
+    };
+    let sealed_valid = seal_envelope(&valid_ping, &e2e_key, "sess-gen").unwrap();
+    mgr.on_frame("sess-gen", 2, sealed_valid).await;
+
+    let mut saw_valid_pong = false;
+    for _ in 0..10 {
+        if let Ok(Some(NodeFrame::TermFrame {
+            session_id,
+            generation,
+            payload,
+        })) = tokio::time::timeout(Duration::from_secs(2), hub_rx.recv()).await
+        {
+            assert_eq!(generation, 2, "only generation 2 frames may be emitted");
+            let env = open_envelope(&payload, &e2e_key, &session_id, 2).unwrap();
+            if let TerminalMessage::Pong { ts } = env.msg {
+                assert_eq!(ts, 222);
+                saw_valid_pong = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        saw_valid_pong,
+        "generation 2 Ping should receive generation 2 Pong"
+    );
+
+    mgr.close_for_agent("demo/otter");
+    stop_server(&socket);
+}
