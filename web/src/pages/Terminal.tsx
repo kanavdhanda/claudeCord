@@ -541,6 +541,7 @@ export function TerminalPage() {
   const navigate = useNavigate()
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const boxRef = useRef<HTMLDivElement | null>(null)
+  const imeRef = useRef<HTMLTextAreaElement | null>(null)
   const screensRef = useRef<Map<string, VtScreen>>(new Map())
   const activePaneRef = useRef<string>('%0')
   const seqOutRef = useRef<number>(1)
@@ -879,8 +880,11 @@ export function TerminalPage() {
     }
   }, [project, agent, reconnectTick])
 
-  const onCanvasKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+  const onCanvasKeyDown = (e: React.KeyboardEvent<HTMLElement>) => {
     if (e.metaKey && (e.key === 'c' || e.key === 'v' || e.key === 'r')) return
+    // On Mobile Chrome (Android Gboard / Samsung IME), soft-keyboard characters fire key === 'Unidentified' (keyCode 229)
+    // and deliver the actual characters in onChange/onInput on the hidden textarea.
+    if (e.key === 'Unidentified' || e.key === 'Process' || e.nativeEvent.isComposing) return
     e.preventDefault()
     if (e.ctrlKey && e.key.length === 1) {
       const code = e.key.toUpperCase().charCodeAt(0)
@@ -935,6 +939,21 @@ export function TerminalPage() {
         }
         break
     }
+  }
+
+  const onImeChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const el = e.currentTarget
+    const val = el.value
+    // Keep a single leading space sentinel (' ') so Android Chrome Gboard always fires Backspace.
+    if (val === '') {
+      sendInputText('\x7f')
+    } else if (val.startsWith(' ') && val.length > 1) {
+      sendInputText(val.slice(1).replace(/\n/g, '\r'))
+    } else if (!val.startsWith(' ')) {
+      sendInputText(val.replace(/\n/g, '\r'))
+    }
+    el.value = ' '
+    el.setSelectionRange(1, 1)
   }
 
   const selectTab = (paneId: string) => {
@@ -1038,7 +1057,16 @@ export function TerminalPage() {
         ref={boxRef}
         className="term-viewport"
         tabIndex={0}
-        onKeyDown={onCanvasKeyDown}
+        onClick={() => {
+          if (!showMirror && imeRef.current) {
+            imeRef.current.focus({ preventScroll: true })
+            imeRef.current.setSelectionRange(1, 1)
+          }
+        }}
+        onKeyDown={(e) => {
+          if (e.target === imeRef.current) return
+          onCanvasKeyDown(e)
+        }}
         onWheel={(e) => {
           const scr = getScreen(activePaneRef.current)
           const lines = Math.max(1, Math.round(Math.abs(e.deltaY) / 24))
@@ -1071,6 +1099,19 @@ export function TerminalPage() {
         }}
         aria-label="Interactive terminal viewport"
       >
+        <textarea
+          ref={imeRef}
+          className="term-ime"
+          defaultValue=" "
+          onKeyDown={onCanvasKeyDown}
+          onChange={onImeChange}
+          autoCapitalize="off"
+          autoComplete="off"
+          autoCorrect="off"
+          spellCheck={false}
+          inputMode="text"
+          aria-label="Live terminal keyboard input"
+        />
         <canvas ref={canvasRef} className={showMirror ? 'term-hidden' : 'term-canvas'} />
         {showMirror && (
           <pre className="term-mirror">{mirrorText || 'Terminal output will appear here…'}</pre>
