@@ -426,7 +426,7 @@ async fn run_session(
 ) {
     let cols = params.cols.clamp(10, 500);
     let rows = params.rows.clamp(4, 300);
-    target.term.resize(cols, rows);
+    target.term.resize(rows, cols);
 
     // Attach to tmux via Control Mode (-CC) if running on the tmux backend, or subscribe to Pty output on the PTY backend.
     let mut cc_attach: Option<ControlModeAttachment> = None;
@@ -448,15 +448,15 @@ async fn run_session(
     let mut udp_opt: Option<UdpSocket> = None;
     let mut local_udp_addr: Option<SocketAddr> = None;
     let mut webrtc_channel: Option<ChannelId> = None;
-    let mut active_transport = if params.transport == "webrtc" {
+    let wants_webrtc =
+        (params.transport == "webrtc" || params.transport == "auto") && params.offer_sdp.is_some();
+    let mut active_transport = if wants_webrtc {
         "connecting_webrtc".to_string()
     } else {
         "wss".to_string()
     };
 
-    if params.transport == "webrtc"
-        && let Some(offer_sdp) = params.offer_sdp.as_deref()
-    {
+    if wants_webrtc && let Some(offer_sdp) = params.offer_sdp.as_deref() {
         // Verify DTLS fingerprint binding if specified in the grant.
         if let Some(expected_fp) = claims.dtls_fp.as_deref()
             && let Some(offer_fp) = extract_sdp_fingerprint(offer_sdp)
@@ -1156,7 +1156,7 @@ async fn handle_incoming_payload(
             if let Some(tmux) = target.term.tmux() {
                 let _ = tmux.resize_pane(&pane, cols, rows);
             } else {
-                target.term.resize(cols, rows);
+                target.term.resize(rows, cols);
             }
         }
         TerminalMessage::TabOpen => {

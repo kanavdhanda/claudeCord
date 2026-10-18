@@ -79,6 +79,7 @@ mod resilience;
 mod robust;
 mod server;
 mod store;
+mod terminal_streaming;
 mod tiering;
 mod token_budget;
 mod uptime;

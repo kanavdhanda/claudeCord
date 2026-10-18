@@ -61,6 +61,14 @@ pub struct Link {
 }
 
 impl Link {
+    /// Creates a link backed directly by an outbound `NodeFrame` channel.
+    pub fn from_sender(out: mpsc::Sender<NodeFrame>) -> Self {
+        Self {
+            out,
+            wake: Arc::new(Notify::new()),
+        }
+    }
+
     /// Queues a frame to the hub. Waits if the queue is full, which pushes back on whoever is producing too fast.
     pub async fn send(&self, frame: NodeFrame) {
         let _ = self.out.send(frame).await;

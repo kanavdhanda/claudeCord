@@ -48,10 +48,14 @@ function emptyCell(): Cell {
   return { ch: ' ', fg: DEFAULT_FG, bg: DEFAULT_BG, bold: false, underline: false, inverse: false }
 }
 
+const MAX_SCROLLBACK = 2000
+
 class VtScreen {
   cols: number
   rows: number
   grid: Cell[][]
+  scrollback: Cell[][] = []
+  scrollOffset = 0
   altGrid: Cell[][] | null = null
   cx = 0
   cy = 0
@@ -102,6 +106,8 @@ class VtScreen {
 
   reset() {
     this.grid = this.makeGrid(this.cols, this.rows)
+    this.scrollback = []
+    this.scrollOffset = 0
     this.altGrid = null
     this.cx = 0
     this.cy = 0
@@ -114,9 +120,27 @@ class VtScreen {
     this.csiBuf = ''
   }
 
+  scrollBy(deltaLines: number) {
+    const maxOff = this.altGrid ? 0 : this.scrollback.length
+    this.scrollOffset = Math.max(0, Math.min(maxOff, this.scrollOffset + deltaLines))
+  }
+
+  scrollToBottom() {
+    this.scrollOffset = 0
+  }
+
   private scrollUp(lines = 1) {
     for (let i = 0; i < lines; i++) {
-      this.grid.shift()
+      const top = this.grid.shift()
+      if (top && !this.altGrid) {
+        this.scrollback.push(top)
+        if (this.scrollback.length > MAX_SCROLLBACK) {
+          this.scrollback.shift()
+        }
+        if (this.scrollOffset > 0) {
+          this.scrollOffset = Math.min(this.scrollback.length, this.scrollOffset + 1)
+        }
+      }
       const row: Cell[] = []
       for (let c = 0; c < this.cols; c++) row.push(emptyCell())
       this.grid.push(row)
@@ -356,8 +380,22 @@ class VtScreen {
     }
   }
 
+  private visibleRow(r: number): Cell[] {
+    if (this.altGrid || this.scrollOffset <= 0) {
+      return this.grid[r]
+    }
+    const total = this.scrollback.length + this.rows
+    const startIdx = Math.max(0, total - this.rows - this.scrollOffset)
+    const idx = startIdx + r
+    if (idx < this.scrollback.length) {
+      return this.scrollback[idx]
+    }
+    return this.grid[idx - this.scrollback.length] ?? this.grid[r]
+  }
+
   plainText(): string {
-    return this.grid
+    const all = this.altGrid ? this.grid : [...this.scrollback, ...this.grid]
+    return all
       .map((row) => row.map((c) => c.ch).join('').replace(/\s+$/, ''))
       .join('\n')
       .replace(/\n+$/, '')
@@ -382,9 +420,9 @@ class VtScreen {
 
     for (let r = 0; r < this.rows; r++) {
       const y = r * cellH
-      const row = this.grid[r]
+      const row = this.visibleRow(r)
       for (let c = 0; c < this.cols; c++) {
-        const cell = row[c]
+        const cell = row[c] ?? emptyCell()
         const x = c * cellW
         const fg = cell.inverse ? cell.bg : cell.fg
         const bg = cell.inverse ? cell.fg : cell.bg
@@ -404,7 +442,14 @@ class VtScreen {
       }
     }
 
-    if (this.cursorVisible && this.cy >= 0 && this.cy < this.rows && this.cx >= 0 && this.cx < this.cols) {
+    if (
+      this.scrollOffset === 0 &&
+      this.cursorVisible &&
+      this.cy >= 0 &&
+      this.cy < this.rows &&
+      this.cx >= 0 &&
+      this.cx < this.cols
+    ) {
       ctx.fillStyle = 'rgba(116, 128, 255, 0.65)'
       ctx.fillRect(this.cx * cellW, this.cy * cellH, Math.ceil(cellW), Math.ceil(cellH))
     }
@@ -994,6 +1039,29 @@ export function TerminalPage() {
         className="term-viewport"
         tabIndex={0}
         onKeyDown={onCanvasKeyDown}
+        onWheel={(e) => {
+          const scr = getScreen(activePaneRef.current)
+          const lines = Math.max(1, Math.round(Math.abs(e.deltaY) / 24))
+          scr.scrollBy(e.deltaY < 0 ? lines : -lines)
+          redrawActive()
+        }}
+        onTouchStart={(e) => {
+          if (e.touches.length === 1) {
+            boxRef.current?.setAttribute('data-touch-y', String(e.touches[0].clientY))
+          }
+        }}
+        onTouchMove={(e) => {
+          if (e.touches.length === 1 && boxRef.current) {
+            const prevY = Number(boxRef.current.getAttribute('data-touch-y') || e.touches[0].clientY)
+            const dy = e.touches[0].clientY - prevY
+            if (Math.abs(dy) >= 18) {
+              const scr = getScreen(activePaneRef.current)
+              scr.scrollBy(dy > 0 ? 1 : -1)
+              boxRef.current.setAttribute('data-touch-y', String(e.touches[0].clientY))
+              redrawActive()
+            }
+          }
+        }}
         onPaste={(e) => {
           const pasted = e.clipboardData.getData('text')
           if (pasted) {
@@ -1029,11 +1097,44 @@ export function TerminalPage() {
         </button>
         <button type="button" className="btn" onClick={() => sendInputBytes(new Uint8Array([3]))}>Ctrl+C</button>
         <button type="button" className="btn" onClick={() => sendInputBytes(new Uint8Array([4]))} title="Send EOF (closes secondary shell tab)">Ctrl+D</button>
+        <button type="button" className="btn" onClick={() => sendInputBytes(new Uint8Array([26]))}>Ctrl+Z</button>
         <button type="button" className="btn" onClick={() => sendInputBytes(new Uint8Array([12]))}>Ctrl+L</button>
         <button type="button" className="btn" onClick={() => sendInputText('\x1b[A')}>↑</button>
         <button type="button" className="btn" onClick={() => sendInputText('\x1b[B')}>↓</button>
         <button type="button" className="btn" onClick={() => sendInputText('\x1b[D')}>←</button>
         <button type="button" className="btn" onClick={() => sendInputText('\x1b[C')}>→</button>
+        <button type="button" className="btn" onClick={() => sendInputText('\x1b[5~')}>PgUp</button>
+        <button type="button" className="btn" onClick={() => sendInputText('\x1b[6~')}>PgDn</button>
+        <button
+          type="button"
+          className="btn"
+          onClick={() => {
+            getScreen(activePaneRef.current).scrollBy(5)
+            redrawActive()
+          }}
+        >
+          Scroll ↑
+        </button>
+        <button
+          type="button"
+          className="btn"
+          onClick={() => {
+            getScreen(activePaneRef.current).scrollBy(-5)
+            redrawActive()
+          }}
+        >
+          Scroll ↓
+        </button>
+        <button
+          type="button"
+          className="btn"
+          onClick={() => {
+            getScreen(activePaneRef.current).scrollToBottom()
+            redrawActive()
+          }}
+        >
+          Bottom
+        </button>
         <button type="button" className="btn" onClick={() => sendInputText('\r')}>Enter</button>
       </div>
 
