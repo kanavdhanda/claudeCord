@@ -68,6 +68,37 @@ impl Rig {
             .unwrap_or_else(|| panic!("no frame: {what}"))
     }
 
+    /// Sends a gateway event and waits for the frame it should cause, sending it again if nothing comes. The stand-in Discord, unlike the
+    /// real one, does not replay what a connection missed when it drops and resumes, and the bridge drops a connection whose heartbeat is
+    /// answered late (the stand-in beats every 150 ms, so a slow machine does). An event sent at that moment is lost, and sending it once
+    /// made the test depend on the timing. Sending it again is safe as long as the message has a real (numeric) Discord id (see `snow`): one seen twice is taken once (`a_message_that_arrives_twice_is_taken_once`).
+    async fn event_until_frame(
+        &mut self,
+        name: &str,
+        data: Value,
+        what: &str,
+        f: impl Fn(&HubFrame) -> bool,
+    ) -> HubFrame {
+        for _ in 0..12 {
+            self.event(name, data.clone());
+            let r = tokio::time::timeout(Duration::from_millis(1500), async {
+                while let Some(e) = self.device.recv().await {
+                    if let LinkEvent::Frame(fr) = e
+                        && f(&fr)
+                    {
+                        return Some(fr);
+                    }
+                }
+                None
+            })
+            .await;
+            if let Ok(Some(fr)) = r {
+                return fr;
+            }
+        }
+        panic!("no frame: {what}");
+    }
+
     /// True if no frame matching `f` arrives for a short while.
     async fn quiet(&mut self, f: impl Fn(&HubFrame) -> bool) -> bool {
         let r = tokio::time::timeout(Duration::from_millis(600), async {
@@ -731,10 +762,12 @@ async fn the_bridge_reconnects_to_discord_by_itself_and_keeps_working() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     assert!(states.ends_with(&["up", "down", "up"]), "{states:?}");
-    r.event("MESSAGE_CREATE", message(&ch, "m7", "1", "after the drop"));
-    r.frame("a message after reconnecting", |f| {
-        deliver_text(f, "after the drop")
-    })
+    r.event_until_frame(
+        "MESSAGE_CREATE",
+        message(&ch, &snow(10), "1", "after the drop"),
+        "a message after reconnecting",
+        |f| deliver_text(f, "after the drop"),
+    )
     .await;
 }
 
