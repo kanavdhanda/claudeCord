@@ -1198,9 +1198,9 @@ async fn handle_incoming_payload(
                 return true;
             }
             if let Some(att) = cc_attach.as_mut() {
+                // The attached client's own size is enough; forcing the window would shrink other attached terminals.
                 att.set_client_size(cols, rows);
-            }
-            if let Some(tmux) = target.term.tmux() {
+            } else if let Some(tmux) = target.term.tmux() {
                 if pane_in_session(&tmux, active_pane, &pane) {
                     let _ = tmux.resize_pane(&pane, cols, rows);
                 }
