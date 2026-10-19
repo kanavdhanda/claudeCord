@@ -62,7 +62,10 @@ pub async fn say(text: Option<String>, thread: Option<String>) -> Result<(), Str
         text,
         thread,
     })
-    .await
+    .await?;
+    // Said where the duplicate would be written, so the final reply is not typed out a second time.
+    println!("This was your reply; do not repeat it in the terminal.");
+    Ok(())
 }
 
 /// `claudecord ask`: a question for the people. Returns at once.

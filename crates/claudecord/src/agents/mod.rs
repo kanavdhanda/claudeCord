@@ -10,5 +10,5 @@ pub use adapters::AdapterExt;
 /// start of every session, and so paid for in tokens every time.
 pub const AGENTS_GUIDE: &str = "\
 ## claudeCord team chat
-Team messages arrive as `[name] text`; answer with the shell command `claudecord say \"text\"`. Run `claudecord guide` once for the rules.
+Team messages arrive as `[name] text`; reply to them only with the shell command `claudecord say \"text\"`, never also as terminal text. Input with no `[name]` was typed at the terminal: answer there, no say. Run `claudecord guide` once for the rules.
 ";
