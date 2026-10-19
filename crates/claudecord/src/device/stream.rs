@@ -1076,6 +1076,15 @@ async fn send_initial_tabs_and_snapshot(
     }
 }
 
+/// Whether `pane` is one of this agent's own tabs. The tmux server is shared by all agents on the machine, so a pane id from a browser
+/// proves nothing: it is checked against the agent's session before it is typed into or resized. The pane on show is known without asking tmux.
+fn pane_in_session(tmux: &super::tmux::TmuxTerminal, active_pane: &str, pane: &str) -> bool {
+    pane == active_pane
+        || tmux
+            .list_tabs()
+            .is_ok_and(|tabs| tabs.iter().any(|t| t.pane_id == pane))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_incoming_payload(
     raw: &str,
@@ -1163,7 +1172,11 @@ async fn handle_incoming_payload(
             }
             if let Ok(bytes) = B64.decode(&data) {
                 if let Some(tmux) = target.term.tmux() {
-                    let _ = tmux.send_pane_bytes(&pane, &bytes, now_ms);
+                    // The tmux server is shared by every agent on the machine, so a pane that is not in this agent's session is refused:
+                    // keys must never reach another agent's window.
+                    if pane_in_session(&tmux, active_pane, &pane) {
+                        let _ = tmux.send_pane_bytes(&pane, &bytes, now_ms);
+                    }
                 } else {
                     let _ = target.term.type_input(&bytes, now_ms);
                 }
@@ -1188,7 +1201,9 @@ async fn handle_incoming_payload(
                 att.set_client_size(cols, rows);
             }
             if let Some(tmux) = target.term.tmux() {
-                let _ = tmux.resize_pane(&pane, cols, rows);
+                if pane_in_session(&tmux, active_pane, &pane) {
+                    let _ = tmux.resize_pane(&pane, cols, rows);
+                }
             } else {
                 target.term.resize(rows, cols);
             }
@@ -1258,6 +1273,14 @@ async fn handle_incoming_payload(
         }
         TerminalMessage::TabSelect { pane } | TerminalMessage::Sync { pane } => {
             if is_valid_pane_id(&pane) {
+                // A browser that missed the first tabs asks for a pane it guessed (`%0`). A pane that is not among the tabs is answered with the
+                // first one, the agent's own, so the screen is never left blank and the browser learns the real pane from the tabs that follow.
+                let pane = match target.term.tmux().and_then(|t| t.list_tabs().ok()) {
+                    Some(tabs) if !tabs.is_empty() && !tabs.iter().any(|t| t.pane_id == pane) => {
+                        tabs[0].pane_id.clone()
+                    }
+                    _ => pane,
+                };
                 *active_pane = pane.clone();
                 if let Some(tmux) = target.term.tmux() {
                     if let Ok(tabs) = tmux.list_tabs() {

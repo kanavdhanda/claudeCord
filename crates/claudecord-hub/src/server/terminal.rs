@@ -64,6 +64,9 @@ pub struct TermMetrics {
     pub slow_reader_drops: AtomicU64,
 }
 
+/// How many frames from the device are kept for a browser that has not connected yet (the first tabs and screen are two).
+const EARLY_FRAMES_MAX: usize = 8;
+
 /// Active terminal streaming session tracked by the hub broker.
 pub struct TermSession {
     pub session_id: String,
@@ -82,6 +85,11 @@ pub struct TermSession {
     pub revoked: bool,
     pub last_ready: Option<NodeFrame>,
     pub last_state: Option<NodeFrame>,
+    /// Frames the device sent before any browser was listening (its first tabs and screen). Handed to the first browser that connects, since the
+    /// broadcast channel keeps nothing for a listener that is not there yet.
+    pub early: Vec<NodeFrame>,
+    /// Set once a browser has connected to the relay; from then on frames go through the broadcast channel only.
+    pub attached: bool,
     pub browser_tx: broadcast::Sender<NodeFrame>,
 }
 
@@ -199,6 +207,10 @@ impl TerminalBroker {
                 self.metrics
                     .bytes_relayed
                     .fetch_add(payload.len() as u64, Ordering::Relaxed);
+                let s = sessions.get_mut(session_id).expect("looked up above");
+                if !s.attached && s.early.len() < EARLY_FRAMES_MAX {
+                    s.early.push(frame.clone());
+                }
                 let _ = s.browser_tx.send(frame.clone());
             }
             _ => {}
@@ -354,7 +366,14 @@ pub(super) async fn create_session_for(st: &AppState, who: Who, req: CreateSessi
         Denied,
         NotFound,
         Offline(String),
-        Ready { node: String },
+        /// The machine runs a claudecord from before terminals existed: it would ignore the request and the page would stay blank.
+        TooOld {
+            node: String,
+            version: String,
+        },
+        Ready {
+            node: String,
+        },
     }
 
     let project_chk = project.clone();
@@ -373,8 +392,14 @@ pub(super) async fn create_session_for(st: &AppState, who: Who, req: CreateSessi
                 return Lookup::NotFound;
             }
             match c.conn_of(&a.node_name) {
-                Some(_) => Lookup::Ready {
-                    node: a.node_name.clone(),
+                Some(_) => match c.node_too_old_for_terminal(&a.node_name) {
+                    Some(version) => Lookup::TooOld {
+                        node: a.node_name.clone(),
+                        version,
+                    },
+                    None => Lookup::Ready {
+                        node: a.node_name.clone(),
+                    },
                 },
                 None => Lookup::Offline(a.node_name.clone()),
             }
@@ -397,6 +422,14 @@ pub(super) async fn create_session_for(st: &AppState, who: Who, req: CreateSessi
             return reply_json(
                 StatusCode::NOT_FOUND,
                 json!({"error": "no such agent in this project"}),
+            );
+        }
+        Some(Lookup::TooOld { node, version }) => {
+            return reply_json(
+                StatusCode::CONFLICT,
+                json!({"error": format!(
+                    "machine {node} runs claudecord {version}, which cannot show a terminal. Update it (npm i -g claudecord@latest), then run `claudecord down` on that machine and start the agent again"
+                )}),
             );
         }
         Some(Lookup::Offline(n)) => {
@@ -459,6 +492,8 @@ pub(super) async fn create_session_for(st: &AppState, who: Who, req: CreateSessi
                 revoked: false,
                 last_ready: None,
                 last_state: None,
+                early: Vec::new(),
+                attached: false,
                 browser_tx,
             },
         );
@@ -845,21 +880,24 @@ pub(super) async fn ws_for(
 
 /// Runs the browser WebSocket relay loop for a terminal session with bounded queues and slow-reader timeouts.
 async fn run_browser_ws(mut socket: WebSocket, st: AppState, session_id: String) {
+    // Subscribing and taking what came earlier happen under one lock, so no frame is missed or sent twice.
     let init = {
-        let sessions = st.terminals.sessions.locked();
-        sessions.get(&session_id).map(|s| {
+        let mut sessions = st.terminals.sessions.locked();
+        sessions.get_mut(&session_id).map(|s| {
+            s.attached = true;
             (
                 s.browser_tx.subscribe(),
                 s.last_ready.clone(),
                 s.last_state.clone(),
+                std::mem::take(&mut s.early),
             )
         })
     };
-    let Some((mut rx, last_ready, last_state)) = init else {
+    let Some((mut rx, last_ready, last_state, early)) = init else {
         return;
     };
 
-    for initial in [last_ready, last_state].into_iter().flatten() {
+    for initial in [last_ready, last_state].into_iter().flatten().chain(early) {
         if let Ok(text) = serde_json::to_string(&initial)
             && tokio::time::timeout(BROWSER_SEND_STALL, socket.send(Message::Text(text.into())))
                 .await

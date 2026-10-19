@@ -73,6 +73,8 @@ pub struct HubCore {
     pub(super) conns: HashMap<String, u64>,
     /// What each connected machine said it can do (see `NodeFrame::Hello`). Gone when it disconnects.
     pub(super) features: HashMap<String, Vec<String>>,
+    /// The version each connected machine said it runs. Gone when it disconnects.
+    pub(super) versions: HashMap<String, String>,
     /// When each device last gave a sign of life.
     pub(super) seen_at: HashMap<String, i64>,
     /// What each machine said it can take on. Not saved: a machine says it again every time it connects.
@@ -140,6 +142,7 @@ impl HubCore {
             grant_ttl_ms,
             conns: HashMap::new(),
             features: HashMap::new(),
+            versions: HashMap::new(),
             seen_at: HashMap::new(),
             capacity: HashMap::new(),
             agents: TrackedMap::new("agents", &dirty),
@@ -271,6 +274,15 @@ impl HubCore {
         self.status
             .get(agent_id)
             .map_or(AgentStatus::Offline, |s| s.0)
+    }
+
+    /// The version of a connected machine that is too old to stream a terminal (it first could in 0.4.0), or `None` when it can, or when its
+    /// version is not a release number (test and load-test harnesses).
+    pub fn node_too_old_for_terminal(&self, node: &str) -> Option<String> {
+        let v = self.versions.get(node)?;
+        let release = v.trim().trim_start_matches('v');
+        let is_release = release.starts_with(|c: char| c.is_ascii_digit()) && release.contains('.');
+        (is_release && crate::protocol::version_older(v, "0.4.0")).then(|| v.clone())
     }
 
     /// Whether a connected machine said it has `feature` (see `NodeFrame::Hello`).
@@ -524,6 +536,7 @@ impl HubCore {
         }
         self.conns.remove(node);
         self.features.remove(node);
+        self.versions.remove(node);
         let mine: Vec<(String, String, String)> = self
             .agents
             .values()
@@ -727,6 +740,7 @@ impl HubCore {
                 version, features, ..
             } => {
                 self.features.insert(node.to_string(), features);
+                self.versions.insert(node.to_string(), version.clone());
                 if let Some(&conn) = self.conns.get(node) {
                     let is_harness = {
                         let low = version.trim().to_ascii_lowercase();
