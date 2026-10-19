@@ -2685,3 +2685,122 @@ async fn a_say_to_an_agent_at_a_usage_limit_fails_and_says_so() {
         resp.msg
     );
 }
+
+/// What the Discord bridge does with a message that has a file attached: the file's pieces go out first, then the text.
+fn file_then_text(
+    c: &mut HubCore,
+    now: i64,
+    name: &str,
+    data: &[u8],
+    text: &str,
+    id: &str,
+) -> Vec<Effect> {
+    let (_, mut fx) = c
+        .send_file(&kd(), "demo", text, name, data, None, id)
+        .unwrap();
+    let (_, text_fx) = c
+        .human_message(&kd(), "demo", text, &MessageOpts::default(), now)
+        .unwrap();
+    fx.extend(text_fx);
+    fx
+}
+
+#[tokio::test]
+async fn a_file_and_the_text_sent_with_it_reach_the_agent_as_one_message_with_the_file_already_there()
+ {
+    let r = rig("filetext").await;
+    up(&r, "otter").await;
+    eventually("agent idle", async || {
+        r.hub
+            .call(|c, _| (c.status_of("demo/otter") == AgentStatus::Idle, vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    let data = vec![b'p'; 450 * 1024]; // three pieces: the text must wait for all of them
+    r.hub
+        .call(move |c, now| {
+            (
+                (),
+                file_then_text(c, now, "shot.png", &data, "what is in this picture?", "f1"),
+            )
+        })
+        .await;
+    eventually("the message reaches the agent", async || {
+        std::fs::read_to_string(r.project.join("fake.log"))
+            .is_ok_and(|s| s.contains("what is in this picture?"))
+    })
+    .await;
+    let log = std::fs::read_to_string(r.project.join("fake.log")).unwrap();
+    let text_at = log.find("what is in this picture?").unwrap();
+    let file_at = log
+        .find("[file shot.png at")
+        .unwrap_or_else(|| panic!("no file line in one message with the text: {log}"));
+    assert!(
+        text_at < file_at,
+        "the text comes first, the file's line after it: {log}"
+    );
+    assert!(
+        !log[text_at..file_at].contains("\n["),
+        "one message, not two with their own headers: {log}"
+    );
+    let size =
+        std::fs::metadata(r.project.join(".claudecord/files/demo/shot.png")).map(|m| m.len());
+    assert_eq!(
+        size.ok(),
+        Some(450 * 1024),
+        "the whole file was on the machine when the agent heard of it"
+    );
+    r.hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn messages_sent_after_a_file_reach_the_agent_after_it_in_order() {
+    let r = rig("fileorder").await;
+    up(&r, "otter").await;
+    eventually("agent idle", async || {
+        r.hub
+            .call(|c, _| (c.status_of("demo/otter") == AgentStatus::Idle, vec![]))
+            .await
+            .unwrap()
+    })
+    .await;
+    let data = vec![b'm'; 450 * 1024];
+    r.hub
+        .call(move |c, now| {
+            (
+                (),
+                file_then_text(c, now, "notes.md", &data, "first, about the file", "f2"),
+            )
+        })
+        .await;
+    for (i, text) in ["second", "third"].iter().enumerate() {
+        r.hub
+            .call(move |c, now| {
+                let (_, fx) = c
+                    .human_message(&kd(), "demo", text, &MessageOpts::default(), now + i as i64)
+                    .unwrap();
+                ((), fx)
+            })
+            .await;
+    }
+    eventually("all three reached the agent", async || {
+        std::fs::read_to_string(r.project.join("fake.log")).is_ok_and(|s| s.contains("third"))
+    })
+    .await;
+    let log = std::fs::read_to_string(r.project.join("fake.log")).unwrap();
+    let at = |needle: &str| {
+        log.find(needle)
+            .unwrap_or_else(|| panic!("{needle} missing: {log}"))
+    };
+    assert!(
+        at("first, about the file") < at("[file notes.md at"),
+        "{log}"
+    );
+    assert!(
+        at("[file notes.md at") < at("second"),
+        "the file is there before what came after it: {log}"
+    );
+    assert!(at("second") < at("third"), "{log}");
+    r.hub.shutdown().await;
+}

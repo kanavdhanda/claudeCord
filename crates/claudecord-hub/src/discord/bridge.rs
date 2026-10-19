@@ -1093,16 +1093,20 @@ impl Bridge {
                     answers_ask: answers.as_deref(),
                     attachments: &[],
                 };
-                let (routed, mut fx) = match c.human_message(&h2, &p2, &t2, &opts, now) {
+                // The files go out before the text: a device queues a file's line for the agent only when its last piece is saved, so
+                // frames sent after the text would reach the agent after it, and the text would be answered without the image.
+                let mut files_fx = Vec::new();
+                for (fid, fname, data) in &fetched {
+                    if let Ok((_, f)) = c.send_file(&h2, &p2, &t2, fname, data, th2.clone(), fid) {
+                        files_fx.extend(f);
+                    }
+                }
+                let (routed, fx) = match c.human_message(&h2, &p2, &t2, &opts, now) {
                     Ok(r) => r,
                     Err(d) => return (Err(d), vec![]),
                 };
-                for (fid, fname, data) in &fetched {
-                    if let Ok((_, f)) = c.send_file(&h2, &p2, &t2, fname, data, th2.clone(), fid) {
-                        fx.extend(f);
-                    }
-                }
-                (Ok(Some(routed)), fx)
+                files_fx.extend(fx);
+                (Ok(Some(routed)), files_fx)
             })
             .await;
         match outcome {
