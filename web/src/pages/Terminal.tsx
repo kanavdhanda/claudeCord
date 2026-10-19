@@ -620,11 +620,30 @@ export function TerminalPage() {
 
   const sendInputBytes = (bytes: Uint8Array) => {
     if (bytes.length === 0) return
+    // Typing brings the view back to the bottom, as in a terminal.
+    const shown = getScreen(activePaneRef.current)
+    if (shown.scrollOffset > 0) {
+      shown.scrollToBottom()
+      redrawActive()
+    }
     void sendMessage({
       op: 'input',
       pane: activePaneRef.current,
       data: b64UrlEncode(bytes),
     })
+  }
+
+  // PgUp / PgDn move the view a page through what the pane has printed, as scrolling the window does. A full-screen program (vim, less) has
+  // no scrollback to move through, so it gets the key itself.
+  const pageScroll = (towardsOlder: boolean) => {
+    const scr = getScreen(activePaneRef.current)
+    if (scr.altGrid) {
+      sendInputText(towardsOlder ? '\x1b[5~' : '\x1b[6~')
+      return
+    }
+    const page = Math.max(1, dimsRef.current.rows - 1)
+    scr.scrollBy(towardsOlder ? page : -page)
+    redrawActive()
   }
 
   const sendInputText = (text: string) => {
@@ -941,10 +960,10 @@ export function TerminalPage() {
         sendInputText('\x1b[F')
         break
       case 'PageUp':
-        sendInputText('\x1b[5~')
+        pageScroll(true)
         break
       case 'PageDown':
-        sendInputText('\x1b[6~')
+        pageScroll(false)
         break
       case 'Delete':
         sendInputText('\x1b[3~')
@@ -1160,8 +1179,8 @@ export function TerminalPage() {
         <button type="button" className="btn" onClick={() => sendInputText('\x1b[B')}>↓</button>
         <button type="button" className="btn" onClick={() => sendInputText('\x1b[D')}>←</button>
         <button type="button" className="btn" onClick={() => sendInputText('\x1b[C')}>→</button>
-        <button type="button" className="btn" onClick={() => sendInputText('\x1b[5~')}>PgUp</button>
-        <button type="button" className="btn" onClick={() => sendInputText('\x1b[6~')}>PgDn</button>
+        <button type="button" className="btn" onClick={() => pageScroll(true)}>PgUp</button>
+        <button type="button" className="btn" onClick={() => pageScroll(false)}>PgDn</button>
         <button
           type="button"
           className="btn"
