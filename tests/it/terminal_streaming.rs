@@ -1306,3 +1306,445 @@ async fn concurrent_active_connections_and_potato_link_backpressure_resync() {
     mgr.close_for_agent("demo/otter");
     stop_server(&socket);
 }
+
+/// A browser that has not yet looked at the session guesses pane `%0`. When the agent's pane is another one, asking for the guess must still
+/// bring back the agent's screen and say which pane it is, not leave the page blank.
+#[cfg(unix)]
+#[tokio::test]
+async fn sync_for_a_guessed_pane_answers_with_the_agents_real_pane() {
+    if !TmuxTerminal::available() {
+        return;
+    }
+    // Another session on the same tmux server takes `%0`, so the agent's pane is not it.
+    let socket = format!("cct-stream-guess-{}", std::process::id());
+    let _ = std::process::Command::new("tmux")
+        .args(["-L", &socket, "new-session", "-d", "-s", "other", "sh"])
+        .status();
+    let Some((term, _)) = start_tmux("guess", &["cat"]) else {
+        return;
+    };
+    let tmux = term.tmux().unwrap();
+    let real = tmux.list_tabs().unwrap()[0].pane_id.clone();
+    assert_ne!(
+        real, "%0",
+        "the test needs the agent in a pane other than %0"
+    );
+
+    let (hub_tx, mut hub_rx) = mpsc::channel::<NodeFrame>(256);
+    let mut mgr = StreamManager::new("mac".into());
+    mgr.set_grant_key(test_key());
+    let now_ms = claudecord::now_ms();
+    let now_s = now_ms / 1000;
+    let (grant, e2e_b64) = make_grant(
+        "jti-guess-1",
+        "mac",
+        "demo/otter",
+        true,
+        1,
+        now_s,
+        now_s + 120,
+    );
+    let e2e_key: [u8; 32] = B64.decode(&e2e_b64).unwrap().try_into().unwrap();
+    mgr.open(
+        OpenParams {
+            session_id: "sess-guess-1".into(),
+            agent_id: "demo/otter".into(),
+            grant,
+            generation: 1,
+            transport: "wss".into(),
+            offer_sdp: None,
+            e2e_key: Some(e2e_b64),
+            ice_servers: vec![],
+            cols: 80,
+            rows: 24,
+        },
+        Some(AgentTarget {
+            agent_id: "demo/otter".into(),
+            term: term.clone(),
+            cwd: PathBuf::from("/tmp"),
+            remove_env: vec!["HOME".into()],
+        }),
+        Link::from_sender(hub_tx),
+        now_ms,
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // What the device sent on its own is what a late browser never saw.
+    while hub_rx.try_recv().is_ok() {}
+
+    let sync = TerminalEnvelope {
+        v: TERMINAL_PROTOCOL_VERSION,
+        generation: 1,
+        seq: 1,
+        msg: TerminalMessage::Sync { pane: "%0".into() },
+    };
+    let sealed = seal_envelope(&sync, &e2e_key, "sess-guess-1").unwrap();
+    mgr.on_frame("sess-guess-1", 1, sealed).await;
+
+    let (mut told_tabs, mut got_screen, mut guessed) = (false, false, false);
+    let until = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < until && !(told_tabs && got_screen) {
+        let Ok(Some(NodeFrame::TermFrame { payload, .. })) =
+            tokio::time::timeout(Duration::from_millis(200), hub_rx.recv()).await
+        else {
+            continue;
+        };
+        match open_envelope(&payload, &e2e_key, "sess-guess-1", 1).map(|e| e.msg) {
+            Some(TerminalMessage::Tabs { active_pane, .. }) => {
+                guessed |= active_pane == "%0";
+                told_tabs |= active_pane == real;
+            }
+            Some(TerminalMessage::Output { pane, snapshot, .. }) => {
+                guessed |= pane == "%0";
+                got_screen |= snapshot && pane == real;
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        !guessed,
+        "the guessed pane %0 must not be answered as if it were the agent's"
+    );
+    assert!(
+        told_tabs,
+        "the tabs must name the agent's real pane {real} as active"
+    );
+    assert!(
+        got_screen,
+        "a snapshot of the agent's real pane {real} must follow"
+    );
+
+    mgr.close_for_agent("demo/otter");
+    stop_server(&socket);
+}
+
+/// The device sends its first tabs and screen the moment the session opens, before the browser's WebSocket is up. The hub must hand them to
+/// the browser that connects afterwards.
+#[tokio::test]
+async fn frames_sent_before_the_browser_connects_reach_it() {
+    let dir = std::env::temp_dir().join(format!("cc-term-early-{}", claudecord::now_ms()));
+    let _ = std::fs::create_dir_all(&dir);
+    let mut store = Store::open(&dir.join("t.db"), None).unwrap();
+    let machine_tok = store.create_token("mac", 0).unwrap();
+    let web_tok = store.create_token("web:kd", 0).unwrap();
+    let mut core = HubCore::default();
+    core.add_owner("1");
+    let cfg = Config {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        ping_every: Duration::from_secs(30),
+        max_out_bytes: 1024 * 1024,
+        tick_every: Duration::from_millis(50),
+        ..Config::default()
+    };
+    let hub = server::start(cfg, core, store).await.unwrap();
+
+    let mut req = format!("ws://{}/api/v1/node/connect", hub.addr)
+        .into_client_request()
+        .unwrap();
+    req.headers_mut().insert(
+        "authorization",
+        format!("Bearer {machine_tok}").parse().unwrap(),
+    );
+    let (mut node_ws, _) = connect_async(req).await.unwrap();
+    let send = |f: NodeFrame| Message::Text(serde_json::to_string(&f).unwrap().into());
+    node_ws
+        .send(send(NodeFrame::Hello {
+            version: env!("CARGO_PKG_VERSION").into(),
+            node_name: "mac".into(),
+            features: vec![],
+        }))
+        .await
+        .unwrap();
+    let _welcome = node_ws.next().await.unwrap().unwrap();
+    node_ws
+        .send(send(NodeFrame::AgentRegister {
+            agent: AgentSpec {
+                agent_id: "demo/otter".into(),
+                name: "otter".into(),
+                project: "demo".into(),
+                adapter: AdapterId::Claude,
+                model: None,
+                role: None,
+            },
+            cwd: "/tmp".into(),
+        }))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(40)).await;
+
+    let client = reqwest::Client::new();
+    let sess: serde_json::Value = client
+        .post(format!("http://{}/api/v1/terminal/sessions", hub.addr))
+        .header("authorization", format!("Bearer {web_tok}"))
+        .json(&serde_json::json!({"project": "demo", "agent": "otter", "write": true}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let session_id = sess["sessionId"].as_str().unwrap().to_string();
+    let grant = sess["grant"].as_str().unwrap().to_string();
+    let e2e_key: [u8; 32] = B64
+        .decode(sess["e2eKey"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let generation = sess["generation"].as_u64().unwrap();
+    let _open = node_ws.next().await.unwrap().unwrap();
+
+    // The device answers at once; nobody is listening on the browser side yet.
+    for (seq, msg) in [
+        TerminalMessage::Tabs {
+            tabs: vec![claudecord::protocol::terminal::TerminalTab {
+                window_id: "@7".into(),
+                pane_id: "%7".into(),
+                index: 0,
+                name: "otter".into(),
+                is_agent: true,
+            }],
+            active_pane: "%7".into(),
+        },
+        TerminalMessage::Output {
+            pane: "%7".into(),
+            data: B64.encode(b"claude> ready"),
+            snapshot: true,
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let env = TerminalEnvelope {
+            v: TERMINAL_PROTOCOL_VERSION,
+            generation,
+            seq: seq as u64 + 1,
+            msg,
+        };
+        node_ws
+            .send(send(NodeFrame::TermFrame {
+                session_id: session_id.clone(),
+                generation,
+                payload: seal_envelope(&env, &e2e_key, &session_id).unwrap(),
+            }))
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let (mut browser_ws, _) = connect_async(format!(
+        "ws://{}/api/v1/terminal/ws?session_id={session_id}&grant={grant}",
+        hub.addr
+    ))
+    .await
+    .unwrap();
+    let mut seen = Vec::new();
+    let until = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < until && seen.len() < 2 {
+        let Ok(Some(Ok(m))) =
+            tokio::time::timeout(Duration::from_millis(300), browser_ws.next()).await
+        else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(m.to_text().unwrap_or("")) else {
+            continue;
+        };
+        if v["t"] == "term.frame" {
+            seen.push(
+                open_envelope(
+                    v["payload"].as_str().unwrap(),
+                    &e2e_key,
+                    &session_id,
+                    generation,
+                )
+                .unwrap()
+                .msg,
+            );
+        }
+    }
+    assert!(
+        matches!(seen.first(), Some(TerminalMessage::Tabs { active_pane, .. }) if active_pane == "%7"),
+        "got {seen:?}"
+    );
+    assert!(
+        matches!(seen.get(1), Some(TerminalMessage::Output { pane, snapshot: true, .. }) if pane == "%7"),
+        "got {seen:?}"
+    );
+
+    hub.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Every agent on a machine shares one tmux server, so a pane id sent by a browser must not be trusted: keys for a pane of another agent's
+/// session are dropped, and keys for the agent's own pane still arrive.
+#[cfg(unix)]
+#[tokio::test]
+async fn input_for_another_agents_pane_is_refused() {
+    if !TmuxTerminal::available() {
+        return;
+    }
+    let socket = format!("cct-stream-own-{}", std::process::id());
+    let _ = std::process::Command::new("tmux")
+        .args(["-L", &socket, "new-session", "-d", "-s", "other", "cat"])
+        .status();
+    let Some((term, _)) = start_tmux("own", &["cat"]) else {
+        return;
+    };
+    let real = term.tmux().unwrap().list_tabs().unwrap()[0].pane_id.clone();
+    assert_ne!(real, "%0");
+
+    let (hub_tx, _hub_rx) = mpsc::channel::<NodeFrame>(256);
+    let mut mgr = StreamManager::new("mac".into());
+    mgr.set_grant_key(test_key());
+    let now_ms = claudecord::now_ms();
+    let now_s = now_ms / 1000;
+    let (grant, e2e_b64) = make_grant(
+        "jti-own-1",
+        "mac",
+        "demo/otter",
+        true,
+        1,
+        now_s,
+        now_s + 120,
+    );
+    let e2e_key: [u8; 32] = B64.decode(&e2e_b64).unwrap().try_into().unwrap();
+    mgr.open(
+        OpenParams {
+            session_id: "sess-own-1".into(),
+            agent_id: "demo/otter".into(),
+            grant,
+            generation: 1,
+            transport: "wss".into(),
+            offer_sdp: None,
+            e2e_key: Some(e2e_b64),
+            ice_servers: vec![],
+            cols: 80,
+            rows: 24,
+        },
+        Some(AgentTarget {
+            agent_id: "demo/otter".into(),
+            term: term.clone(),
+            cwd: PathBuf::from("/tmp"),
+            remove_env: vec!["HOME".into()],
+        }),
+        Link::from_sender(hub_tx),
+        now_ms,
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    for (seq, (pane, text)) in [("%0", "intruder-marker\n"), (real.as_str(), "own-marker\n")]
+        .into_iter()
+        .enumerate()
+    {
+        let seq = seq as u64 + 1;
+        let env = TerminalEnvelope {
+            v: TERMINAL_PROTOCOL_VERSION,
+            generation: 1,
+            seq,
+            msg: TerminalMessage::Input {
+                pane: pane.into(),
+                data: B64.encode(text),
+            },
+        };
+        mgr.on_frame(
+            "sess-own-1",
+            1,
+            seal_envelope(&env, &e2e_key, "sess-own-1").unwrap(),
+        )
+        .await;
+    }
+    let screen = |pane: &str| {
+        let out = std::process::Command::new("tmux")
+            .args(["-L", &socket, "capture-pane", "-p", "-t", pane])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let until = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < until && !screen(&real).contains("own-marker") {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        screen(&real).contains("own-marker"),
+        "keys for the agent's own pane must arrive"
+    );
+    assert!(
+        !screen("%0").contains("intruder-marker"),
+        "keys must not reach another agent's pane"
+    );
+
+    mgr.close_for_agent("demo/otter");
+    stop_server(&socket);
+}
+
+/// A machine running a claudecord from before terminals existed would ignore the request and leave the browser on a blank page. The hub says
+/// so instead, and names what to do.
+#[tokio::test]
+async fn a_machine_too_old_for_terminals_is_told_so_not_left_blank() {
+    let dir = std::env::temp_dir().join(format!("cc-term-old-{}", claudecord::now_ms()));
+    let _ = std::fs::create_dir_all(&dir);
+    let mut store = Store::open(&dir.join("t.db"), None).unwrap();
+    let machine_tok = store.create_token("mac", 0).unwrap();
+    let web_tok = store.create_token("web:kd", 0).unwrap();
+    let mut core = HubCore::default();
+    core.add_owner("1");
+    let cfg = Config {
+        bind: "127.0.0.1:0".parse().unwrap(),
+        ping_every: Duration::from_secs(30),
+        max_out_bytes: 1024 * 1024,
+        tick_every: Duration::from_millis(50),
+        ..Config::default()
+    };
+    let hub = server::start(cfg, core, store).await.unwrap();
+
+    let mut req = format!("ws://{}/api/v1/node/connect", hub.addr)
+        .into_client_request()
+        .unwrap();
+    req.headers_mut().insert(
+        "authorization",
+        format!("Bearer {machine_tok}").parse().unwrap(),
+    );
+    let (mut node_ws, _) = connect_async(req).await.unwrap();
+    let send = |f: NodeFrame| Message::Text(serde_json::to_string(&f).unwrap().into());
+    node_ws
+        .send(send(NodeFrame::Hello {
+            version: "0.3.5".into(),
+            node_name: "mac".into(),
+            features: vec![],
+        }))
+        .await
+        .unwrap();
+    node_ws
+        .send(send(NodeFrame::AgentRegister {
+            agent: AgentSpec {
+                agent_id: "demo/otter".into(),
+                name: "otter".into(),
+                project: "demo".into(),
+                adapter: AdapterId::Claude,
+                model: None,
+                role: None,
+            },
+            cwd: "/tmp".into(),
+        }))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let res = reqwest::Client::new()
+        .post(format!("http://{}/api/v1/terminal/sessions", hub.addr))
+        .header("authorization", format!("Bearer {web_tok}"))
+        .json(&serde_json::json!({"project": "demo", "agent": "otter", "write": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status().as_u16(), 409);
+    let body: serde_json::Value = res.json().await.unwrap();
+    let why = body["error"].as_str().unwrap();
+    assert!(
+        why.contains("0.3.5") && why.contains("claudecord down"),
+        "got {why}"
+    );
+
+    hub.shutdown().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}

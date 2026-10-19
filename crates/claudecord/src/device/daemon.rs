@@ -262,6 +262,15 @@ struct Incoming {
 
 /// How long a transfer may go without a new piece before it is given up on.
 const FILE_ABANDON_MS: i64 = 10 * 60_000;
+/// How long a file's line waits at the end of the queue for the text that came with it, so the two reach the agent as one message.
+const FILE_TEXT_WAIT_MS: i64 = 3_000;
+
+/// Where in the queue the line of a file from `from` is (the last entry that is only a file line, not yet joined by a message).
+fn file_line_entry(queue: &[Delivery], from: &str) -> Option<usize> {
+    queue
+        .iter()
+        .rposition(|d| d.from == from && d.msg_id.is_none() && d.text.starts_with("[file "))
+}
 
 /// Closes and removes the transfers that have had no piece for `max_age_ms`: the sender went away, and an open file and a half-written `.part`
 /// would otherwise stay for as long as the agent runs. Returns how many.
@@ -374,6 +383,8 @@ struct Agent {
     faults: u32,
     /// Files being received: where they are being written, and the chunk number expected next.
     files: HashMap<String, Incoming>,
+    /// Who sent the file that just landed, and when. Its line is in `queue`, and the text that same person sends with it is merged into it.
+    file_line: Option<(String, i64)>,
 }
 
 /// A request from the command line, with where to send the answer.
@@ -679,12 +690,33 @@ impl State {
                     if from != "system" {
                         a.awaiting = Some(crate::now_ms());
                     }
-                    a.queue.push(Delivery {
-                        from,
-                        text,
-                        thread,
-                        msg_id,
-                    });
+                    // Text that follows a file from the same person is what they wrote about it: one message, the file's line after the text.
+                    // What others sent meanwhile (the hub's own notes) does not use up the chance.
+                    let now = crate::now_ms();
+                    let at = a
+                        .file_line
+                        .as_ref()
+                        .filter(|(by, t)| *by == from && now - t < FILE_TEXT_WAIT_MS)
+                        .and_then(|_| file_line_entry(&a.queue, &from));
+                    if let Some(i) = at {
+                        a.file_line = None;
+                        let last = &mut a.queue[i];
+                        let line = std::mem::take(&mut last.text);
+                        last.text = if text.trim().is_empty() {
+                            line
+                        } else {
+                            format!("{}\n{line}", text.trim())
+                        };
+                        last.thread = thread;
+                        last.msg_id = msg_id;
+                    } else {
+                        a.queue.push(Delivery {
+                            from,
+                            text,
+                            thread,
+                            msg_id,
+                        });
+                    }
                 }
             }
             HubFrame::Priority {
@@ -1192,12 +1224,26 @@ impl State {
             .unwrap_or(&done)
             .to_string_lossy()
             .into_owned();
-        a.queue.push(Delivery {
-            from: from.to_string(),
-            text: format!("[file {} at {rel}]", safe_name(name)),
-            thread: None,
-            msg_id: None,
-        });
+        // Several files in a row from one person share one entry, so they and their text arrive together.
+        let line = format!("[file {} at {rel}]", safe_name(name));
+        let now = crate::now_ms();
+        let same = a
+            .file_line
+            .as_ref()
+            .is_some_and(|(by, t)| by == from && now - t < FILE_TEXT_WAIT_MS);
+        match same.then(|| file_line_entry(&a.queue, from)).flatten() {
+            Some(i) => {
+                a.queue[i].text.push('\n');
+                a.queue[i].text.push_str(&line);
+            }
+            None => a.queue.push(Delivery {
+                from: from.to_string(),
+                text: line,
+                thread: None,
+                msg_id: None,
+            }),
+        }
+        a.file_line = Some((from.to_string(), now));
     }
 
     /// The hub decided a permission request. Pick the matching option on the prompt that is showing.
@@ -1571,8 +1617,12 @@ impl State {
                 a.raw.pop_front();
             }
             // Paste what is waiting, as one input, when it is safe.
+            // Nothing is pasted while a file is still arriving, or just landed and its text is yet to come: what was sent after a file
+            // reaches the agent after the file, and the file's text goes with it.
             if !a.held
                 && a.inflight.is_none()
+                && a.files.is_empty()
+                && !a.file_line.as_ref().is_some_and(|(_, t)| now - t < FILE_TEXT_WAIT_MS)
                 && !a.queue.is_empty()
                 && state.limit.is_none()
                 && state.prompt.is_none()
@@ -2427,6 +2477,7 @@ impl State {
                 limit_reported: false,
                 faults: 0,
                 files: HashMap::new(),
+                file_line: None,
             },
         );
         self.link
