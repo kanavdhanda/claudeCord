@@ -107,6 +107,13 @@ impl TmuxTerminal {
                 "remain-on-exit",
                 "on",
                 ";",
+                // The window follows whichever client was used last, so a phone and a desktop terminal sharing it never leave the
+                // other with a dotted, cut-off screen.
+                "set-option",
+                "-g",
+                "window-size",
+                "latest",
+                ";",
                 // A program that ends cleanly (Claude's /exit, say) takes its window with it at once. One that fails stays on screen for a moment, so
                 // the reason can be read, until the daemon notices and closes it.
                 "set-hook",
@@ -351,6 +358,14 @@ impl TmuxTerminal {
                 &cols.to_string(),
                 "-y",
                 &rows.to_string(),
+                ";",
+                // `resize-window` pins the size (`manual`); hand it back so attached clients keep resizing it.
+                "set-option",
+                "-w",
+                "-t",
+                &self.session,
+                "window-size",
+                "latest",
             ],
         );
     }
@@ -662,7 +677,22 @@ impl TmuxTerminal {
         let r = rows.to_string();
         Self::tmux(
             &self.socket,
-            &["resize-window", "-t", pane_id, "-x", &c, "-y", &r],
+            &[
+                "resize-window",
+                "-t",
+                pane_id,
+                "-x",
+                &c,
+                "-y",
+                &r,
+                ";",
+                "set-option",
+                "-w",
+                "-t",
+                pane_id,
+                "window-size",
+                "latest",
+            ],
         )
         .map(|_| ())
     }
