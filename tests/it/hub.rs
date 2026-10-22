@@ -3441,3 +3441,53 @@ fn a_say_to_an_agent_that_is_limited_paused_or_still_starting_fails_at_once_with
         );
     }
 }
+
+/// What `say` was told about where it landed: the `warn` receipts in an effect list, as their text.
+fn say_warnings(fx: &[Effect]) -> Vec<String> {
+    fx.iter()
+        .filter_map(|e| match e {
+            Effect::Send {
+                frame: HubFrame::SayReceipt { state, detail, .. },
+                ..
+            } if state == "warn" => detail.clone(),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_say_in_a_thread_it_was_not_asked_in_gets_a_short_warning_and_a_right_one_gets_none() {
+    let mut w = World::new();
+    w.join("mac", 1, "otter");
+    w.join("gpu", 2, "heron");
+    let say = |w: &mut World, thread: Option<&str>, at: i64| {
+        w.core.on_node_frame(
+            "mac",
+            NodeFrame::AgentSay {
+                agent_id: "p/otter".into(),
+                text: "done".into(),
+                thread: thread.map(String::from),
+                say_id: Some("s1".into()),
+            },
+            at,
+        )
+    };
+    // Nobody has asked it anything yet, so there is nothing to compare with.
+    assert!(say_warnings(&say(&mut w, None, T0)).is_empty());
+    let opts = MessageOpts {
+        thread: Some("design talk"),
+        ..Default::default()
+    };
+    let kd = w.kd.clone();
+    w.core
+        .human_message(&kd, "p", "thoughts?", &opts, T0)
+        .unwrap();
+    // It answered in the main channel, but was asked in "design talk".
+    let warn = say_warnings(&say(&mut w, None, T0 + 1_000));
+    assert_eq!(warn.len(), 1);
+    assert!(warn[0].contains("main channel") && warn[0].contains("design talk"));
+    assert!(warn[0].contains("heron"), "the team is listed: {}", warn[0]);
+    // Answering where it was asked costs nothing, and neither does it long after, once that thread is no longer active.
+    assert!(say_warnings(&say(&mut w, Some("design talk"), T0 + 2_000)).is_empty());
+    assert!(say_warnings(&say(&mut w, None, T0 + 3 * 60 * 60_000)).is_empty());
+}
