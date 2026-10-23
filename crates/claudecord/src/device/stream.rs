@@ -343,6 +343,8 @@ struct ControlModeAttachment {
     writer: Box<dyn Write + Send>,
     _master: Box<dyn portable_pty::MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
+    socket: String,
+    session: String,
 }
 
 impl ControlModeAttachment {
@@ -404,6 +406,8 @@ impl ControlModeAttachment {
                 writer,
                 _master: pair.master,
                 child,
+                socket: socket.to_string(),
+                session: session.to_string(),
             },
             rx,
         ))
@@ -422,6 +426,8 @@ impl Drop for ControlModeAttachment {
         let _ = writeln!(self.writer, "detach-client");
         let _ = self.writer.flush();
         let _ = self.child.kill();
+        // The browser's resizes pinned the windows to its size; hand sizing back to tmux so a terminal attached later fills its screen.
+        super::tmux::release_window_sizes(&self.socket, &self.session);
     }
 }
 
