@@ -84,9 +84,27 @@ impl Guard {
             return;
         }
         self.last_input = Some(now);
-        for &b in bytes {
+        let mut i = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
+            i += 1;
             match b {
                 b'\r' | b'\n' | 0x03 | 0x15 => self.partial = false,
+                // Arrow keys, PgUp/PgDn, Alt+key and the like move around; they put nothing in the line, so they must not hold messages back.
+                0x1b => match bytes.get(i) {
+                    Some(b'[') => {
+                        i += 1;
+                        while i < bytes.len() && !(0x40..=0x7e).contains(&bytes[i]) {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                    Some(b'O') => i += 2,
+                    Some(_) => i += 1,
+                    None => {}
+                },
+                // Other control keys (Tab, Ctrl+L, Backspace) write no text.
+                0x00..=0x1f | 0x7f => {}
                 _ => self.partial = true,
             }
         }

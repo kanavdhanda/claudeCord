@@ -57,6 +57,24 @@ fn the_guard_waits_for_the_person_and_for_the_agent() {
 }
 
 #[test]
+fn navigation_keys_do_not_leave_a_half_typed_line() {
+    let mut g = Guard::with_times(0, 2000, 3000);
+    for keys in [
+        &b"\x1b[5~"[..],
+        b"\x1b[6~",
+        b"\x1b[A\x1b[B\x1b[C\x1b[D",
+        b"\x1bOA",
+        b"\x1b",
+        b"\t\x0c\x7f",
+    ] {
+        g.on_input(keys, 5000);
+        assert_eq!(g.check(9000, true), Ok(()), "{keys:?} wrote nothing");
+    }
+    g.on_input(b"\x1b[200~hi\x1b[201~", 10_000);
+    assert_eq!(g.check(14_000, true), Err(Wait::PartialLine));
+}
+
+#[test]
 fn an_urgent_message_does_not_wait_for_the_agent_to_go_quiet() {
     let mut g = Guard::with_times(0, 2000, 3000);
     g.on_output(10_000);
