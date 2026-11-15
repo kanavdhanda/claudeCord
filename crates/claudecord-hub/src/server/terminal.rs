@@ -115,6 +115,14 @@ pub struct TermSession {
     pub browser_tx: broadcast::Sender<NodeFrame>,
 }
 
+/// Where the hub's session generation counter starts. A machine remembers the highest generation it has accepted for each agent and refuses
+/// any that is not higher ("stale connection generation"), and it keeps that across a hub restart. A counter that began at 1 each time the hub
+/// started was therefore refused by every machine that had been running through earlier sessions, until it caught up (never, in practice).
+/// Starting from the clock makes it higher than any earlier start (sessions are created far slower than once a millisecond).
+fn first_generation(now_ms: i64) -> u64 {
+    now_ms.max(1) as u64
+}
+
 /// Per-hub broker managing short-lived terminal grants, signaling, and WSS fallback relay.
 pub struct TerminalBroker {
     grant_secret: [u8; 32],
@@ -157,7 +165,7 @@ impl TerminalBroker {
             grant_secret,
             sessions: Mutex::new(HashMap::new()),
             ice_servers,
-            next_generation: AtomicU64::new(1),
+            next_generation: AtomicU64::new(first_generation(now_ms())),
             metrics: TermMetrics::default(),
         }
     }
@@ -1352,5 +1360,21 @@ mod lifetime_tests {
             created + SESSION_MAX_MS,
             created
         ));
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+
+    #[test]
+    fn a_hub_that_starts_later_numbers_sessions_above_everything_an_earlier_one_handed_out() {
+        // An earlier hub ran for a day and made a session every second: its counter ended far above where a small count would start.
+        let day_ms = 24 * 3_600_000;
+        let earlier = first_generation(1_700_000_000_000) + (day_ms / 1_000) as u64;
+        let later = first_generation(1_700_000_000_000 + day_ms);
+        assert!(later > earlier);
+        // And the number stays one a browser can hold exactly (JavaScript numbers are exact below 2^53).
+        assert!(later < (1u64 << 53));
     }
 }
