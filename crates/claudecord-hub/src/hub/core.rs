@@ -892,7 +892,8 @@ impl HubCore {
                 to,
                 task,
                 thread,
-            } => self.assign(&agent_id, &to, &task, thread, now, &mut fx),
+                say_id,
+            } => self.assign(&agent_id, &to, &task, thread, say_id, now, &mut fx),
             NodeFrame::AgentTaskDone {
                 agent_id,
                 task_id,

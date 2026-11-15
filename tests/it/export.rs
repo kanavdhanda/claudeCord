@@ -446,6 +446,7 @@ async fn a_real_conversation_including_the_agents_report_becomes_a_readable_vaul
         );
         let frames = [
             NodeFrame::AgentAssign {
+                say_id: None,
                 agent_id: "demo/otter".into(),
                 to: "heron".into(),
                 task: "write the csv endpoint".into(),
