@@ -61,6 +61,14 @@ pub(super) struct Pending {
     /// What was sent, kept so a session that dies before accepting it can be given it again.
     pub items: Vec<Queued>,
     pub at: i64,
+    /// The connection it was sent over (0 once restored from disk, which is no connection). When the machine's connection is a different one,
+    /// the frames may never have arrived, and an unaccepted delivery is sent again (`resend_unaccepted`).
+    #[serde(default)]
+    pub conn: u64,
+    /// Every frame of the batch carried an id of its own, so a machine that already has some of them ignores those when they are sent again.
+    /// Messages between agents (pasted at once or failed) and deliveries saved by an older hub are never sent again.
+    #[serde(default)]
+    pub per_item_ids: bool,
 }
 
 use super::tracked::{Cell, Log, TrackedMap, TrackedSet};
@@ -601,6 +609,7 @@ impl HubCore {
         self.roster_dirty.remove(id);
         // Without these two, every agent that ever spoke or was sent something would leave a row behind for as long as the hub runs.
         self.streak.remove(id);
+        self.recent_in.remove(id);
         self.pending.retain(|_, p| p.agent_id != id);
     }
 
@@ -891,7 +900,8 @@ impl HubCore {
                 to,
                 task,
                 thread,
-            } => self.assign(&agent_id, &to, &task, thread, now, &mut fx),
+                say_id,
+            } => self.assign(&agent_id, &to, &task, thread, say_id, now, &mut fx),
             NodeFrame::AgentTaskDone {
                 agent_id,
                 task_id,
@@ -1137,7 +1147,10 @@ impl HubCore {
             text: clean.clone(),
             thread: thread.clone(),
         }));
-        if let Some(note) = self.wrong_thread_note(&a, thread.as_deref(), now) {
+        // Only to a machine that knows `warn` receipts: an older one would take it for the answer and never hear whether the say arrived.
+        if self.node_can(&a.node_name, "say-warn")
+            && let Some(note) = self.wrong_thread_note(&a, thread.as_deref(), now)
+        {
             self.say_receipt(&a, say_id.as_deref(), "warn", Some(&note), fx);
         }
         self.route_agent_message(
@@ -1213,6 +1226,7 @@ pub(super) fn strip_mention(text: &str, name: &str) -> String {
 /// matches in "hi @otter!" and "@otter." but not in "@otters", "@otter-2" or "me@otter", and `@macbook` does not match inside `@macbook-eeg-main`
 /// (which would send a message meant for one agent to another).
 pub(super) fn mentions_name(text: &str, name: &str) -> bool {
+    let text = without_code(text);
     let hay = text.to_ascii_lowercase();
     let needle = format!("@{}", name.to_ascii_lowercase());
     let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
@@ -1227,4 +1241,45 @@ pub(super) fn mentions_name(text: &str, name: &str) -> bool {
         };
         !before.is_some_and(word) && !goes_on
     })
+}
+
+/// The text with fenced and inline code taken out, so a name inside a quoted command or a code block does not address anyone. A fence or
+/// backtick that is never closed keeps the rest as code.
+fn without_code(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut fenced = false;
+    for line in text.split_inclusive('\n') {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            continue;
+        }
+        let mut inline = false;
+        for c in line.chars() {
+            if c == '`' {
+                inline = !inline;
+            } else if !inline {
+                out.push(c);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod code_mention_tests {
+    use super::mentions_name;
+
+    #[test]
+    fn a_name_in_code_does_not_address_anyone_but_one_in_prose_does() {
+        assert!(mentions_name("hi @exec, build it", "exec"));
+        assert!(!mentions_name("run `claudecord say @exec hi` now", "exec"));
+        assert!(!mentions_name(
+            "```\nclaudecord assign @exec x\n```\ndone",
+            "exec"
+        ));
+        assert!(mentions_name("```\nx\n```\n@exec please", "exec"));
+    }
 }

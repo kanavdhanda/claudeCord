@@ -28,6 +28,11 @@ use tokio::sync::mpsc;
 /// Maximum concurrent terminal streaming sessions allowed on one machine by default.
 pub const MAX_SESSIONS_PER_NODE: usize = 16;
 
+/// A session that has heard nothing from its browser for this long is closed. The browser pings every few seconds (a hidden tab, at
+/// least once a minute), so this means the page is gone; without it a browser that vanished would keep a tmux client attached and a
+/// slot in the machine's session limit for good.
+const SESSION_IDLE: Duration = Duration::from_secs(150);
+
 /// Outbound terminal buffer cap per streaming session (256 KiB) to prevent slow browsers from growing host memory.
 const SESSION_OUT_QUEUE_BYTES: usize = 256 * 1024;
 
@@ -343,6 +348,8 @@ struct ControlModeAttachment {
     writer: Box<dyn Write + Send>,
     _master: Box<dyn portable_pty::MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
+    socket: String,
+    session: String,
 }
 
 impl ControlModeAttachment {
@@ -404,6 +411,8 @@ impl ControlModeAttachment {
                 writer,
                 _master: pair.master,
                 child,
+                socket: socket.to_string(),
+                session: session.to_string(),
             },
             rx,
         ))
@@ -422,6 +431,8 @@ impl Drop for ControlModeAttachment {
         let _ = writeln!(self.writer, "detach-client");
         let _ = self.writer.flush();
         let _ = self.child.kill();
+        // The browser's resizes pinned the windows to its size; hand sizing back to tmux so a terminal attached later fills its screen.
+        super::tmux::release_window_sizes(&self.socket, &self.session);
     }
 }
 
@@ -613,6 +624,7 @@ async fn run_session(
     let mut udp_buf = [0u8; 65536];
     let mut telemetry_tick = tokio::time::interval(Duration::from_secs(10));
     telemetry_tick.tick().await;
+    let mut last_heard = Instant::now();
 
     loop {
         // Drain any pending str0m outputs (packets to transmit, ChannelOpen, ChannelData, PeerStats) and compute next timeout.
@@ -711,6 +723,9 @@ async fn run_session(
             .await;
         }
 
+        if !pending_channel_data.is_empty() {
+            last_heard = Instant::now();
+        }
         for raw_bytes in pending_channel_data {
             if let Ok(raw_str) = std::str::from_utf8(&raw_bytes)
                 && !handle_incoming_payload(
@@ -766,6 +781,7 @@ async fn run_session(
                         continue;
                     }
                     bytes_rx = bytes_rx.saturating_add(payload.len() as u64);
+                    last_heard = Instant::now();
                     if webrtc_channel.is_none() && active_transport != "wss" {
                         active_transport = "wss".into();
                         link.send(NodeFrame::TermState {
@@ -984,6 +1000,19 @@ async fn run_session(
                 }
             },
             _ = telemetry_tick.tick() => {
+                if last_heard.elapsed() > SESSION_IDLE {
+                    link.send(NodeFrame::TermState {
+                        session_id: params.session_id.clone(),
+                        agent_id: params.agent_id.clone(),
+                        state: "closed".into(),
+                        transport: active_transport,
+                        rtt_ms,
+                        bytes_tx,
+                        bytes_rx,
+                        detail: Some("no word from the browser".into()),
+                    }).await;
+                    return;
+                }
                 link.send(NodeFrame::TermState {
                     session_id: params.session_id.clone(),
                     agent_id: params.agent_id.clone(),

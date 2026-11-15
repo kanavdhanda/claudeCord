@@ -20,6 +20,7 @@ fn spec(project: &str, name: &str) -> AgentSpec {
         name: name.into(),
         project: project.into(),
         adapter: AdapterId::Claude,
+        harness: None,
         model: None,
         role: None,
     }
@@ -221,20 +222,23 @@ fn a_burst_while_held_is_delivered_as_one_batch_on_resume() {
     let d = deliveries(&fx);
     let texts: Vec<&str> = d.iter().map(|x| x.2.as_str()).collect();
     assert!(texts.ends_with(&["one", "two", "three"]));
-    // Exactly one of the frames in the batch carries the id the device will report back.
-    let ids = frames(&fx)
+    // Every frame in the batch has an id of its own (so a frame sent a second time is recognised), and the last one is the batch's.
+    let ids: Vec<String> = frames(&fx)
         .iter()
-        .filter(|f| {
-            matches!(
-                f,
-                HubFrame::Deliver {
-                    msg_id: Some(_),
-                    ..
-                }
-            )
+        .filter_map(|f| match f {
+            HubFrame::Deliver { msg_id, .. } => msg_id.clone(),
+            _ => None,
         })
-        .count();
-    assert!(ids <= 1);
+        .collect();
+    let mut unique = ids.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), ids.len(), "{ids:?}");
+    assert!(ids.len() >= 3, "{ids:?}");
+    assert!(
+        !ids.last().unwrap().contains('.'),
+        "the batch id is the last: {ids:?}"
+    );
 }
 
 #[test]
@@ -981,6 +985,7 @@ fn only_the_lead_assigns_and_only_the_assignee_finishes() {
     let fx = w.core.on_node_frame(
         "gpu",
         NodeFrame::AgentAssign {
+            say_id: None,
             agent_id: "p/heron".into(),
             to: "otter".into(),
             task: "x".into(),
@@ -996,6 +1001,7 @@ fn only_the_lead_assigns_and_only_the_assignee_finishes() {
     w.core.on_node_frame(
         "mac",
         NodeFrame::AgentAssign {
+            say_id: None,
             agent_id: "p/otter".into(),
             to: "heron".into(),
             task: "build it".into(),
@@ -1600,6 +1606,7 @@ fn finished_work_is_not_handed_over_and_open_work_is() {
         w.core.on_node_frame(
             "mac",
             NodeFrame::AgentAssign {
+                say_id: None,
                 agent_id: "p/otter".into(),
                 to: "heron".into(),
                 task: task.into(),
@@ -1670,6 +1677,7 @@ fn a_task_the_old_session_finished_is_not_redelivered_and_finishing_it_twice_tel
     w.core.on_node_frame(
         "mac",
         NodeFrame::AgentAssign {
+            say_id: None,
             agent_id: "p/otter".into(),
             to: "heron".into(),
             task: "build".into(),
@@ -1831,6 +1839,7 @@ fn only_the_last_completion_wakes_the_lead() {
         w.core.on_node_frame(
             "mac",
             NodeFrame::AgentAssign {
+                say_id: None,
                 agent_id: "p/otter".into(),
                 to: to.into(),
                 task: task.into(),
@@ -2179,6 +2188,7 @@ fn a_task_gets_its_own_thread_by_itself_and_what_the_worker_says_goes_there_unti
     let fx = w.core.on_node_frame(
         "mac",
         NodeFrame::AgentAssign {
+            say_id: None,
             agent_id: "p/otter".into(),
             to: "heron".into(),
             task: "build   the login page".into(),
@@ -3012,6 +3022,7 @@ fn a_moving_agents_open_tasks_go_back_to_the_lead_or_are_closed() {
     w.core.on_node_frame(
         "m1",
         NodeFrame::AgentAssign {
+            say_id: None,
             agent_id: "p/otter".into(),
             to: "fox".into(),
             task: "write the tests".into(),
@@ -3042,6 +3053,7 @@ fn a_moving_agents_open_tasks_go_back_to_the_lead_or_are_closed() {
     w.core.on_node_frame(
         "m2",
         NodeFrame::AgentAssign {
+            say_id: None,
             agent_id: "p/fox".into(),
             to: "otter".into(),
             task: "review".into(),
@@ -3376,6 +3388,7 @@ fn threads_lists_the_open_tasks_with_ids_and_a_task_id_stands_for_its_thread() {
     w.core.on_node_frame(
         "mac",
         NodeFrame::AgentAssign {
+            say_id: None,
             agent_id: "p/otter".into(),
             to: "heron".into(),
             task: "write the benchmark report".into(),
@@ -3460,6 +3473,18 @@ fn a_say_in_a_thread_it_was_not_asked_in_gets_a_short_warning_and_a_right_one_ge
     let mut w = World::new();
     w.join("mac", 1, "otter");
     w.join("gpu", 2, "heron");
+    let hello = |w: &mut World, features: Vec<String>| {
+        w.core.on_node_frame(
+            "mac",
+            NodeFrame::Hello {
+                node_name: "mac".into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+                features,
+            },
+            T0,
+        )
+    };
+    hello(&mut w, vec!["say-warn".into()]);
     let say = |w: &mut World, thread: Option<&str>, at: i64| {
         w.core.on_node_frame(
             "mac",
@@ -3490,4 +3515,135 @@ fn a_say_in_a_thread_it_was_not_asked_in_gets_a_short_warning_and_a_right_one_ge
     // Answering where it was asked costs nothing, and neither does it long after, once that thread is no longer active.
     assert!(say_warnings(&say(&mut w, Some("design talk"), T0 + 2_000)).is_empty());
     assert!(say_warnings(&say(&mut w, None, T0 + 3 * 60 * 60_000)).is_empty());
+    // A machine that does not say it knows `warn` receipts (an older version) is never sent one: it would take it for the answer.
+    hello(&mut w, vec![]);
+    let kd = w.kd.clone();
+    w.core
+        .human_message(&kd, "p", "thoughts?", &opts, T0 + 4 * 60 * 60_000)
+        .unwrap();
+    assert!(say_warnings(&say(&mut w, None, T0 + 4 * 60 * 60_000 + 1_000)).is_empty());
+}
+
+#[test]
+fn an_assign_that_asked_for_a_receipt_is_answered_whether_the_peer_took_it_or_could_not() {
+    let assign = |w: &mut World, to: &str, id: &str| {
+        w.core.on_node_frame(
+            "mac",
+            NodeFrame::AgentAssign {
+                agent_id: "p/otter".into(),
+                to: to.into(),
+                task: "build it".into(),
+                thread: None,
+                say_id: Some(id.into()),
+            },
+            T0,
+        )
+    };
+    // An unknown peer: the lead is told so as the answer, not as a note it may never read.
+    let mut w = World::new();
+    w.join("mac", 1, "otter");
+    w.join("gpu", 2, "heron");
+    let r = receipts(&assign(&mut w, "nobody", "a1"));
+    assert_eq!(r.len(), 1);
+    assert_eq!((r[0].1.as_str(), r[0].2.as_str()), ("a1", "failed"));
+    assert!(
+        r[0].3
+            .as_deref()
+            .unwrap()
+            .contains("Cannot assign to nobody")
+    );
+    // A peer that cannot take it now: the task waits, and the answer says "not yet", not a silent success.
+    w.core.on_node_frame(
+        "gpu",
+        NodeFrame::AgentStatus {
+            agent_id: "p/heron".into(),
+            status: AgentStatus::Paused,
+            detail: None,
+        },
+        T0,
+    );
+    let r = receipts(&assign(&mut w, "heron", "a2"));
+    assert_eq!(r.len(), 1);
+    assert_eq!((r[0].1.as_str(), r[0].2.as_str()), ("a2", "info"));
+    assert!(
+        r[0].3
+            .as_deref()
+            .unwrap()
+            .contains("NOT delivered yet: heron is paused")
+    );
+}
+
+#[test]
+fn a_delivery_never_accepted_is_sent_again_with_the_same_ids_once_the_machine_has_a_new_connection()
+{
+    let mut w = World::new();
+    w.join("mac", 1, "otter");
+    w.core.on_node_frame(
+        "mac",
+        NodeFrame::AgentStatus {
+            agent_id: "p/otter".into(),
+            status: AgentStatus::Idle,
+            detail: None,
+        },
+        T0,
+    );
+    let (_, fx) = w.say_hi(&w.kd.clone(), "@otter one");
+    let first: Vec<Option<String>> = frames(&fx)
+        .iter()
+        .filter_map(|f| match f {
+            HubFrame::Deliver { msg_id, from, .. } if from != "system" => Some(msg_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(first.len(), 1, "{first:?}");
+    let sent_again = |fx: &[Effect]| -> Vec<Option<String>> {
+        frames(fx)
+            .iter()
+            .filter_map(|f| match f {
+                HubFrame::Deliver { msg_id, from, .. } if from != "system" => Some(msg_id.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    // Same connection: nothing to send again, however long it has been.
+    assert!(sent_again(&w.core.tick(T0 + 120_000)).is_empty());
+    // The machine comes back on another connection, and is quiet for a few seconds (an acceptance it kept would arrive by now): not yet.
+    w.core.node_disconnected("mac", 1);
+    w.core.node_connected("mac", 2);
+    w.core.on_node_frame(
+        "mac",
+        NodeFrame::AgentRegister {
+            agent: spec("p", "otter"),
+            cwd: "/x".into(),
+        },
+        T0 + 121_000,
+    );
+    w.core.on_node_frame(
+        "mac",
+        NodeFrame::AgentStatus {
+            agent_id: "p/otter".into(),
+            status: AgentStatus::Idle,
+            detail: None,
+        },
+        T0 + 121_000,
+    );
+    // Sent again with the id it had, to the new connection, once.
+    let again = sent_again(&w.core.tick(T0 + 125_000));
+    assert_eq!(again, first);
+    assert!(
+        sent_again(&w.core.tick(T0 + 126_000)).is_empty(),
+        "only once per connection"
+    );
+    // Accepted: never again, on any connection.
+    w.core.on_node_frame(
+        "mac",
+        NodeFrame::AgentAccepted {
+            agent_id: "p/otter".into(),
+            msg_ids: first.iter().flatten().cloned().collect(),
+        },
+        T0 + 127_000,
+    );
+    w.core.node_disconnected("mac", 2);
+    w.core.node_connected("mac", 3);
+    assert!(sent_again(&w.core.tick(T0 + 300_000)).is_empty());
 }

@@ -269,10 +269,11 @@ fn expect_ok(r: Resp) -> Result<Resp, String> {
 /// not to. The project, name, program and role given on the command line are only what the page starts with.
 pub async fn start(a: StartArgs) -> Result<(), String> {
     // Before anything is asked of the person (signing in, choosing on the dashboard), not after.
-    if !["claude", "agy", "codex"].contains(&a.adapter.as_str()) {
+    if crate::protocol::resolve_adapter(&a.adapter).is_none() {
         return Err(format!(
-            "unknown agent type {}: claude, agy or codex",
-            a.adapter
+            "unknown agent type {}: {}",
+            a.adapter,
+            crate::protocol::adapter_names().join(", ")
         ));
     }
     if !["autonomous", "plan", "ask"].contains(&a.policy.as_str()) {

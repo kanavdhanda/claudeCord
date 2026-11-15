@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { api, type Bot, type Channel, type Project } from '../api'
 import { useAction, useLoad } from '../hooks'
+import { HarnessOptions } from '../harnesses'
 
 const slug = /^[A-Za-z0-9][A-Za-z0-9._-]{0,49}$/
 const clean = (s: string) => s.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^[^a-z0-9]+/, '').slice(0, 50)
@@ -229,9 +230,7 @@ export function Pick() {
         <label>
           Program
           <select value={program} onChange={(e) => setProgram(e.target.value)}>
-            <option value="claude">Claude Code</option>
-            <option value="codex">Codex</option>
-            <option value="agy">agy</option>
+            <HarnessOptions />
             {(saved.data ?? []).length > 0 && (
               <optgroup label="Startup commands">
                 {saved.data!.map((c) => (

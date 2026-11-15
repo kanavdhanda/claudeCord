@@ -722,16 +722,14 @@ async fn pick_choose(
             if taken.contains(&name) {
                 return (Outcome::Taken(name), vec![]);
             }
-            let adapter = match program.as_str() {
-                "codex" => crate::protocol::AdapterId::Codex,
-                "agy" => crate::protocol::AdapterId::Agy,
-                _ => crate::protocol::AdapterId::Claude,
-            };
+            let (adapter, harness) = crate::protocol::resolve_adapter(program.as_str())
+                .unwrap_or((crate::protocol::AdapterId::Claude, None));
             let spec = crate::protocol::AgentSpec {
                 agent_id: format!("{project}/{name}"),
                 name,
                 project: project.clone(),
                 adapter,
+                harness: harness.map(String::from),
                 model: None,
                 role: role_for_spec,
             };

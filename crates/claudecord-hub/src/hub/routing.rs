@@ -11,6 +11,9 @@ use crate::protocol::{AgentStatus, HubFrame};
 use regex::Regex;
 use std::sync::LazyLock;
 
+/// How long a delivery that was never accepted waits, after its machine reconnects, before it is sent again.
+const RESEND_AFTER_MS: i64 = 30_000;
+
 /// Why an agent in this status cannot take a message right now, or None if it can.
 pub(super) fn hold_reason(s: AgentStatus) -> Option<&'static str> {
     match s {
@@ -169,6 +172,9 @@ impl HubCore {
                 handoffs: vec![],
                 items: vec![q],
                 at: now,
+                // A message between agents is pasted at once or fails; it is never sent again later.
+                conn: 0,
+                per_item_ids: false,
             },
         );
     }
@@ -237,6 +243,8 @@ impl HubCore {
             handoffs: vec![],
             items: vec![],
             at: now,
+            conn: self.conns.get(&a.node_name).copied().unwrap_or(0),
+            per_item_ids: true,
         };
         // One wake-up is one turn, however many messages ride in it; the characters stand in for the input it will cost.
         let chars: usize = items.iter().map(|q| q.text.chars().count()).sum();
@@ -250,8 +258,13 @@ impl HubCore {
             pending.task_ids.extend(q.task_id.clone());
             pending.handoffs.extend(q.handoff);
             pending.items.push(q.clone());
-            // Only the last frame of the batch carries the id: accepting the batch accepts everything in it.
-            let id = (i == last).then(|| msg_id.clone());
+            // The last frame carries the batch's id (accepting the batch accepts everything in it); the others carry one derived from it, so that a
+            // frame sent a second time is recognised by the machine as one it has.
+            let id = if i == last {
+                msg_id.clone()
+            } else {
+                format!("{msg_id}.{i}")
+            };
             self.send_to(
                 &a,
                 HubFrame::Deliver {
@@ -259,7 +272,7 @@ impl HubCore {
                     from: q.from,
                     text: q.text,
                     thread: q.thread,
-                    msg_id: id,
+                    msg_id: Some(id),
                 },
                 fx,
             );
@@ -267,6 +280,55 @@ impl HubCore {
         // Everything stays pending until the device says the agent started on it, so a session that dies first can
         // be given it again.
         self.pending.insert(msg_id, pending);
+    }
+
+    /// Sends again what was delivered over a connection that is no longer the machine's current one and was never accepted: the frames may have
+    /// been lost with the connection (a hub restart, a network drop). The machine ignores any frame whose id it already has, so a message it did
+    /// receive is not pasted twice. It waits `RESEND_AFTER_MS` first, since an acceptance the machine kept for the new connection arrives within
+    /// seconds of it, and does nothing for an agent that cannot take messages now (it is tried again on the next tick).
+    pub(super) fn resend_unaccepted(&mut self, now: i64, fx: &mut Vec<Effect>) {
+        let due: Vec<(String, u64)> = self
+            .pending
+            .iter()
+            .filter_map(|(id, p)| {
+                let a = self.agents.get(&p.agent_id)?;
+                let conn = *self.conns.get(&a.node_name)?;
+                (p.conn != conn
+                    && now - p.at >= RESEND_AFTER_MS
+                    && p.per_item_ids
+                    && hold_reason(self.status_of(&p.agent_id)).is_none())
+                .then(|| (id.clone(), conn))
+            })
+            .collect();
+        for (id, conn) in due {
+            let Some(p) = self.pending.get_mut(&id) else {
+                continue;
+            };
+            p.conn = conn;
+            let (agent_id, items) = (p.agent_id.clone(), p.items.clone());
+            let Some(a) = self.agents.get(&agent_id).cloned() else {
+                continue;
+            };
+            let last = items.len().saturating_sub(1);
+            for (i, q) in items.into_iter().enumerate() {
+                let mid = if i == last {
+                    id.clone()
+                } else {
+                    format!("{id}.{i}")
+                };
+                self.send_to(
+                    &a,
+                    HubFrame::Deliver {
+                        agent_id: a.agent_id.clone(),
+                        from: q.from,
+                        text: q.text,
+                        thread: q.thread,
+                        msg_id: Some(mid),
+                    },
+                    fx,
+                );
+            }
+        }
     }
 
     /// A device reported it started on a delivery: confirm the human message and accept the tasks that came with it.

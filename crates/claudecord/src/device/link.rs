@@ -502,7 +502,9 @@ async fn session(
     let hello = NodeFrame::Hello {
         node_name: node.to_string(),
         version: env!("CARGO_PKG_VERSION").into(),
-        features: vec!["hub-spawn".into()],
+        // "say-warn": understands a `warn` receipt that comes ahead of the real one. A machine without it takes the first receipt as the answer
+        // to a say, so it would never be sent one.
+        features: vec!["hub-spawn".into(), "say-warn".into()],
     };
     if tx
         .send(Message::Text(

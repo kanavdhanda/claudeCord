@@ -49,8 +49,10 @@ impl Command {
             Some("the command is too long (2000 characters at most)")
         } else if self.command.contains('\0') {
             Some("the command has a character that cannot be run")
-        } else if !["claude", "codex", "agy"].contains(&self.program.as_str()) {
-            Some("the program is claude, codex or agy")
+        } else if crate::protocol::resolve_adapter(&self.program).is_none() {
+            Some(
+                "the program is claude, codex, agy, generic or one of the named programs (gemini, aider, opencode, ...)",
+            )
         } else {
             None
         }

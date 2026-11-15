@@ -15,6 +15,7 @@ fn spec(project: &str, name: &str) -> AgentSpec {
         name: name.into(),
         project: project.into(),
         adapter: AdapterId::Claude,
+        harness: None,
         model: None,
         role: None,
     }
@@ -140,6 +141,7 @@ pub async fn seed(
                 &mut fx,
                 "demo-laptop",
                 NodeFrame::AgentAssign {
+                    say_id: None,
                     agent_id: "website/otter".into(),
                     to: to.into(),
                     task: task.into(),
