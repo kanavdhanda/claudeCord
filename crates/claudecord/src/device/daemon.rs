@@ -1957,13 +1957,23 @@ impl State {
                 task,
                 thread,
             } => {
-                self.verb(&agent, |id| NodeFrame::AgentAssign {
-                    agent_id: id,
-                    to,
-                    task,
-                    thread,
-                })
-                .await
+                // Like a say: the answer says whether the peer has the task, not just that the hub took the request.
+                let (say_id, rx) = self.expect_reply(&task);
+                let resp = self
+                    .verb(&agent, |id| NodeFrame::AgentAssign {
+                        agent_id: id,
+                        to,
+                        task,
+                        thread,
+                        say_id: Some(say_id.clone()),
+                    })
+                    .await;
+                if resp.ok {
+                    self.defer = Some(rx);
+                } else {
+                    self.says.remove(&say_id);
+                }
+                resp
             }
             Req::Done {
                 agent,
