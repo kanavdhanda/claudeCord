@@ -2810,3 +2810,97 @@ async fn messages_sent_after_a_file_reach_the_agent_after_it_in_order() {
     assert!(at("second") < at("third"), "{log}");
     r.hub.shutdown().await;
 }
+
+#[tokio::test]
+#[ignore = "takes about 45 s: waits out the 30 s before the hub sends an unaccepted delivery again (run with --ignored)"]
+async fn a_message_waiting_in_a_busy_agent_is_pasted_once_though_the_hub_restarts_and_sends_it_again()
+ {
+    // The agent is busy, so the message waits unpasted in the machine's queue, and the hub keeps it as sent-but-not-taken-up.
+    let r = rig_tuned("resend-once", NORMAL, 8, vec![], Backend::Pty, |o| {
+        o.quiet = (0, 60_000)
+    })
+    .await;
+    up(&r, "otter").await;
+    let registered = async |hub: &server::Hub| {
+        hub.call(|c, _| (c.agent("demo/otter").is_some(), vec![]))
+            .await
+            .unwrap()
+    };
+    eventually("registered", async || registered(&r.hub).await).await;
+    r.hub
+        .call(|c, now| {
+            let r = c
+                .human_message(
+                    &kd(),
+                    "demo",
+                    "look at this once",
+                    &MessageOpts {
+                        reference: Some("c:7"),
+                        ..Default::default()
+                    },
+                    now,
+                )
+                .unwrap();
+            ((), r.1)
+        })
+        .await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let fake_log = r.project.join("fake.log");
+    assert!(
+        std::fs::read_to_string(&fake_log).is_err(),
+        "queued, not pasted"
+    );
+    // The hub restarts on the same address and the same files; the machine reconnects by itself.
+    let (addr, root) = (r.hub.addr, r.dir.parent().unwrap().to_path_buf());
+    r.hub.shutdown().await;
+    let mut core = HubCore::default();
+    core.add_owner("1");
+    let hub = server::start(
+        ServerConfig {
+            bind: addr,
+            ping_every: Duration::from_millis(200),
+            tick_every: Duration::from_millis(50),
+            ..ServerConfig::default()
+        },
+        core,
+        Store::open(&root.join("hub.db"), None).unwrap(),
+    )
+    .await
+    .unwrap();
+    eventually("registered again", async || registered(&hub).await).await;
+    // The hub's own tick sends the unaccepted delivery again once it is 30 s old and the machine is on a new connection. The machine already
+    // has it, so it must not queue a second copy.
+    tokio::time::sleep(Duration::from_secs(36)).await;
+    assert!(std::fs::read_to_string(&fake_log).is_err(), "still waiting");
+    // The hub did send it again (so what is checked below is the machine ignoring a copy, not the hub never sending one).
+    let resent: f64 = hub
+        .call(|c, now| {
+            let n = c
+                .metrics
+                .to_json(now)
+                .get("delivery_resent")
+                .map_or(0.0, |m| m.values().sum());
+            (n, vec![])
+        })
+        .await
+        .unwrap();
+    assert!(resent >= 1.0, "the hub never sent the delivery again");
+    hub.call(|c, _| {
+        let mut fx = Vec::new();
+        let sent = c.prioritise(&kd(), "demo", "c:7", "now", &mut fx);
+        (sent, fx)
+    })
+    .await;
+    eventually("pasted", async || {
+        std::fs::read_to_string(&fake_log).is_ok_and(|s| s.contains("look at this once"))
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let text = std::fs::read_to_string(&fake_log).unwrap();
+    assert_eq!(
+        text.matches("look at this once").count(),
+        1,
+        "the agent got the message twice: {text}"
+    );
+    hub.shutdown().await;
+}

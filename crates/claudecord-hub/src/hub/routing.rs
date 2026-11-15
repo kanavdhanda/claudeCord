@@ -305,6 +305,7 @@ impl HubCore {
                 continue;
             };
             p.conn = conn;
+            self.metrics.inc("delivery_resent", 1.0, now);
             let (agent_id, items) = (p.agent_id.clone(), p.items.clone());
             let Some(a) = self.agents.get(&agent_id).cloned() else {
                 continue;

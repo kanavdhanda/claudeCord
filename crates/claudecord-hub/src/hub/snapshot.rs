@@ -98,12 +98,7 @@ impl HubCore {
         *self.grants = s.grants;
         self.tasks.load(s.tasks);
         self.queues.load(s.queues);
-        // A restored delivery was sent over a connection that no longer exists, whatever number it had; connections are numbered afresh.
-        let mut pending = s.pending;
-        for p in pending.values_mut() {
-            p.conn = 0;
-        }
-        self.pending.load(pending);
+        self.pending.load(s.pending);
         self.briefed.load(s.briefed);
         self.roster_dirty.load(s.roster_dirty);
         self.handoffs.load(s.handoffs);

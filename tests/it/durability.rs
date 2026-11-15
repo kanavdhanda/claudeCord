@@ -289,3 +289,72 @@ async fn when_a_call_returns_its_change_is_already_on_disk_and_a_reader_sees_it(
     }
     hub.shutdown().await;
 }
+
+#[test]
+fn a_delivery_restored_from_disk_is_sent_again_even_when_the_new_connection_has_the_old_number() {
+    use claudecord::hub::Effect;
+    use claudecord::protocol::{AgentStatus, HubFrame};
+    let delivers = |fx: &[Effect]| {
+        fx.iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    Effect::Send {
+                        frame: HubFrame::Deliver { from, .. },
+                        ..
+                    } if from != "system"
+                )
+            })
+            .count()
+    };
+    let join = |core: &mut HubCore, at: i64| {
+        core.node_connected("n0", 1);
+        core.on_node_frame(
+            "n0",
+            NodeFrame::AgentRegister {
+                agent: spec("alpha", "otter"),
+                cwd: "/x".into(),
+            },
+            at,
+        );
+        core.on_node_frame(
+            "n0",
+            NodeFrame::AgentStatus {
+                agent_id: "alpha/otter".into(),
+                status: AgentStatus::Idle,
+                detail: None,
+            },
+            at,
+        );
+    };
+    let mut old = HubCore::default();
+    old.add_owner("100");
+    join(&mut old, 10);
+    let (_, fx) = old
+        .human_message(
+            &human(0),
+            "alpha",
+            "@otter hello",
+            &MessageOpts::default(),
+            10,
+        )
+        .unwrap();
+    assert_eq!(delivers(&fx), 1, "sent, and now waiting to be taken up");
+    // The hub restarts: its state is rebuilt from the saved rows, and the machine's new connection gets the very number the old one had.
+    let mut db = Store::open_memory().unwrap();
+    old.mark_all_dirty();
+    db.commit(&[], &[], &[], &[old.take_changes()]).unwrap();
+    let mut new = HubCore::default();
+    new.restore_rows(db.load_state().unwrap());
+    join(&mut new, 20);
+    assert_eq!(
+        delivers(&new.tick(20 + 1_000)),
+        0,
+        "not yet: it is too soon"
+    );
+    assert_eq!(
+        delivers(&new.tick(10 + 31_000)),
+        1,
+        "the restored delivery was not sent again"
+    );
+}

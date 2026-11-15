@@ -61,9 +61,10 @@ pub(super) struct Pending {
     /// What was sent, kept so a session that dies before accepting it can be given it again.
     pub items: Vec<Queued>,
     pub at: i64,
-    /// The connection it was sent over (0 once restored from disk, which is no connection). When the machine's connection is a different one,
-    /// the frames may never have arrived, and an unaccepted delivery is sent again (`resend_unaccepted`).
-    #[serde(default)]
+    /// The connection it was sent over. Never saved: connections are numbered afresh after a restart, so a saved number could match a new
+    /// connection's, and a delivery read back from disk has none (0). When the machine's connection is a different one, the frames may never
+    /// have arrived, and an unaccepted delivery is sent again (`resend_unaccepted`).
+    #[serde(skip)]
     pub conn: u64,
     /// Every frame of the batch carried an id of its own, so a machine that already has some of them ignores those when they are sent again.
     /// Messages between agents (pasted at once or failed) and deliveries saved by an older hub are never sent again.
