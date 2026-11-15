@@ -438,9 +438,17 @@
   "screen": "\n Run this command?\n ❯ 1. Run\n   2. Skip\n",
   "claude": {
    "busy": false,
-   "ready": true,
+   "ready": false,
    "executing": false,
-   "prompt": null,
+   "prompt": {
+    "question": "Run this command?",
+    "options": [
+     "Run",
+     "Skip"
+    ],
+    "cursor": 0,
+    "signature": "Run this command?|Run|Skip"
+   },
    "limit": null
   },
   "agy": {

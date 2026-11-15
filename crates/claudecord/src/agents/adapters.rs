@@ -345,11 +345,6 @@ impl AdapterExt for AdapterId {
     fn detect(self, screen: &str) -> ScreenState {
         match self {
             Self::Claude => {
-                static MENU_HINT: LazyLock<Regex> = LazyLock::new(|| {
-                    re(
-                        r"(?i)esc to cancel|enter to select|do you want|do you trust|bypass permissions",
-                    )
-                });
                 static BUSY: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)esc to interrupt"));
                 static READY: LazyLock<Regex> = LazyLock::new(|| {
                     re(
@@ -360,7 +355,7 @@ impl AdapterExt for AdapterId {
                     LazyLock::new(|| re(r"(?i)(running|⎿\s+\S+\.{3}|\([0-9]+s)"));
                 let t = tail(screen, 15);
                 let busy = BUSY.is_match(&t);
-                let prompt = parse_menu(screen).filter(|_| MENU_HINT.is_match(&tail(screen, 30)));
+                let prompt = live_menu(screen);
                 let ready = !busy && prompt.is_none() && READY.is_match(&t);
                 let executing = busy && EXEC.is_match(&t);
                 ScreenState {
@@ -438,13 +433,15 @@ mod live_menu_tests {
     use super::*;
 
     #[test]
-    fn an_answered_menu_above_the_input_box_is_not_a_prompt_for_agy_or_codex() {
+    fn an_answered_menu_above_the_input_box_is_not_a_prompt_for_any_harness() {
         let stale =
             "Run this command?\n  ❯ 1. Yes\n    2. No\n Esc to cancel\n\nDone, ran it.\n│ > \n";
+        // One rule for every harness: what a menu looks like, not whose menu it is.
+        for a in [AdapterId::Claude, AdapterId::Agy, AdapterId::Codex] {
+            assert!(a.detect(stale).prompt.is_none(), "{a:?}");
+        }
         for a in [AdapterId::Agy, AdapterId::Codex] {
-            let st = a.detect(stale);
-            assert!(st.prompt.is_none(), "{a:?}");
-            assert!(st.ready, "{a:?}");
+            assert!(a.detect(stale).ready, "{a:?}");
         }
     }
 
