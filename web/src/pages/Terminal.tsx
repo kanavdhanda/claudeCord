@@ -648,6 +648,12 @@ export function TerminalPage() {
     redrawActive()
   }
 
+  // One tap for Ctrl+<letter>, or a chord of them sent together (Ctrl+X Ctrl+X).
+  const sendCtrl = (...letters: string[]) => {
+    sendInputBytes(new Uint8Array(letters.map((l) => l.toUpperCase().charCodeAt(0) - 64)))
+    setCtrlSticky(false)
+  }
+
   const sendInputText = (text: string) => {
     if (!text) return
     let out = text
@@ -1224,6 +1230,12 @@ export function TerminalPage() {
         <button type="button" className="btn" onClick={() => sendInputBytes(new Uint8Array([4]))} title="Send EOF (closes secondary shell tab)">Ctrl+D</button>
         <button type="button" className="btn" onClick={() => sendInputBytes(new Uint8Array([26]))}>Ctrl+Z</button>
         <button type="button" className="btn" onClick={() => sendInputBytes(new Uint8Array([12]))}>Ctrl+L</button>
+        {/* Chords an agent's TUI uses (Claude Code's Ctrl+X Ctrl+X among them): one tap, so a phone does not need a physical Ctrl key. */}
+        <button type="button" className="btn" onClick={() => sendCtrl('X')} title="Ctrl+X">Ctrl+X</button>
+        <button type="button" className="btn" onClick={() => sendCtrl('X', 'X')} title="Ctrl+X, then Ctrl+X again">Ctrl+X Ctrl+X</button>
+        {['A', 'B', 'E', 'G', 'K', 'O', 'R', 'T', 'U', 'W'].map((k) => (
+          <button key={k} type="button" className="btn" onClick={() => sendCtrl(k)}>{`Ctrl+${k}`}</button>
+        ))}
         <button type="button" className="btn" onClick={() => sendInputText('\x1b[A')}>↑</button>
         <button type="button" className="btn" onClick={() => sendInputText('\x1b[B')}>↓</button>
         <button type="button" className="btn" onClick={() => sendInputText('\x1b[D')}>←</button>
