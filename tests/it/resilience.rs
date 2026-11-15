@@ -178,6 +178,7 @@ async fn doctor_passes_end_to_end_and_names_the_failing_step_otherwise() {
             ("route", true),
             ("connect", true),
             ("welcome", true),
+            ("version", true),
             ("heartbeat", true)
         ]
     );
