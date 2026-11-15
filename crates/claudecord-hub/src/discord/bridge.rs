@@ -531,24 +531,18 @@ impl Bridge {
                         let _ = self.rest.unreact(ch, mid, NOW).await;
                         let _ = self.rest.unreact(ch, mid, STEER).await;
                         let _ = self.rest.unreact(ch, mid, WAITING).await;
+                        // The QUEUED card (with its Send Now and Steer buttons) said "waiting"; once the agent has the message it has nothing left to say, so
+                        // it is taken away rather than left with a second card beside it. The check mark on the person's message is the whole answer.
                         if let Some(qv) = self.get(&format!("queued:{reference}"))
                             && let Some((qch, qmid)) = qv.split_once(':')
                         {
-                            let _ = self.rest.edit_components(qch, qmid, json!([])).await;
+                            if self.rest.delete_message(qch, qmid).await.is_err() {
+                                // If it cannot be deleted, at least the buttons go, as they no longer do anything.
+                                let _ = self.rest.edit_components(qch, qmid, json!([])).await;
+                            }
                             let _ = self.kv.kv_del(&format!("queued:{reference}"));
                         }
-
-                        let agent_label = if agent_name.is_empty() {
-                            "An agent".to_string()
-                        } else {
-                            format!("**@{agent_name}**")
-                        };
-                        let embed = json!({
-                            "title": "✅ [TAKEN UP] Processing Started",
-                            "description": format!("{agent_label} picked up this message and has started working."),
-                            "color": 0x57F287,
-                        });
-                        let _ = self.rest.send_embed(ch, embed, Some(mid)).await;
+                        let _ = agent_name;
                     }
                 }
                 Chat::RefreshStatus(project) => self.refresh_status(&project).await?,

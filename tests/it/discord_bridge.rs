@@ -1571,18 +1571,26 @@ async fn delivery_and_acceptance_post_status_embeds_with_labels() {
         })
         .await;
 
-    // Check that a TAKEN UP embed was posted
-    r.until("taken up embed", |l| {
-        l.messages
-            .iter()
-            .find(|m| {
-                m["embeds"]
-                    .as_array()
-                    .and_then(|a| a.first())
-                    .and_then(|e| e["title"].as_str())
-                    .is_some_and(|t| t.contains("[TAKEN UP]"))
-            })
-            .cloned()
+    // The QUEUED card is deleted once the agent has the message, and no second card replaces it.
+    let qid = queued_msg["id"].clone();
+    r.until("queued card deleted", |l| {
+        (!l.messages.iter().any(|m| m["id"] == qid)
+            && l.deleted.iter().any(|d| *d == qid.as_str().unwrap_or("")))
+        .then_some(json!(true))
     })
     .await;
+    assert!(
+        !r.fake
+            .log
+            .lock()
+            .unwrap()
+            .messages
+            .iter()
+            .any(|m| m["embeds"]
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|e| e["title"].as_str())
+                .is_some_and(|t| t.contains("[TAKEN UP]"))),
+        "no TAKEN UP card"
+    );
 }
