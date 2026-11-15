@@ -291,6 +291,16 @@ pub async fn start_fake() -> (Fake, String) {
         f.log.lock().unwrap().edits.push(json!({"channel": ch, "message": m, "content": b["content"], "components": b["components"]}));
         Json(json!({}))
     }
+    /// One message taken away (`DELETE /channels/{c}/messages/{m}`): gone from the messages, kept in `deleted`.
+    async fn delete_one(
+        State(f): State<Fake>,
+        Path((_ch, m)): Path<(String, String)>,
+    ) -> Json<Value> {
+        let mut l = f.log.lock().unwrap();
+        l.messages.retain(|x| x["id"] != m.as_str());
+        l.deleted.push(m);
+        Json(json!({}))
+    }
     async fn react(
         State(f): State<Fake>,
         Path((ch, m, e)): Path<(String, String, String)>,
@@ -455,7 +465,10 @@ pub async fn start_fake() -> (Fake, String) {
         .route("/api/channels/{id}/threads", post(mk_thread))
         .route("/api/channels/{id}/messages", post(send).get(list_messages))
         .route("/api/channels/{id}/messages/bulk-delete", post(bulk_delete))
-        .route("/api/channels/{c}/messages/{m}", any(edit))
+        .route(
+            "/api/channels/{c}/messages/{m}",
+            any(edit).delete(delete_one),
+        )
         .route(
             "/api/channels/{c}/messages/{m}/reactions/{e}/@me",
             put(react).delete(unreact),
