@@ -462,9 +462,24 @@ async fn run(
     let mut restarting_until: Option<tokio::time::Instant> = None;
     loop {
         let started = tokio::time::Instant::now();
-        let conn = match auth.bearer().await {
-            Ok(token) => connect_detailed(&url, &token, &opts).await,
-            Err(e) => Err(e),
+        // While a connection is being made (which can take as long as the connect timeout when the hub is unreachable), frames the program sends are
+        // still taken and kept (and written to the outbox file), not left waiting in the queue where a restart of this program would lose them.
+        let attempt = async {
+            match auth.bearer().await {
+                Ok(token) => connect_detailed(&url, &token, &opts).await,
+                Err(e) => Err(e),
+            }
+        };
+        tokio::pin!(attempt);
+        let mut queue_closed = false;
+        let conn = loop {
+            tokio::select! {
+                c = &mut attempt => break c,
+                f = outbox.recv(), if !queue_closed => match f {
+                    Some(f) => { unacked.stamp(&f); }
+                    None => queue_closed = true,
+                },
+            }
         };
         // Say why once, not at every retry: a refused login would otherwise fail in silence for ever.
         if let Err(e) = &conn
