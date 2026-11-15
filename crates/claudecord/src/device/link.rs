@@ -204,6 +204,9 @@ pub fn spawn_with(
 /// seconds, and a pause that doubled each time would leave machines waiting a minute for a hub that has been up for fifty seconds of it.
 const HUB_RESTART_WINDOW: Duration = Duration::from_secs(90);
 
+/// The same after a connection ended without that word.
+const DROPPED_WINDOW: Duration = Duration::from_secs(30);
+
 /// The pause between attempts while the hub is restarting: the shortest pause plus up to as much again, so machines do not all arrive together.
 fn restart_pause(o: &LinkOpts) -> Duration {
     let mut r = [0u8; 4];
@@ -490,9 +493,15 @@ async fn run(
                 &mut going_away,
             )
             .await;
-            if going_away {
-                restarting_until = Some(tokio::time::Instant::now() + HUB_RESTART_WINDOW);
-            }
+            // A connection that was up has ended: the likeliest reason is the hub restarting, which is over in seconds, so retries stay short for a
+            // while. The hub says so with a close frame when it can (a longer window then), but that frame does not always arrive before the
+            // connection drops, so the window does not depend on it.
+            let window = if going_away {
+                HUB_RESTART_WINDOW
+            } else {
+                DROPPED_WINDOW
+            };
+            restarting_until = Some(tokio::time::Instant::now() + window);
             if events.send(LinkEvent::Down).await.is_err() {
                 return;
             }

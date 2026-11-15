@@ -410,3 +410,200 @@ async fn a_refused_refresh_leaves_the_connection_to_say_so_and_an_unreachable_hu
     let auth = claudecord::device::link::Auth::new(&closed, "ccn1.login".into(), None);
     assert!(auth.bearer().await.unwrap_err().contains("cannot reach"));
 }
+
+// ---- Restarts, exercised end to end: the real link against the real hub, the program and the hub stopped and started on the same files. ----
+
+fn free_addr() -> std::net::SocketAddr {
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let a = probe.local_addr().unwrap();
+    drop(probe);
+    a
+}
+
+/// The says in project `p`'s history, oldest first.
+fn says(db: &std::path::Path, prefix: &str) -> Vec<String> {
+    let v: Vec<String> = Store::open(db, None)
+        .unwrap()
+        .history_latest("p", None, 500)
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.text.starts_with(prefix))
+        .map(|r| r.text)
+        .collect();
+    v
+}
+
+async fn wait_for_says(db: &std::path::Path, prefix: &str, n: usize) -> Vec<String> {
+    for _ in 0..200 {
+        let v = says(db, prefix);
+        if v.len() >= n {
+            return v;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    says(db, prefix)
+}
+
+async fn say_all(link: &link::Link, texts: &[&str]) {
+    link.send(NodeFrame::AgentRegister {
+        agent: spec("otter"),
+        cwd: "/x".into(),
+    })
+    .await;
+    for t in texts {
+        link.send(NodeFrame::AgentSay {
+            agent_id: "p/otter".into(),
+            text: (*t).into(),
+            thread: None,
+            say_id: None,
+        })
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn frames_the_hub_has_not_confirmed_survive_the_machine_program_restarting() {
+    let dir = tmp("outbox-restart");
+    let db = dir.join("t.db");
+    let mut store = Store::open(&db, None).unwrap();
+    let token = store.create_token("mac", 0).unwrap();
+    drop(store);
+    let bind = free_addr();
+    let url = format!("ws://{bind}/api/v1/node/connect");
+    let outbox = dir.join("outbox.jsonl");
+    let opts = || LinkOpts {
+        outbox: Some(outbox.clone()),
+        ..fast()
+    };
+    // The first run of the program says five things while no hub is reachable, then the program stops (as for an update or a crash).
+    let (tx, ev) = mpsc::channel(256);
+    let link = link::spawn(url.clone(), token.clone(), "mac".into(), tx, opts());
+    say_all(&link, &["kept 1", "kept 2", "kept 3", "kept 4", "kept 5"]).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    drop(link);
+    drop(ev);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let journal = std::fs::read_to_string(&outbox).unwrap();
+    assert!(
+        journal.matches("\"f\":").count() >= 6,
+        "the unconfirmed frames are on disk: {journal}"
+    );
+    // The program starts again, says nothing new, and the hub comes up: all five arrive, once each and in order.
+    let hub = start_hub(&bind.to_string(), &db).await;
+    let (tx, mut ev) = mpsc::channel(256);
+    let second = link::spawn(url.clone(), token.clone(), "mac".into(), tx, opts());
+    assert!(expect(&mut ev, 10_000, |e| *e == LinkEvent::Up).await);
+    let want: Vec<String> = (1..=5).map(|i| format!("kept {i}")).collect();
+    assert_eq!(wait_for_says(&db, "kept", 5).await, want);
+    // And a third start finds nothing owed: still five, never doubled.
+    drop(second);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (tx, mut ev) = mpsc::channel(256);
+    let _third = link::spawn(url, token, "mac".into(), tx, opts());
+    assert!(expect(&mut ev, 10_000, |e| *e == LinkEvent::Up).await);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(says(&db, "kept"), want, "a frame was taken twice");
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn frames_the_hub_already_took_are_not_taken_again_when_their_acknowledgement_was_lost() {
+    let dir = tmp("outbox-lost-ack");
+    let db = dir.join("t.db");
+    let mut store = Store::open(&db, None).unwrap();
+    let token = store.create_token("mac", 0).unwrap();
+    drop(store);
+    let bind = free_addr();
+    let url = format!("ws://{bind}/api/v1/node/connect");
+    let outbox = dir.join("outbox.jsonl");
+    let opts = || LinkOpts {
+        outbox: Some(outbox.clone()),
+        ..fast()
+    };
+    let (tx, ev) = mpsc::channel(256);
+    let link = link::spawn(url.clone(), token.clone(), "mac".into(), tx, opts());
+    say_all(&link, &["once 1", "once 2", "once 3"]).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // What the journal says before the hub has confirmed anything: this is what a program that stopped before hearing the acks would find.
+    let before_acks = std::fs::read_to_string(&outbox).unwrap();
+    drop(link);
+    drop(ev);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let hub = start_hub(&bind.to_string(), &db).await;
+    let (tx, mut ev) = mpsc::channel(256);
+    let second = link::spawn(url.clone(), token.clone(), "mac".into(), tx, opts());
+    assert!(expect(&mut ev, 10_000, |e| *e == LinkEvent::Up).await);
+    wait_for_says(&db, "once", 3).await;
+    drop(second);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    // The acknowledgements are lost: the journal is as it was before them. The program starts, sends everything again under the same epoch,
+    // and says one new thing. The hub takes only the new one.
+    std::fs::write(&outbox, &before_acks).unwrap();
+    let (tx, mut ev) = mpsc::channel(256);
+    let third = link::spawn(url, token, "mac".into(), tx, opts());
+    assert!(expect(&mut ev, 10_000, |e| *e == LinkEvent::Up).await);
+    third
+        .send(NodeFrame::AgentSay {
+            agent_id: "p/otter".into(),
+            text: "once 4".into(),
+            thread: None,
+            say_id: None,
+        })
+        .await;
+    let want: Vec<String> = (1..=4).map(|i| format!("once {i}")).collect();
+    assert_eq!(wait_for_says(&db, "once", 4).await, want);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(says(&db, "once"), want, "a frame was taken twice");
+    hub.shutdown().await;
+}
+
+#[tokio::test]
+async fn after_the_hub_says_it_is_restarting_the_machine_keeps_trying_quickly_and_is_back_at_once()
+{
+    let dir = tmp("quick-back");
+    let db = dir.join("t.db");
+    let mut store = Store::open(&db, None).unwrap();
+    let token = store.create_token("mac", 0).unwrap();
+    drop(store);
+    let bind = free_addr();
+    let url = format!("ws://{bind}/api/v1/node/connect");
+    // Pauses that would grow to 20 s if they were backing off, so a quick retry can only come from the restart rule.
+    let opts = LinkOpts {
+        backoff_min: Duration::from_millis(300),
+        backoff_max: Duration::from_secs(20),
+        ..fast()
+    };
+    let hub = start_hub(&bind.to_string(), &db).await;
+    let (tx, mut ev) = mpsc::channel(256);
+    let _link = link::spawn(url, token, "mac".into(), tx, opts);
+    assert!(expect(&mut ev, 10_000, |e| *e == LinkEvent::Up).await);
+    // The hub stops (telling the machine it is restarting). For eight seconds something else answers on its address and counts the attempts.
+    hub.shutdown().await;
+    assert!(expect(&mut ev, 10_000, |e| *e == LinkEvent::Down).await);
+    let listener = tokio::net::TcpListener::bind(bind).await.unwrap();
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = attempts.clone();
+    let counter = tokio::spawn(async move {
+        loop {
+            if let Ok((s, _)) = listener.accept().await {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                drop(s);
+            }
+        }
+    });
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    counter.abort();
+    let n = attempts.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        n >= 9,
+        "tried {n} times in 8 s: backing off (about 5 or 6), not retrying every second or so"
+    );
+    // The hub is back: the machine is connected again within a moment, not after a long pause.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let hub = start_hub(&bind.to_string(), &db).await;
+    assert!(
+        expect(&mut ev, 1500, |e| *e == LinkEvent::Up).await,
+        "slow to come back"
+    );
+    hub.shutdown().await;
+}

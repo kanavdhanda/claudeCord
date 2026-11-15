@@ -327,6 +327,11 @@ impl HubCore {
         self.perms.load(perms);
         self.tasks.load(tasks);
         self.queues.load(queues);
+        // A saved delivery was sent over a connection that no longer exists; connections are numbered afresh, so the old number may be a new
+        // connection's.
+        for p in pending.values_mut() {
+            p.conn = 0;
+        }
         self.pending.load(pending);
         self.handoffs.load(handoffs);
         self.dump_asked.load(dump_asked);
