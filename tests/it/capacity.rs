@@ -99,6 +99,7 @@ async fn person_to_agent_and_back() {
                 backoff_min: Duration::from_millis(50),
                 backoff_max: Duration::from_millis(500),
                 proxy: None,
+                outbox: None,
             },
         ));
         let mine: Vec<String> = (0..10)

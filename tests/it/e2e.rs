@@ -65,6 +65,7 @@ fn fast(extra: Vec<PathBuf>, max_agents: usize, labels: Vec<String>) -> Options 
             backoff_min: Duration::from_millis(30),
             backoff_max: Duration::from_millis(300),
             proxy: None,
+            outbox: None,
         },
         tick: Duration::from_millis(40),
         accept_after: Duration::from_millis(400),
