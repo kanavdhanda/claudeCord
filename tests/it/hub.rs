@@ -222,20 +222,23 @@ fn a_burst_while_held_is_delivered_as_one_batch_on_resume() {
     let d = deliveries(&fx);
     let texts: Vec<&str> = d.iter().map(|x| x.2.as_str()).collect();
     assert!(texts.ends_with(&["one", "two", "three"]));
-    // Exactly one of the frames in the batch carries the id the device will report back.
-    let ids = frames(&fx)
+    // Every frame in the batch has an id of its own (so a frame sent a second time is recognised), and the last one is the batch's.
+    let ids: Vec<String> = frames(&fx)
         .iter()
-        .filter(|f| {
-            matches!(
-                f,
-                HubFrame::Deliver {
-                    msg_id: Some(_),
-                    ..
-                }
-            )
+        .filter_map(|f| match f {
+            HubFrame::Deliver { msg_id, .. } => msg_id.clone(),
+            _ => None,
         })
-        .count();
-    assert!(ids <= 1);
+        .collect();
+    let mut unique = ids.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), ids.len(), "{ids:?}");
+    assert!(ids.len() >= 3, "{ids:?}");
+    assert!(
+        !ids.last().unwrap().contains('.'),
+        "the batch id is the last: {ids:?}"
+    );
 }
 
 #[test]
@@ -3568,4 +3571,79 @@ fn an_assign_that_asked_for_a_receipt_is_answered_whether_the_peer_took_it_or_co
             .unwrap()
             .contains("NOT delivered yet: heron is paused")
     );
+}
+
+#[test]
+fn a_delivery_never_accepted_is_sent_again_with_the_same_ids_once_the_machine_has_a_new_connection()
+{
+    let mut w = World::new();
+    w.join("mac", 1, "otter");
+    w.core.on_node_frame(
+        "mac",
+        NodeFrame::AgentStatus {
+            agent_id: "p/otter".into(),
+            status: AgentStatus::Idle,
+            detail: None,
+        },
+        T0,
+    );
+    let (_, fx) = w.say_hi(&w.kd.clone(), "@otter one");
+    let first: Vec<Option<String>> = frames(&fx)
+        .iter()
+        .filter_map(|f| match f {
+            HubFrame::Deliver { msg_id, from, .. } if from != "system" => Some(msg_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(first.len(), 1, "{first:?}");
+    let sent_again = |fx: &[Effect]| -> Vec<Option<String>> {
+        frames(fx)
+            .iter()
+            .filter_map(|f| match f {
+                HubFrame::Deliver { msg_id, from, .. } if from != "system" => Some(msg_id.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    // Same connection: nothing to send again, however long it has been.
+    assert!(sent_again(&w.core.tick(T0 + 120_000)).is_empty());
+    // The machine comes back on another connection, and is quiet for a few seconds (an acceptance it kept would arrive by now): not yet.
+    w.core.node_disconnected("mac", 1);
+    w.core.node_connected("mac", 2);
+    w.core.on_node_frame(
+        "mac",
+        NodeFrame::AgentRegister {
+            agent: spec("p", "otter"),
+            cwd: "/x".into(),
+        },
+        T0 + 121_000,
+    );
+    w.core.on_node_frame(
+        "mac",
+        NodeFrame::AgentStatus {
+            agent_id: "p/otter".into(),
+            status: AgentStatus::Idle,
+            detail: None,
+        },
+        T0 + 121_000,
+    );
+    // Sent again with the id it had, to the new connection, once.
+    let again = sent_again(&w.core.tick(T0 + 125_000));
+    assert_eq!(again, first);
+    assert!(
+        sent_again(&w.core.tick(T0 + 126_000)).is_empty(),
+        "only once per connection"
+    );
+    // Accepted: never again, on any connection.
+    w.core.on_node_frame(
+        "mac",
+        NodeFrame::AgentAccepted {
+            agent_id: "p/otter".into(),
+            msg_ids: first.iter().flatten().cloned().collect(),
+        },
+        T0 + 127_000,
+    );
+    w.core.node_disconnected("mac", 2);
+    w.core.node_connected("mac", 3);
+    assert!(sent_again(&w.core.tick(T0 + 300_000)).is_empty());
 }

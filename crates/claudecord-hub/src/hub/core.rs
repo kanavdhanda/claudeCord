@@ -61,6 +61,14 @@ pub(super) struct Pending {
     /// What was sent, kept so a session that dies before accepting it can be given it again.
     pub items: Vec<Queued>,
     pub at: i64,
+    /// The connection it was sent over (0 once restored from disk, which is no connection). When the machine's connection is a different one,
+    /// the frames may never have arrived, and an unaccepted delivery is sent again (`resend_unaccepted`).
+    #[serde(default)]
+    pub conn: u64,
+    /// Every frame of the batch carried an id of its own, so a machine that already has some of them ignores those when they are sent again.
+    /// Messages between agents (pasted at once or failed) and deliveries saved by an older hub are never sent again.
+    #[serde(default)]
+    pub per_item_ids: bool,
 }
 
 use super::tracked::{Cell, Log, TrackedMap, TrackedSet};
