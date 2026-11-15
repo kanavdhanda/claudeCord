@@ -975,7 +975,7 @@ async fn a_project_is_chosen_on_the_dashboard_by_the_owner_of_the_machine_and_no
     ws.send(Message::Text(
         serde_json::to_string(&NodeFrame::Hello {
             node_name: "mac".into(),
-            version: "0.2.5".into(),
+            version: "0.4.2".into(),
             features: vec![],
         })
         .unwrap()
@@ -1191,7 +1191,7 @@ async fn nothing_goes_ahead_with_a_bot_that_is_not_in_a_server_or_lacks_what_it_
     ws.send(Message::Text(
         serde_json::to_string(&NodeFrame::Hello {
             node_name: "mac".into(),
-            version: "0.2.5".into(),
+            version: "0.4.2".into(),
             features: vec![],
         })
         .unwrap()
@@ -1516,7 +1516,7 @@ async fn pressing_start_makes_the_hub_ask_the_machine_to_start_the_agent_with_th
     ws.send(Message::Text(
         serde_json::to_string(&NodeFrame::Hello {
             node_name: "mac".into(),
-            version: "0.2.6".into(),
+            version: "0.4.2".into(),
             features: vec!["hub-spawn".into()],
         })
         .unwrap()
@@ -1689,7 +1689,7 @@ async fn discord_spawn_can_name_a_saved_startup_command_with_autocomplete_and_re
     ws.send(Message::Text(
         serde_json::to_string(&NodeFrame::Hello {
             node_name: "mac".into(),
-            version: "0.2.6".into(),
+            version: "0.4.2".into(),
             features: vec!["hub-spawn".into()],
         })
         .unwrap()

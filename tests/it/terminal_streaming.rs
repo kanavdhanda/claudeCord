@@ -1688,6 +1688,7 @@ async fn a_machine_too_old_for_terminals_is_told_so_not_left_blank() {
     let mut store = Store::open(&dir.join("t.db"), None).unwrap();
     let machine_tok = store.create_token("mac", 0).unwrap();
     let web_tok = store.create_token("web:kd", 0).unwrap();
+    // The hub's minimum is lowered for this test: a machine this old is normally refused at hello, before terminals come up.
     let mut core = HubCore::default();
     core.add_owner("1");
     let cfg = Config {
@@ -1695,6 +1696,7 @@ async fn a_machine_too_old_for_terminals_is_told_so_not_left_blank() {
         ping_every: Duration::from_secs(30),
         max_out_bytes: 1024 * 1024,
         tick_every: Duration::from_millis(50),
+        min_client_version: "0.1.0".into(),
         ..Config::default()
     };
     let hub = server::start(cfg, core, store).await.unwrap();

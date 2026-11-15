@@ -2766,7 +2766,7 @@ fn a_machine_running_an_older_version_is_told_the_newest_and_a_current_one_is_no
         )
     };
     let now = env!("CARGO_PKG_VERSION");
-    let fx = hello("old", "0.1.0", &mut w);
+    let fx = hello("old", "0.4.2", &mut w);
     assert!(
         matches!(frames(&fx).as_slice(), [HubFrame::Update { latest }] if latest == now),
         "{fx:?}"
@@ -2795,12 +2795,43 @@ fn a_machine_below_minimum_version_is_refused_and_disconnected() {
         T0,
     );
     assert!(
-        matches!(frames(&fx).as_slice(), [HubFrame::Error { message }] if message.contains("below minimum supported version")),
+        matches!(frames(&fx).as_slice(), [HubFrame::Error { message }] if message.contains("below the minimum supported version")),
         "{fx:?}"
     );
     assert!(
         fx.iter().any(|e| matches!(e, Effect::Close { conn: 1 })),
         "connection must be closed"
+    );
+}
+
+#[test]
+fn the_minimum_version_is_served_and_one_below_it_is_refused_with_how_to_update() {
+    assert_eq!(claudecord::protocol::MIN_CLIENT_VERSION, "0.4.2");
+    let hello = |version: &str| {
+        let mut w = World::new();
+        w.core.node_connected("mac", 1);
+        w.core.on_node_frame(
+            "mac",
+            NodeFrame::Hello {
+                node_name: "mac".into(),
+                version: version.into(),
+                features: vec![],
+            },
+            T0,
+        )
+    };
+    // The oldest served version is let in (and told a newer one exists); the one before it is not.
+    assert!(
+        !hello("0.4.2")
+            .iter()
+            .any(|e| matches!(e, Effect::Close { .. }))
+    );
+    let fx = hello("0.4.1");
+    assert!(fx.iter().any(|e| matches!(e, Effect::Close { conn: 1 })));
+    assert!(
+        matches!(frames(&fx).as_slice(), [HubFrame::Error { message }]
+            if message.contains("0.4.2") && message.contains("npm i -g claudecord@latest")),
+        "{fx:?}"
     );
 }
 
