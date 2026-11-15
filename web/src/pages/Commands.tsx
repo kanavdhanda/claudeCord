@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { api } from '../api'
 import { useAction, useLoad } from '../hooks'
+import { HarnessOptions } from '../harnesses'
 
 const slug = /^[A-Za-z0-9][A-Za-z0-9._-]{0,49}$/
 
@@ -55,9 +56,7 @@ export function Commands() {
         <label>
           The program it starts <span className="muted small">(so it is read correctly)</span>
           <select value={program} onChange={(e) => setProgram(e.target.value)}>
-            <option value="claude">Claude Code</option>
-            <option value="codex">Codex</option>
-            <option value="agy">agy</option>
+            <HarnessOptions withGeneric />
           </select>
         </label>
         {name !== '' && !slug.test(name) && <p className="error">A name is letters, digits, dots, dashes and underscores.</p>}

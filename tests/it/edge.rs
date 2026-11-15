@@ -262,6 +262,7 @@ fn a_project_cannot_have_more_than_its_limit_of_agents_and_the_ones_it_has_are_u
                     name: name.into(),
                     project: "demo".into(),
                     adapter: AdapterId::Claude,
+                    harness: None,
                     model: None,
                     role: None,
                 },

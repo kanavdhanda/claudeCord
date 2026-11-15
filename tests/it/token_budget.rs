@@ -29,6 +29,7 @@ fn spec(name: &str) -> AgentSpec {
         name: name.into(),
         project: "p".into(),
         adapter: AdapterId::Claude,
+        harness: None,
         model: None,
         role: None,
     }

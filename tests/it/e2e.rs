@@ -655,6 +655,7 @@ async fn the_hub_can_start_an_agent_in_a_folder_the_machine_already_knows() {
         name: name.into(),
         project: project.into(),
         adapter: claudecord::protocol::AdapterId::Claude,
+        harness: None,
         model: None,
         role: None,
     };
@@ -849,6 +850,7 @@ async fn nothing_is_handed_over_unless_asked_for() {
                         name: "otter".into(),
                         project: "demo".into(),
                         adapter: claudecord::protocol::AdapterId::Claude,
+                        harness: None,
                         model: None,
                         role: None,
                     },
@@ -887,6 +889,7 @@ async fn nothing_is_handed_over_unless_asked_for() {
                         name: "otter".into(),
                         project: "demo".into(),
                         adapter: claudecord::protocol::AdapterId::Claude,
+                        harness: None,
                         model: None,
                         role: None,
                     },
@@ -1095,6 +1098,7 @@ async fn an_agent_the_hub_asks_for_runs_inside_tmux_where_a_person_can_attach() 
         name: "wren".into(),
         project: "demo".into(),
         adapter: claudecord::protocol::AdapterId::Claude,
+        harness: None,
         model: None,
         role: None,
     };
@@ -1946,6 +1950,7 @@ fn spec_of(project: &str, name: &str) -> claudecord::protocol::AgentSpec {
         name: name.into(),
         project: project.into(),
         adapter: claudecord::protocol::AdapterId::Claude,
+        harness: None,
         model: None,
         role: None,
     }

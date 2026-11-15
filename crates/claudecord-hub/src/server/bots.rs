@@ -7,7 +7,7 @@ use crate::control::seal;
 use crate::discord::api::Rest;
 use crate::hub::controls::{MoveError, SpawnExtra};
 use crate::hub::{Chat, Effect, Human};
-use crate::protocol::{AdapterId, AgentSpec, is_slug};
+use crate::protocol::{AgentSpec, is_slug};
 use crate::sync::Lock;
 use axum::{
     Json, Router,
@@ -742,20 +742,16 @@ async fn spawn(State(gw): State<Gateway>, headers: HeaderMap, Json(b): Json<Spaw
         },
         None => (None, None),
     };
-    let adapter = match program
-        .as_deref()
-        .or(b.adapter.as_deref())
-        .unwrap_or("claude")
-    {
-        "claude" => AdapterId::Claude,
-        "codex" => AdapterId::Codex,
-        "agy" => AdapterId::Agy,
-        _ => {
-            return err(
-                StatusCode::BAD_REQUEST,
-                "the agent program is claude, codex or agy",
-            );
-        }
+    let Some((adapter, harness)) = crate::protocol::resolve_adapter(
+        program
+            .as_deref()
+            .or(b.adapter.as_deref())
+            .unwrap_or("claude"),
+    ) else {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "the agent program is claude, codex, agy, generic or a named program (gemini, aider, ...)",
+        );
     };
     let Ok(t) = gw.registry.hub(&a) else {
         return err(StatusCode::SERVICE_UNAVAILABLE, "your hub could not start");
@@ -765,6 +761,7 @@ async fn spawn(State(gw): State<Gateway>, headers: HeaderMap, Json(b): Json<Spaw
         name: b.name.clone(),
         project: b.project.clone(),
         adapter,
+        harness: harness.map(String::from),
         model: None,
         role: None,
     };
