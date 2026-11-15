@@ -1139,7 +1139,10 @@ impl HubCore {
             text: clean.clone(),
             thread: thread.clone(),
         }));
-        if let Some(note) = self.wrong_thread_note(&a, thread.as_deref(), now) {
+        // Only to a machine that knows `warn` receipts: an older one would take it for the answer and never hear whether the say arrived.
+        if self.node_can(&a.node_name, "say-warn")
+            && let Some(note) = self.wrong_thread_note(&a, thread.as_deref(), now)
+        {
             self.say_receipt(&a, say_id.as_deref(), "warn", Some(&note), fx);
         }
         self.route_agent_message(

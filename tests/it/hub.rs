@@ -3470,6 +3470,18 @@ fn a_say_in_a_thread_it_was_not_asked_in_gets_a_short_warning_and_a_right_one_ge
     let mut w = World::new();
     w.join("mac", 1, "otter");
     w.join("gpu", 2, "heron");
+    let hello = |w: &mut World, features: Vec<String>| {
+        w.core.on_node_frame(
+            "mac",
+            NodeFrame::Hello {
+                node_name: "mac".into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+                features,
+            },
+            T0,
+        )
+    };
+    hello(&mut w, vec!["say-warn".into()]);
     let say = |w: &mut World, thread: Option<&str>, at: i64| {
         w.core.on_node_frame(
             "mac",
@@ -3500,6 +3512,13 @@ fn a_say_in_a_thread_it_was_not_asked_in_gets_a_short_warning_and_a_right_one_ge
     // Answering where it was asked costs nothing, and neither does it long after, once that thread is no longer active.
     assert!(say_warnings(&say(&mut w, Some("design talk"), T0 + 2_000)).is_empty());
     assert!(say_warnings(&say(&mut w, None, T0 + 3 * 60 * 60_000)).is_empty());
+    // A machine that does not say it knows `warn` receipts (an older version) is never sent one: it would take it for the answer.
+    hello(&mut w, vec![]);
+    let kd = w.kd.clone();
+    w.core
+        .human_message(&kd, "p", "thoughts?", &opts, T0 + 4 * 60 * 60_000)
+        .unwrap();
+    assert!(say_warnings(&say(&mut w, None, T0 + 4 * 60 * 60_000 + 1_000)).is_empty());
 }
 
 #[test]
