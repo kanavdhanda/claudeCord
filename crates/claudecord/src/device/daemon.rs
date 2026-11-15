@@ -86,6 +86,10 @@ fn direct_failure_reason(
 /// How long `claudecord say` waits for the hub's word: a little longer than the device tries, so a failure it reports arrives first.
 const SAY_REPLY_WAIT: Duration = Duration::from_secs(8);
 
+/// What a say that went to the chat (and to no agent) prints: it is also the reply, so it is not typed out a second time in the terminal.
+const SAID_IN_CHAT: &str =
+    "sent to the chat. That was your reply; do not repeat it in the terminal.";
+
 /// What `claudecord say` prints, from what the hub said. There is no in-between: the agent it named has the message or it failed, and a say
 /// is only a success in the first case (or when it named nobody and just went to the chat).
 fn say_answer(
@@ -99,10 +103,10 @@ fn say_answer(
             "delivered" => Resp::ok("delivered: they have it"),
             "info" => Resp::ok(detail.unwrap_or_default()),
             "failed" => Resp::err(format!(
-                "NOT delivered: {}",
+                "NOT delivered: {}\nNothing was sent. Try again in a moment; `claudecord team` shows what each agent is doing.",
                 detail.unwrap_or_else(|| "the hub could not send it".into())
             )),
-            _ => Resp::ok("sent"),
+            _ => Resp::ok(SAID_IN_CHAT),
         },
         _ => Resp::err(
             "NOT delivered: the hub did not confirm it, so it may not have been sent. Check `claudecord doctor`, then send it again",
@@ -758,8 +762,9 @@ impl State {
                         (Some(w), "info") => {
                             (state, Some(format!("{}\n{w}", detail.unwrap_or_default())))
                         }
-                        (Some(w), "failed") => (state, detail.map(|d| format!("{d}\n{w}"))),
-                        (Some(w), _) => ("info".into(), Some(format!("sent\n{w}"))),
+                        // Not delivered means not sent, so "posted to" would contradict it.
+                        (Some(_), "failed") => (state, detail),
+                        (Some(w), _) => ("info".into(), Some(format!("{SAID_IN_CHAT}\n{w}"))),
                         (None, _) => (state, detail),
                     };
                     let _ = tx.send((state, detail));
@@ -881,7 +886,7 @@ impl State {
                             .up_agent(
                                 agent.project.clone(),
                                 Some(agent.name.clone()),
-                                agent.adapter.as_str().into(),
+                                adapter_arg(&agent),
                                 ex.model.clone().or(agent.model.clone()),
                                 agent.role.clone(),
                                 cwd,
@@ -914,7 +919,7 @@ impl State {
                                 &agent.name,
                                 (
                                     agent.project.clone(),
-                                    agent.adapter.as_str().into(),
+                                    adapter_arg(&agent),
                                     agent.model.clone(),
                                     agent.role.clone(),
                                     folder,
@@ -941,7 +946,7 @@ impl State {
                             .up_agent(
                                 agent.project.clone(),
                                 Some(agent.name.clone()),
-                                agent.adapter.as_str().into(),
+                                adapter_arg(&agent),
                                 agent.model.clone(),
                                 agent.role.clone(),
                                 cwd.to_string_lossy().into(),
@@ -1072,11 +1077,7 @@ impl State {
             return;
         };
         let old = std::mem::replace(&mut a.spec.project, project.to_string());
-        let (origin, name, adapter) = (
-            a.origin.clone(),
-            a.spec.name.clone(),
-            a.spec.adapter.as_str().to_string(),
-        );
+        let (origin, name, adapter) = (a.origin.clone(), a.spec.name.clone(), adapter_arg(&a.spec));
         let (model, role) = (a.spec.model.clone(), a.spec.role.clone());
         let cwd = origin.to_string_lossy().into_owned();
         crate::info!(
@@ -1595,16 +1596,28 @@ impl State {
                 }
                 let _ = shown;
             }
-            let status = status_of(&state);
+            // When the screen last changed (the idle shutdown goes by it, and so does the first "ready" of a program that shows no input box we know).
+            let hash = a.proc.screen_hash();
+            if hash != a.still.0 {
+                a.still = (hash, now);
+            }
+            // A prompt counts as one only once it has been seen on two looks in a row (the check above that raises the permission card): one
+            // odd frame while a program redraws is not "waiting for input".
+            let confirmed = state
+                .prompt
+                .as_ref()
+                .is_some_and(|p| a.shown_prompt.as_deref() == Some(&p.signature));
+            let status = next_status(
+                a.status,
+                &state,
+                confirmed,
+                !screen.trim().is_empty(),
+                now - a.still.1,
+            );
             // A turn ended: the agent is no longer owed an answer. No picture of the terminal is sent unasked, only when the agent asks a person for
             // permission or runs into a usage limit, or when a person asks for one.
             if status == AgentStatus::Idle && a.status != AgentStatus::Idle {
                 a.awaiting = None;
-            }
-            // When the screen last changed (the idle shutdown goes by it).
-            let hash = a.proc.screen_hash();
-            if hash != a.still.0 {
-                a.still = (hash, now);
             }
             if status != a.status {
                 a.log.event(now, "status", &format!("{status:?}"));
@@ -1719,7 +1732,14 @@ impl State {
                     out.push(NodeFrame::AgentDeliveryFailed {
                         agent_id: id.to_string(),
                         msg_ids: vec![mid],
-                        reason: reason.into(),
+                        reason: match &state.prompt {
+                            // Say which prompt it saw, so a false one is plain to the sender and to whoever reads the log.
+                            Some(p) if !a.held && state.limit.is_none() => {
+                                let q: String = p.question.chars().take(80).collect();
+                                format!("{reason} (\"{q}\"; answer it in the terminal or the chat)")
+                            }
+                            _ => reason.into(),
+                        },
                     });
                 }
             }
@@ -1952,13 +1972,23 @@ impl State {
                 task,
                 thread,
             } => {
-                self.verb(&agent, |id| NodeFrame::AgentAssign {
-                    agent_id: id,
-                    to,
-                    task,
-                    thread,
-                })
-                .await
+                // Like a say: the answer says whether the peer has the task, not just that the hub took the request.
+                let (say_id, rx) = self.expect_reply(&task);
+                let resp = self
+                    .verb(&agent, |id| NodeFrame::AgentAssign {
+                        agent_id: id,
+                        to,
+                        task,
+                        thread,
+                        say_id: Some(say_id.clone()),
+                    })
+                    .await;
+                if resp.ok {
+                    self.defer = Some(rx);
+                } else {
+                    self.says.remove(&say_id);
+                }
+                resp
             }
             Req::Done {
                 agent,
@@ -2307,11 +2337,11 @@ impl State {
         cols: u16,
         opts: UpOpts,
     ) -> Resp {
-        let adapter = match adapter.as_str() {
-            "claude" => AdapterId::Claude,
-            "agy" => AdapterId::Agy,
-            "codex" => AdapterId::Codex,
-            other => return Resp::err(format!("unknown agent type {other}")),
+        let Some((adapter, harness)) = crate::protocol::resolve_adapter(adapter.as_str()) else {
+            return Resp::err(format!(
+                "unknown agent type {adapter}: {}",
+                crate::protocol::adapter_names().join(", ")
+            ));
         };
         let project = project_slug(&project);
         let taken: HashSet<String> = self
@@ -2362,12 +2392,25 @@ impl State {
         };
         let argv = match opts.command.clone().filter(|c| !c.is_empty()) {
             Some(c) => c,
-            None => adapter.argv(&LaunchCtx {
-                name: &name,
-                model: model.as_deref(),
-                policy: pol,
-                mcp_config: None,
-            }),
+            None => match (adapter, harness) {
+                // A program known by name starts as installed (its own flags are not known here).
+                (AdapterId::Generic, Some(h)) => vec![
+                    crate::protocol::harness(h)
+                        .map_or(h, |x| x.program)
+                        .to_string(),
+                ],
+                (AdapterId::Generic, None) => {
+                    return Resp::err(
+                        "generic needs a program to run: use a saved startup command, or name one (gemini, aider, opencode, ...)",
+                    );
+                }
+                _ => adapter.argv(&LaunchCtx {
+                    name: &name,
+                    model: model.as_deref(),
+                    policy: pol,
+                    mcp_config: None,
+                }),
+            },
         };
         let secrets = secret_env_names(
             std::env::vars()
@@ -2457,6 +2500,7 @@ impl State {
             name,
             project,
             adapter,
+            harness: harness.map(String::from),
             model,
             role,
         };
@@ -2574,12 +2618,36 @@ fn describe(req: &Req) -> Option<(&str, &'static str, String)> {
     })
 }
 
-/// What a screen reading means for the status shown to people.
-fn status_of(s: &ScreenState) -> AgentStatus {
+/// The agent type name an agent is started from again: its named program if it has one, else its adapter.
+fn adapter_arg(spec: &AgentSpec) -> String {
+    spec.harness
+        .clone()
+        .unwrap_or_else(|| spec.adapter.as_str().to_string())
+}
+
+/// How long a program's screen must stay still, with something on it, before it counts as ready even though no input box was recognised. A
+/// program whose screen is not known would otherwise be "starting" for good, and everything sent to it refused for that.
+const STARTUP_QUIET_MS: i64 = 4_000;
+
+/// The status to show now, from the one before it and what the screen reads as. A single reading is not trusted to move it backwards:
+/// - A prompt is "waiting for input" only when it is `confirmed`; an unconfirmed one leaves the status as it was.
+/// - Once an agent has been up, a screen that reads as nothing in particular (mid-redraw, a clear, a program with no recognisable idle line)
+///   is not "starting" again: that would hold every message for a program that is running. It stays as it was, or is "thinking" if it had
+///   been waiting on a prompt or a limit that is no longer showing.
+/// - A program that is starting becomes idle once its screen has shown something and then stood still for `STARTUP_QUIET_MS`.
+fn next_status(
+    prev: AgentStatus,
+    s: &ScreenState,
+    prompt_confirmed: bool,
+    has_screen: bool,
+    quiet_ms: i64,
+) -> AgentStatus {
     if s.limit.is_some() {
         AgentStatus::Limited
-    } else if s.prompt.is_some() {
+    } else if s.prompt.is_some() && prompt_confirmed {
         AgentStatus::WaitingInput
+    } else if s.prompt.is_some() {
+        prev
     } else if s.executing {
         AgentStatus::Executing
     } else if s.busy {
@@ -2587,7 +2655,13 @@ fn status_of(s: &ScreenState) -> AgentStatus {
     } else if s.ready {
         AgentStatus::Idle
     } else {
-        AgentStatus::Starting
+        match prev {
+            AgentStatus::Starting if has_screen && quiet_ms >= STARTUP_QUIET_MS => {
+                AgentStatus::Idle
+            }
+            AgentStatus::WaitingInput | AgentStatus::Limited => AgentStatus::Thinking,
+            other => other,
+        }
     }
 }
 
@@ -2671,6 +2745,7 @@ mod intro_tests {
                 name: "otter".into(),
                 project: "p".into(),
                 adapter,
+                harness: None,
                 model: None,
                 role: None,
             };
@@ -2722,5 +2797,76 @@ mod intro_tests {
         left.sort();
         assert_eq!(left, vec!["middle", "new"]);
         let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+    use AgentStatus::*;
+
+    fn screen(busy: bool, ready: bool, prompt: bool) -> ScreenState {
+        ScreenState {
+            busy,
+            ready,
+            executing: false,
+            prompt: prompt.then(|| crate::agents::adapters::PromptInfo {
+                signature: "q|a|b".into(),
+                question: "q".into(),
+                options: vec!["a".into(), "b".into()],
+                cursor: 0,
+            }),
+            limit: None,
+        }
+    }
+
+    #[test]
+    fn one_odd_frame_does_not_flip_a_running_program_to_waiting_or_back_to_starting() {
+        // A prompt seen once is not yet "waiting for input"; seen twice it is.
+        assert_eq!(
+            next_status(Idle, &screen(false, false, true), false, true, 0),
+            Idle
+        );
+        assert_eq!(
+            next_status(Idle, &screen(false, false, true), true, true, 0),
+            WaitingInput
+        );
+        // A redraw that reads as nothing keeps a running program as it was, never "starting".
+        assert_eq!(
+            next_status(Idle, &screen(false, false, false), false, true, 0),
+            Idle
+        );
+        assert_eq!(
+            next_status(Thinking, &screen(false, false, false), false, false, 0),
+            Thinking
+        );
+        // What it was waiting on has gone: it carries on, so "thinking", until a reading says more.
+        assert_eq!(
+            next_status(WaitingInput, &screen(false, false, false), false, true, 0),
+            Thinking
+        );
+    }
+
+    #[test]
+    fn a_program_with_no_recognised_input_box_is_idle_once_its_screen_stands_still() {
+        let unknown = screen(false, false, false);
+        assert_eq!(
+            next_status(Starting, &unknown, false, false, 60_000),
+            Starting,
+            "nothing shown yet"
+        );
+        assert_eq!(
+            next_status(Starting, &unknown, false, true, 1_000),
+            Starting,
+            "still changing"
+        );
+        assert_eq!(
+            next_status(Starting, &unknown, false, true, STARTUP_QUIET_MS),
+            Idle
+        );
+        assert_eq!(
+            next_status(Starting, &screen(false, true, false), false, true, 0),
+            Idle
+        );
     }
 }

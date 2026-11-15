@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api, type Bot, type Channel, type Guild } from '../api'
 import { useAction, useLoad } from '../hooks'
+import { HarnessOptions } from '../harnesses'
 
 type Step = 'bot' | 'where' | 'name' | 'done'
 const steps: { id: Step; label: string }[] = [
@@ -249,9 +250,7 @@ function NameStep(p: {
       <label>
         Agent program
         <select value={p.program} onChange={(e) => p.setProgram(e.target.value)}>
-          <option value="claude">Claude Code</option>
-          <option value="codex">Codex</option>
-          <option value="agy">agy</option>
+          <HarnessOptions />
         </select>
       </label>
       {!ok && <p className="error">Names use letters, digits, dots, dashes and underscores.</p>}

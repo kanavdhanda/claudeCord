@@ -711,6 +711,7 @@ async fn an_agents_words_reach_the_channel_chosen_in_the_chosen_server() {
         name: "otter".into(),
         project: "alpha".into(),
         adapter: claudecord::protocol::AdapterId::Claude,
+        harness: None,
         model: None,
         role: None,
     };
@@ -875,6 +876,7 @@ async fn insights_show_what_agents_did_and_only_to_their_own_account() {
         name: "otter".into(),
         project: "p".into(),
         adapter: claudecord::protocol::AdapterId::Claude,
+        harness: None,
         model: None,
         role: None,
     };

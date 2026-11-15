@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api, type Project, type ProjectState } from '../api'
 import { ago, useAction, useLoad } from '../hooks'
+import { HarnessOptions } from '../harnesses'
 
 const dot = (status: string) => (status === 'idle' || status === 'ready' ? 'ok' : status === 'busy' || status === 'working' ? 'busy' : status === 'offline' ? 'off' : 'warn')
 
@@ -154,9 +155,7 @@ function SpawnForm({ project, machines, done }: { project: string; machines: str
     <div className="inline-form">
       <input placeholder="agent name" value={name} onChange={(e) => setName(e.target.value)} />
       <select value={saved ? `cmd:${saved}` : adapter} onChange={(e) => (e.target.value.startsWith('cmd:') ? setSaved(e.target.value.slice(4)) : (setSaved(''), setAdapter(e.target.value)))}>
-        <option value="claude">Claude Code</option>
-        <option value="codex">Codex</option>
-        <option value="agy">agy</option>
+        <HarnessOptions />
         {(commands.data ?? []).length > 0 && (
           <optgroup label="Startup commands">
             {commands.data!.map((c) => <option key={c.name} value={`cmd:${c.name}`}>{c.name} ({c.program})</option>)}

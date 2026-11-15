@@ -682,14 +682,12 @@ pub fn handle(
         },
         "spawn" => {
             // A saved command was resolved by the bridge: the program it starts is what the agent is read as.
-            let adapter = match get("command_program")
-                .or_else(|| get("adapter"))
-                .unwrap_or("claude")
-            {
-                "agy" => AdapterId::Agy,
-                "codex" => AdapterId::Codex,
-                _ => AdapterId::Claude,
-            };
+            let (adapter, harness) = crate::protocol::resolve_adapter(
+                get("command_program")
+                    .or_else(|| get("adapter"))
+                    .unwrap_or("claude"),
+            )
+            .unwrap_or((AdapterId::Claude, None));
             let extra = crate::hub::controls::SpawnExtra {
                 command: get("command_line").map(String::from),
                 pick: None,
@@ -704,6 +702,7 @@ pub fn handle(
                 name: n.into(),
                 project: project.into(),
                 adapter,
+                harness: harness.map(String::from),
                 model: get("model").map(String::from),
                 role: get("role").map(String::from),
             };

@@ -119,6 +119,7 @@ async fn person_to_agent_and_back() {
                                     name: n.clone(),
                                     project: "demo".into(),
                                     adapter: AdapterId::Claude,
+                                    harness: None,
                                     model: None,
                                     role: None,
                                 },

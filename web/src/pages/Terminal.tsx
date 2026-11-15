@@ -576,6 +576,8 @@ export function TerminalPage() {
   const [mobileLine, setMobileLine] = useState<string>('')
   const [errBanner, setErrBanner] = useState<string | null>(null)
   const [reconnectTick, setReconnectTick] = useState<number>(0)
+  // Failed attempts in a row, so retries slow down instead of hammering the hub, and start over once a connection holds.
+  const attemptsRef = useRef<number>(0)
 
   const getScreen = (paneId: string): VtScreen => {
     let scr = screensRef.current.get(paneId)
@@ -770,6 +772,35 @@ export function TerminalPage() {
     let fallbackTimer: number | null = null
     let reconnectTimer: number | null = null
 
+    // Connects again after a pause that grows with each failure (1s, 2s, 4s ... 15s, with some spread), and gives up only after many in a row.
+    const scheduleReconnect = () => {
+      if (cancelled || reconnectTimer) return
+      const n = attemptsRef.current++
+      if (n >= 20) {
+        setConnState('failed')
+        setErrBanner('Could not reconnect to the terminal. Reload the page to try again.')
+        return
+      }
+      setConnState('reconnecting')
+      const delay = Math.min(15000, 1000 * 2 ** n) * (0.7 + Math.random() * 0.6)
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null
+        if (!cancelled) setReconnectTick((t) => t + 1)
+      }, delay)
+    }
+    // Coming back online or to the foreground (a phone woken up, a laptop opened) is the moment to try at once.
+    const retryNow = () => {
+      if (cancelled || !reconnectTimer) return
+      window.clearTimeout(reconnectTimer)
+      reconnectTimer = null
+      setReconnectTick((t) => t + 1)
+    }
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') retryNow()
+    }
+    window.addEventListener('online', retryNow)
+    document.addEventListener('visibilitychange', onVisible)
+
     const start = async () => {
       setConnState('connecting')
       setTransport('connecting')
@@ -788,9 +819,15 @@ export function TerminalPage() {
           dc.onopen = () => {
             if (cancelled) return
             if (fallbackTimer) window.clearTimeout(fallbackTimer)
+            attemptsRef.current = 0
             setConnState('connected')
             setTransport((prev) => (prev.startsWith('webrtc') ? prev : 'webrtc_direct'))
             void sendMessage({ op: 'sync', pane: activePaneRef.current })
+          }
+          dc.onclose = () => {
+            // The direct channel went away; if the relay socket is not carrying the session either, start over.
+            const w = wsRef.current
+            if (!cancelled && (!w || w.readyState !== WebSocket.OPEN)) scheduleReconnect()
           }
           dc.onmessage = async (ev) => {
             if (cancelled) return
@@ -830,6 +867,7 @@ export function TerminalPage() {
 
         ws.onopen = () => {
           if (cancelled) return
+          attemptsRef.current = 0
           if (!dcRef.current || dcRef.current.readyState !== 'open') {
             setConnState('connected')
             setTransport('wss_fallback')
@@ -872,6 +910,9 @@ export function TerminalPage() {
             if (typeof frame.bytesRx === 'number') setBytesTx(frame.bytesRx)
             if (frame.state === 'failed' || frame.state === 'revoked') {
               setErrBanner(frame.detail || `Terminal ${frame.state}`)
+            } else if (frame.state === 'closed') {
+              // The machine let this session go (it heard nothing for a while); a page still open takes a new one.
+              scheduleReconnect()
             }
           } else if (t === 'term.frame' && typeof frame.payload === 'string') {
             setBytesRx((b) => b + frame.payload.length)
@@ -890,10 +931,8 @@ export function TerminalPage() {
             setConnState('revoked')
             setErrBanner('Terminal session grant was revoked or expired.')
           } else if (!dcRef.current || dcRef.current.readyState !== 'open') {
-            setConnState('reconnecting')
-            reconnectTimer = window.setTimeout(() => {
-              if (!cancelled) setReconnectTick((n) => n + 1)
-            }, 1500)
+            // Expired (4004), fell behind (4005), or the connection simply dropped: a new session, and so a whole fresh screen.
+            scheduleReconnect()
           }
         }
 
@@ -902,8 +941,9 @@ export function TerminalPage() {
         }, 5000)
       } catch (e: any) {
         if (!cancelled) {
-          setConnState('failed')
+          // Most often the network (a device that just woke or changed network): keep trying rather than stopping at the first failure.
           setErrBanner(e?.message || 'Failed to open terminal session')
+          scheduleReconnect()
         }
       }
     }
@@ -915,6 +955,15 @@ export function TerminalPage() {
       if (pingTimer) window.clearInterval(pingTimer)
       if (fallbackTimer) window.clearTimeout(fallbackTimer)
       if (reconnectTimer) window.clearTimeout(reconnectTimer)
+      window.removeEventListener('online', retryNow)
+      document.removeEventListener('visibilitychange', onVisible)
+      // Let the machine know at once that nobody is watching, so it frees the session.
+      try {
+        const w = wsRef.current
+        if (w && w.readyState === WebSocket.OPEN) w.send(JSON.stringify({ type: 'term.close', reason: 'page closed' }))
+      } catch {
+        // The socket is closing anyway.
+      }
       dcRef.current?.close()
       pcRef.current?.close()
       wsRef.current?.close()

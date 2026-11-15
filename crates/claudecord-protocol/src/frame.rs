@@ -86,6 +86,8 @@ pub enum AdapterId {
     Claude,
     Agy,
     Codex,
+    /// Any other program: read by what a screen looks like, not by one program's own words.
+    Generic,
 }
 
 impl AdapterId {
@@ -95,6 +97,7 @@ impl AdapterId {
             Self::Claude => "claude",
             Self::Agy => "agy",
             Self::Codex => "codex",
+            Self::Generic => "generic",
         }
     }
 }
@@ -136,6 +139,13 @@ pub struct AgentSpec {
         skip_serializing_if = "Option::is_none"
     )]
     pub role: Option<String>,
+    /// The named program (`gemini`, `aider`...) when the adapter is `generic` and the program is one claudeCord knows by name.
+    #[serde(
+        default,
+        deserialize_with = "opt::de",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub harness: Option<String>,
 }
 
 impl AgentSpec {
@@ -149,6 +159,10 @@ impl AgentSpec {
                 .role
                 .as_deref()
                 .is_none_or(|r| jslen(r) <= 120 && NO_CONTROL.is_match(r))
+            && self
+                .harness
+                .as_deref()
+                .is_none_or(|h| crate::harness(h).is_some())
             && self.agent_id == format!("{}/{}", self.project, self.name)
     }
 }
@@ -274,6 +288,13 @@ pub enum NodeFrame {
             skip_serializing_if = "Option::is_none"
         )]
         thread: Option<String>,
+        /// Asks the hub for a `say.receipt` about the task, so `claudecord assign` can tell the lead whether the peer has it.
+        #[serde(
+            default,
+            deserialize_with = "opt::de",
+            skip_serializing_if = "Option::is_none"
+        )]
+        say_id: Option<String>,
     },
     #[serde(rename = "agent.taskdone", rename_all = "camelCase")]
     AgentTaskDone {

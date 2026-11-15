@@ -20,6 +20,7 @@ fn spec(project: &str, name: &str) -> AgentSpec {
         name: name.into(),
         project: project.into(),
         adapter: AdapterId::Claude,
+        harness: None,
         model: None,
         role: None,
     }
@@ -981,6 +982,7 @@ fn only_the_lead_assigns_and_only_the_assignee_finishes() {
     let fx = w.core.on_node_frame(
         "gpu",
         NodeFrame::AgentAssign {
+            say_id: None,
             agent_id: "p/heron".into(),
             to: "otter".into(),
             task: "x".into(),
@@ -996,6 +998,7 @@ fn only_the_lead_assigns_and_only_the_assignee_finishes() {
     w.core.on_node_frame(
         "mac",
         NodeFrame::AgentAssign {
+            say_id: None,
             agent_id: "p/otter".into(),
             to: "heron".into(),
             task: "build it".into(),
@@ -1600,6 +1603,7 @@ fn finished_work_is_not_handed_over_and_open_work_is() {
         w.core.on_node_frame(
             "mac",
             NodeFrame::AgentAssign {
+                say_id: None,
                 agent_id: "p/otter".into(),
                 to: "heron".into(),
                 task: task.into(),
@@ -1670,6 +1674,7 @@ fn a_task_the_old_session_finished_is_not_redelivered_and_finishing_it_twice_tel
     w.core.on_node_frame(
         "mac",
         NodeFrame::AgentAssign {
+            say_id: None,
             agent_id: "p/otter".into(),
             to: "heron".into(),
             task: "build".into(),
@@ -1831,6 +1836,7 @@ fn only_the_last_completion_wakes_the_lead() {
         w.core.on_node_frame(
             "mac",
             NodeFrame::AgentAssign {
+                say_id: None,
                 agent_id: "p/otter".into(),
                 to: to.into(),
                 task: task.into(),
@@ -2179,6 +2185,7 @@ fn a_task_gets_its_own_thread_by_itself_and_what_the_worker_says_goes_there_unti
     let fx = w.core.on_node_frame(
         "mac",
         NodeFrame::AgentAssign {
+            say_id: None,
             agent_id: "p/otter".into(),
             to: "heron".into(),
             task: "build   the login page".into(),
@@ -3012,6 +3019,7 @@ fn a_moving_agents_open_tasks_go_back_to_the_lead_or_are_closed() {
     w.core.on_node_frame(
         "m1",
         NodeFrame::AgentAssign {
+            say_id: None,
             agent_id: "p/otter".into(),
             to: "fox".into(),
             task: "write the tests".into(),
@@ -3042,6 +3050,7 @@ fn a_moving_agents_open_tasks_go_back_to_the_lead_or_are_closed() {
     w.core.on_node_frame(
         "m2",
         NodeFrame::AgentAssign {
+            say_id: None,
             agent_id: "p/fox".into(),
             to: "otter".into(),
             task: "review".into(),
@@ -3376,6 +3385,7 @@ fn threads_lists_the_open_tasks_with_ids_and_a_task_id_stands_for_its_thread() {
     w.core.on_node_frame(
         "mac",
         NodeFrame::AgentAssign {
+            say_id: None,
             agent_id: "p/otter".into(),
             to: "heron".into(),
             task: "write the benchmark report".into(),
@@ -3490,4 +3500,53 @@ fn a_say_in_a_thread_it_was_not_asked_in_gets_a_short_warning_and_a_right_one_ge
     // Answering where it was asked costs nothing, and neither does it long after, once that thread is no longer active.
     assert!(say_warnings(&say(&mut w, Some("design talk"), T0 + 2_000)).is_empty());
     assert!(say_warnings(&say(&mut w, None, T0 + 3 * 60 * 60_000)).is_empty());
+}
+
+#[test]
+fn an_assign_that_asked_for_a_receipt_is_answered_whether_the_peer_took_it_or_could_not() {
+    let assign = |w: &mut World, to: &str, id: &str| {
+        w.core.on_node_frame(
+            "mac",
+            NodeFrame::AgentAssign {
+                agent_id: "p/otter".into(),
+                to: to.into(),
+                task: "build it".into(),
+                thread: None,
+                say_id: Some(id.into()),
+            },
+            T0,
+        )
+    };
+    // An unknown peer: the lead is told so as the answer, not as a note it may never read.
+    let mut w = World::new();
+    w.join("mac", 1, "otter");
+    w.join("gpu", 2, "heron");
+    let r = receipts(&assign(&mut w, "nobody", "a1"));
+    assert_eq!(r.len(), 1);
+    assert_eq!((r[0].1.as_str(), r[0].2.as_str()), ("a1", "failed"));
+    assert!(
+        r[0].3
+            .as_deref()
+            .unwrap()
+            .contains("Cannot assign to nobody")
+    );
+    // A peer that cannot take it now: the task waits, and the answer says "not yet", not a silent success.
+    w.core.on_node_frame(
+        "gpu",
+        NodeFrame::AgentStatus {
+            agent_id: "p/heron".into(),
+            status: AgentStatus::Paused,
+            detail: None,
+        },
+        T0,
+    );
+    let r = receipts(&assign(&mut w, "heron", "a2"));
+    assert_eq!(r.len(), 1);
+    assert_eq!((r[0].1.as_str(), r[0].2.as_str()), ("a2", "info"));
+    assert!(
+        r[0].3
+            .as_deref()
+            .unwrap()
+            .contains("NOT delivered yet: heron is paused")
+    );
 }

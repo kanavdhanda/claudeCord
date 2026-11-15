@@ -58,6 +58,17 @@ pub struct Guard {
     last_input: Option<i64>,
     last_output: i64,
     partial: bool,
+    esc: Esc,
+}
+
+/// How far into an escape sequence the last key read got.
+#[derive(Clone, Copy)]
+enum Esc {
+    None,
+    Escape,
+    Csi,
+    /// This many more bytes belong to the sequence.
+    Skip(u8),
 }
 
 impl Guard {
@@ -74,6 +85,7 @@ impl Guard {
             last_input: None,
             last_output: now,
             partial: false,
+            esc: Esc::None,
         }
     }
 
@@ -85,9 +97,33 @@ impl Guard {
         }
         self.last_input = Some(now);
         for &b in bytes {
-            match b {
-                b'\r' | b'\n' | 0x03 | 0x15 => self.partial = false,
-                _ => self.partial = true,
+            // An escape sequence can be cut between two reads, so where it stands is kept from one call to the next.
+            match self.esc {
+                Esc::None => match b {
+                    b'\r' | b'\n' | 0x03 | 0x15 => self.partial = false,
+                    0x1b => self.esc = Esc::Escape,
+                    // Other control keys (Tab, Ctrl+L, Backspace) write no text.
+                    0x00..=0x1f | 0x7f => {}
+                    _ => self.partial = true,
+                },
+                // Arrow keys, PgUp/PgDn, Alt+key and the like move around; they put nothing in the line, so they must not hold messages back.
+                Esc::Escape => {
+                    self.esc = match b {
+                        b'[' => Esc::Csi,
+                        b'O' => Esc::Skip(1),
+                        0x1b => Esc::Escape,
+                        _ => Esc::None,
+                    }
+                }
+                Esc::Csi => {
+                    // Parameters run until a final byte; the old mouse report, `ESC [ M`, is followed by three raw bytes.
+                    if b == b'M' {
+                        self.esc = Esc::Skip(3);
+                    } else if (0x40..=0x7e).contains(&b) {
+                        self.esc = Esc::None;
+                    }
+                }
+                Esc::Skip(n) => self.esc = if n > 1 { Esc::Skip(n - 1) } else { Esc::None },
             }
         }
     }

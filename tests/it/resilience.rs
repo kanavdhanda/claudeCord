@@ -319,6 +319,7 @@ async fn the_hub_lists_which_machines_are_active_and_when_they_were_last_heard()
             name: "otter".into(),
             project: "p".into(),
             adapter: AdapterId::Claude,
+            harness: None,
             model: None,
             role: None,
         },
