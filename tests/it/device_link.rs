@@ -67,6 +67,7 @@ fn spec(name: &str) -> AgentSpec {
         name: name.into(),
         project: "p".into(),
         adapter: AdapterId::Claude,
+        harness: None,
         model: None,
         role: None,
     }
@@ -286,6 +287,7 @@ async fn frames_sent_while_the_hub_is_away_arrive_once_and_in_order_when_it_is_b
             name: "otter".into(),
             project: "p".into(),
             adapter: AdapterId::Claude,
+            harness: None,
             model: None,
             role: None,
         },

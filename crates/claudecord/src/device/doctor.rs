@@ -29,7 +29,13 @@ pub fn install_hint(program: &str) -> &'static str {
     match program {
         "codex" => "npm i -g @openai/codex",
         "agy" => "install Antigravity and put `agy` on your PATH",
-        _ => "npm i -g @anthropic-ai/claude-code   (see https://claude.com/claude-code)",
+        other => match crate::protocol::HARNESSES
+            .iter()
+            .find(|h| h.program == other)
+        {
+            Some(h) => h.install,
+            None => "npm i -g @anthropic-ai/claude-code   (see https://claude.com/claude-code)",
+        },
     }
 }
 
@@ -62,7 +68,7 @@ pub fn program_of(adapter: &str) -> &'static str {
     match adapter {
         "codex" => "codex",
         "agy" => "agy",
-        _ => "claude",
+        other => crate::protocol::harness(other).map_or("claude", |h| h.program),
     }
 }
 

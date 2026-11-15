@@ -417,6 +417,7 @@ async fn a_real_conversation_including_the_agents_report_becomes_a_readable_vaul
         name: n.into(),
         project: "demo".into(),
         adapter: AdapterId::Claude,
+        harness: None,
         model: None,
         role: None,
     };

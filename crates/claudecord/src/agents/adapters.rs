@@ -326,6 +326,8 @@ impl AdapterExt for AdapterId {
                     Policy::Ask => {}
                 }
             }
+            // A program claudeCord only knows by name is started as it is installed; its own flags are not known here.
+            Self::Generic => {}
             Self::Codex => {
                 push(&["--no-alt-screen"]);
                 if let Some(m) = c.model {
@@ -362,6 +364,24 @@ impl AdapterExt for AdapterId {
                     busy,
                     ready,
                     executing,
+                    prompt,
+                    limit: any_limit(screen),
+                }
+            }
+            // Any other program: what a screen looks like, not one program's words. A spinner or a "to interrupt" hint is busy; a menu that asks
+            // something is a prompt (the rule every harness shares); anything else with something on screen is waiting for input.
+            Self::Generic => {
+                static BUSY: LazyLock<Regex> = LazyLock::new(|| {
+                    re(
+                        r"(?i)(esc(ape)? to (interrupt|cancel|stop)|ctrl[+-]c to (interrupt|stop|cancel)|thinking|working|generating|[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏])",
+                    )
+                });
+                let prompt = live_menu(screen);
+                let busy = BUSY.is_match(&tail(screen, 3)) && prompt.is_none();
+                ScreenState {
+                    busy,
+                    ready: !busy && prompt.is_none() && !screen.trim().is_empty(),
+                    executing: false,
                     prompt,
                     limit: any_limit(screen),
                 }
@@ -453,5 +473,28 @@ mod live_menu_tests {
         let st = AdapterId::Agy.detect(ask);
         assert!(st.prompt.is_some());
         assert!(!st.ready);
+    }
+}
+
+#[cfg(test)]
+mod generic_tests {
+    use super::*;
+
+    #[test]
+    fn the_general_reader_tells_busy_idle_and_asking_by_what_a_screen_looks_like() {
+        let g = AdapterId::Generic;
+        // Nothing shown yet: still starting. Anything else that is not busy or asking is waiting for input.
+        assert!(!g.detect("").ready);
+        assert!(g.detect("welcome\n> \n").ready);
+        // A spinner or an interrupt hint at the bottom is busy.
+        let busy = g.detect("reading files\n⠙ Working (esc to interrupt)\n");
+        assert!(busy.busy && !busy.ready);
+        // A question with options and a cue is a prompt, whichever program asks it.
+        let ask = g.detect("Allow this edit?\n ❯ 1. Yes\n   2. No\n Enter to confirm\n");
+        assert!(ask.prompt.is_some() && !ask.ready && !ask.busy);
+        // The same menu answered, with the input box back below it, is not.
+        let done =
+            g.detect("Allow this edit?\n ❯ 1. Yes\n   2. No\n Enter to confirm\n\nDone.\n> \n");
+        assert!(done.prompt.is_none() && done.ready);
     }
 }

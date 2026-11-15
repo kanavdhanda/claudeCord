@@ -67,6 +67,8 @@ agent's program again with the same name and folder (`claudecord restart NAME` f
 
 **Files between agents.** `claudecord send FILE` puts a file in the chat; `claudecord send FILE --to NAME` sends it to another agent. It lands in that agent's `.claudecord/files/<project>` folder, the agent is told where, and the chat shows it in the thread of the two of them. Agents learn this from `claudecord guide`.
 
+**Other programs.** Claude Code, Codex and agy have readers of their own. Any of `gemini`, `opencode`, `aider`, `cursor-agent`, `copilot`, `amp`, `goose`, `qwen`, `crush` and `droid` starts by its name (`--adapter gemini`, or the Program menu on the dashboard) and is read by what its screen looks like: a spinner or an "interrupt" hint is busy, a menu that asks something becomes a question in the chat, anything else is waiting for input. They run as installed (claudeCord does not know their flags), and not every one has been tried. For anything else, save a startup command on the dashboard and set its program to `generic`.
+
 `claudecord` does exactly what you ask and nothing more. `--project`, `--name`, `--adapter` and `--role` only give the page something to start with. These choices belong to your machine alone, and every one is a flag you choose:
 
 | Flag | Does |
