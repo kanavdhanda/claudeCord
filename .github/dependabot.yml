@@ -1,10 +1,10 @@
-# Opens pull requests for new versions of the Rust crates and the GitHub actions. Each one runs the full CI, so an update
+# Once a month, opens pull requests for new versions of the Rust crates and the GitHub actions. Each one runs the full CI, so an update
 # only merges when every test, the self-check and the smoke test still pass.
 version: 2
 updates:
   - package-ecosystem: cargo
     directory: /
-    schedule: { interval: weekly }
+    schedule: { interval: monthly }
   - package-ecosystem: github-actions
     directory: /
-    schedule: { interval: weekly }
+    schedule: { interval: monthly }
