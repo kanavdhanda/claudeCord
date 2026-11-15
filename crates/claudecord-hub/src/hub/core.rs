@@ -601,6 +601,7 @@ impl HubCore {
         self.roster_dirty.remove(id);
         // Without these two, every agent that ever spoke or was sent something would leave a row behind for as long as the hub runs.
         self.streak.remove(id);
+        self.recent_in.remove(id);
         self.pending.retain(|_, p| p.agent_id != id);
     }
 

@@ -70,6 +70,17 @@ fn navigation_keys_do_not_leave_a_half_typed_line() {
         g.on_input(keys, 5000);
         assert_eq!(g.check(9000, true), Ok(()), "{keys:?} wrote nothing");
     }
+    // A sequence cut between two reads, and an old-style mouse report, are still not typing.
+    for keys in [
+        &[&b"\x1b"[..], b"[6~"][..],
+        &[b"\x1b[", b"5~"],
+        &[b"\x1b[M !\"\x1b[M#$%"],
+    ] {
+        for k in keys {
+            g.on_input(k, 5000);
+        }
+        assert_eq!(g.check(9000, true), Ok(()), "{keys:?} wrote nothing");
+    }
     g.on_input(b"\x1b[200~hi\x1b[201~", 10_000);
     assert_eq!(g.check(14_000, true), Err(Wait::PartialLine));
 }

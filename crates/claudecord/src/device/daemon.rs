@@ -86,6 +86,10 @@ fn direct_failure_reason(
 /// How long `claudecord say` waits for the hub's word: a little longer than the device tries, so a failure it reports arrives first.
 const SAY_REPLY_WAIT: Duration = Duration::from_secs(8);
 
+/// What a say that went to the chat (and to no agent) prints: it is also the reply, so it is not typed out a second time in the terminal.
+const SAID_IN_CHAT: &str =
+    "sent to the chat. That was your reply; do not repeat it in the terminal.";
+
 /// What `claudecord say` prints, from what the hub said. There is no in-between: the agent it named has the message or it failed, and a say
 /// is only a success in the first case (or when it named nobody and just went to the chat).
 fn say_answer(
@@ -102,7 +106,7 @@ fn say_answer(
                 "NOT delivered: {}",
                 detail.unwrap_or_else(|| "the hub could not send it".into())
             )),
-            _ => Resp::ok("sent"),
+            _ => Resp::ok(SAID_IN_CHAT),
         },
         _ => Resp::err(
             "NOT delivered: the hub did not confirm it, so it may not have been sent. Check `claudecord doctor`, then send it again",
@@ -758,8 +762,9 @@ impl State {
                         (Some(w), "info") => {
                             (state, Some(format!("{}\n{w}", detail.unwrap_or_default())))
                         }
-                        (Some(w), "failed") => (state, detail.map(|d| format!("{d}\n{w}"))),
-                        (Some(w), _) => ("info".into(), Some(format!("sent\n{w}"))),
+                        // Not delivered means not sent, so "posted to" would contradict it.
+                        (Some(_), "failed") => (state, detail),
+                        (Some(w), _) => ("info".into(), Some(format!("{SAID_IN_CHAT}\n{w}"))),
                         (None, _) => (state, detail),
                     };
                     let _ = tx.send((state, detail));
