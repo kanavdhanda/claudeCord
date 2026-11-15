@@ -183,6 +183,17 @@ pub(crate) fn router(gw: Gateway) -> Router {
         .route(NODE_CONNECT_PATH, get(connect))
         .route("/healthz", get(|| async { "ok" }))
         .route("/readyz", get(readyz))
+        // What this hub is and the oldest machine it will serve, open to anyone (like /healthz): a machine, a script or a person can tell
+        // before connecting whether this version is still welcome. (Without it the dashboard page answered this address.)
+        .route(
+            "/version",
+            get(|| async {
+                axum::Json(serde_json::json!({
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "min_client_version": crate::protocol::MIN_CLIENT_VERSION,
+                }))
+            }),
+        )
         .route("/auth/login", get(auth_start))
         .route("/auth/callback", get(auth_callback))
         .route("/auth/dev", get(auth_dev))

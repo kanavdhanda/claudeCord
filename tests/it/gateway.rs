@@ -2011,3 +2011,24 @@ async fn a_machines_http_requests_accept_an_access_token_and_refuse_a_forged_or_
     );
     gw.shutdown().await;
 }
+
+#[tokio::test]
+async fn the_hosted_hub_says_its_version_and_the_oldest_it_serves_to_anyone_who_asks() {
+    let (gw, _) = rig().await;
+    let base = format!("http://{}", gw.addr);
+    let r = reqwest::get(format!("{base}/version")).await.unwrap();
+    assert_eq!(r.status().as_u16(), 200);
+    assert!(
+        r.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .contains("json"),
+        "the dashboard page answered this address instead"
+    );
+    let v: Value = r.json().await.unwrap();
+    assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        v["min_client_version"],
+        claudecord::protocol::MIN_CLIENT_VERSION
+    );
+}

@@ -195,7 +195,7 @@ fn update_notice() -> Option<String> {
 }
 
 /// How to update, judged by where this program lives: under uv's tools, an npm package, or (otherwise) a pip install.
-fn update_command(exe: &str) -> &'static str {
+pub(crate) fn update_command(exe: &str) -> &'static str {
     let e = exe.replace('\\', "/");
     if e.contains("/uv/tools/") || e.contains("/uv/") && e.contains("/tools/") {
         "uv tool upgrade claudecord"
