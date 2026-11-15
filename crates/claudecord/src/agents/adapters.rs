@@ -70,6 +70,36 @@ pub fn parse_menu(screen: &str) -> Option<PromptInfo> {
     parse_numbered_menu(screen).or_else(|| parse_plain_menu(screen))
 }
 
+/// A menu that is still waiting for an answer, for agents whose screens are not Claude Code's. A numbered list or a cursor line is common in
+/// ordinary output, so a menu only counts when it is near the bottom, says it is a question, and nothing below it shows the agent back at
+/// its input box. Without this an answered or imagined menu stays in the last lines of an idle screen, and the agent is "waiting on a
+/// prompt" until something new is printed, which a message to it cannot do while the prompt blocks the message.
+fn live_menu(screen: &str) -> Option<PromptInfo> {
+    static ASK: LazyLock<Regex> = LazyLock::new(|| {
+        re(
+            r"(?i)do you want|would you like|allow|approve|permission|proceed|run this|\(y/n\)|\[y/n\]|enter to (confirm|select)|esc to cancel|press enter",
+        )
+    });
+    static OPTION: LazyLock<Regex> = LazyLock::new(|| re(r"^[\s│]*[❯>›]?\s*[0-9]{1,2}[.)]\s"));
+    static INPUT: LazyLock<Regex> = LazyLock::new(|| re(r"^[\s│]*[❯>›](\s|$)"));
+    let near = tail(screen, 14);
+    let menu = parse_menu(&near)?;
+    if !ASK.is_match(&near) {
+        return None;
+    }
+    let lines: Vec<&str> = near.split('\n').collect();
+    let last_opt = menu.options.last()?;
+    let at = lines.iter().rposition(|l| l.contains(last_opt.as_str()))?;
+    let below: Vec<&&str> = lines[at + 1..]
+        .iter()
+        .filter(|l| !l.trim().is_empty() && !ASK.is_match(l))
+        .collect();
+    let back_at_input = below
+        .iter()
+        .any(|l| INPUT.is_match(l) && !OPTION.is_match(l));
+    (below.len() <= 3 && !back_at_input).then_some(menu)
+}
+
 /// A menu whose options carry no numbers: the option lines end right above a footer such as "Enter to confirm · Esc to cancel", exactly one is
 /// marked with the cursor, and the question is the text above them.
 fn parse_plain_menu(screen: &str) -> Option<PromptInfo> {
@@ -346,10 +376,13 @@ impl AdapterExt for AdapterId {
                     LazyLock::new(|| re(r"(?i)(esc to (interrupt|cancel)|working|thinking)"));
                 static CODEX: LazyLock<Regex> =
                     LazyLock::new(|| re(r"(?i)(esc to interrupt|working|thinking)"));
-                let t = tail(screen, 8);
+                // The status line is at the bottom: words further up are the agent's own output or an old footer.
+                let t = tail(screen, 3);
                 let pattern: &Regex = if self == Self::Agy { &AGY } else { &CODEX };
                 let busy = pattern.is_match(&t);
-                let prompt = parse_menu(screen);
+                let prompt = live_menu(screen);
+                // A prompt is up, so the "esc to cancel" in its footer is not a spinner.
+                let busy = busy && prompt.is_none();
                 ScreenState {
                     busy,
                     ready: !busy && prompt.is_none(),
@@ -397,5 +430,31 @@ impl AdapterExt for AdapterId {
             .iter()
             .position(|o| OTHER.is_match(o))
             .map(|i| menu_keys(p, i as i64))
+    }
+}
+
+#[cfg(test)]
+mod live_menu_tests {
+    use super::*;
+
+    #[test]
+    fn an_answered_menu_above_the_input_box_is_not_a_prompt_for_agy_or_codex() {
+        let stale =
+            "Run this command?\n  ❯ 1. Yes\n    2. No\n Esc to cancel\n\nDone, ran it.\n│ > \n";
+        for a in [AdapterId::Agy, AdapterId::Codex] {
+            let st = a.detect(stale);
+            assert!(st.prompt.is_none(), "{a:?}");
+            assert!(st.ready, "{a:?}");
+        }
+    }
+
+    #[test]
+    fn a_numbered_list_in_plain_output_is_not_a_prompt_but_a_real_question_is() {
+        let list = "Options:\n> 1. alpha\n  2. beta\n";
+        assert!(AdapterId::Agy.detect(list).prompt.is_none());
+        let ask = "Allow this edit?\n ❯ 1. Yes\n   2. No\n Esc to cancel\n";
+        let st = AdapterId::Agy.detect(ask);
+        assert!(st.prompt.is_some());
+        assert!(!st.ready);
     }
 }

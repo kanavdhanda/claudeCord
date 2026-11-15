@@ -1698,7 +1698,14 @@ impl State {
                     out.push(NodeFrame::AgentDeliveryFailed {
                         agent_id: id.to_string(),
                         msg_ids: vec![mid],
-                        reason: reason.into(),
+                        reason: match &state.prompt {
+                            // Say which prompt it saw, so a false one is plain to the sender and to whoever reads the log.
+                            Some(p) if !a.held && state.limit.is_none() => {
+                                let q: String = p.question.chars().take(80).collect();
+                                format!("{reason} (\"{q}\"; answer it in the terminal or the chat)")
+                            }
+                            _ => reason.into(),
+                        },
                     });
                 }
             }

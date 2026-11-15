@@ -1207,6 +1207,7 @@ pub(super) fn strip_mention(text: &str, name: &str) -> String {
 /// matches in "hi @otter!" and "@otter." but not in "@otters", "@otter-2" or "me@otter", and `@macbook` does not match inside `@macbook-eeg-main`
 /// (which would send a message meant for one agent to another).
 pub(super) fn mentions_name(text: &str, name: &str) -> bool {
+    let text = without_code(text);
     let hay = text.to_ascii_lowercase();
     let needle = format!("@{}", name.to_ascii_lowercase());
     let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
@@ -1221,4 +1222,45 @@ pub(super) fn mentions_name(text: &str, name: &str) -> bool {
         };
         !before.is_some_and(word) && !goes_on
     })
+}
+
+/// The text with fenced and inline code taken out, so a name inside a quoted command or a code block does not address anyone. A fence or
+/// backtick that is never closed keeps the rest as code.
+fn without_code(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut fenced = false;
+    for line in text.split_inclusive('\n') {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            continue;
+        }
+        let mut inline = false;
+        for c in line.chars() {
+            if c == '`' {
+                inline = !inline;
+            } else if !inline {
+                out.push(c);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod code_mention_tests {
+    use super::mentions_name;
+
+    #[test]
+    fn a_name_in_code_does_not_address_anyone_but_one_in_prose_does() {
+        assert!(mentions_name("hi @exec, build it", "exec"));
+        assert!(!mentions_name("run `claudecord say @exec hi` now", "exec"));
+        assert!(!mentions_name(
+            "```\nclaudecord assign @exec x\n```\ndone",
+            "exec"
+        ));
+        assert!(mentions_name("```\nx\n```\n@exec please", "exec"));
+    }
 }
