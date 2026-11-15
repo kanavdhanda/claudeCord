@@ -14,8 +14,10 @@ pub const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
 pub const NODE_CONNECT_PATH: &str = "/api/v1/node/connect";
 /// Current version of this program.
 pub const HUB_VERSION: &str = env!("CARGO_PKG_VERSION");
-/// Default minimum client version accepted by the hub.
-pub const MIN_CLIENT_VERSION: &str = "0.1.0";
+/// The oldest machine version the hub serves. An older one is told to update and disconnected (see the hello in `hub/core.rs`). 0.4.2 is the
+/// oldest that understands the hub's terminal sessions, the generation numbers they carry, and the receipts and redelivery it sends. Raise it
+/// only when something older would misbehave, since every machine below it stops working until it is updated.
+pub const MIN_CLIENT_VERSION: &str = "0.4.2";
 
 static SLUG: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$").unwrap());

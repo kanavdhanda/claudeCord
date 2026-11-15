@@ -775,7 +775,7 @@ impl HubCore {
                             conn,
                             frame: HubFrame::Error {
                                 message: format!(
-                                    "claudecord on {node} (version {version}) is below minimum supported version {}. Please upgrade claudecord: npm install -g claudecord",
+                                    "claudecord on {node} (version {version}) is below the minimum supported version {}. Update it with `npm i -g claudecord@latest` (or `pip install -U claudecord`, `uv tool upgrade claudecord`), then run `claudecord` again",
                                     self.min_client_version
                                 ),
                             },
