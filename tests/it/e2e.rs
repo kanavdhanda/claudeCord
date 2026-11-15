@@ -2380,7 +2380,7 @@ async fn a_say_to_a_peer_returns_delivered_once_the_peer_has_it_and_a_plain_say_
         }
     };
     let (plain, took) = say("thinking aloud").await;
-    assert!(plain.ok && plain.msg == "sent", "{}", plain.msg);
+    assert!(plain.ok && plain.msg.starts_with("sent"), "{}", plain.msg);
     assert!(took < Duration::from_secs(3), "a plain say waited {took:?}");
     let (named, _) = say("@heron please look at this").await;
     assert!(

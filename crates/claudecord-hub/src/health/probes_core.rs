@@ -457,6 +457,7 @@ fn tasks() -> Probe {
         c.on_node_frame(
             &node(0),
             NodeFrame::AgentAssign {
+                say_id: None,
                 agent_id: "p/otter".into(),
                 to: "heron".into(),
                 task: "build".into(),

@@ -107,6 +107,13 @@ impl TmuxTerminal {
                 "remain-on-exit",
                 "on",
                 ";",
+                // The window follows whichever client was used last, so a phone and a desktop terminal sharing it never leave the
+                // other with a dotted, cut-off screen.
+                "set-option",
+                "-g",
+                "window-size",
+                "latest",
+                ";",
                 // A program that ends cleanly (Claude's /exit, say) takes its window with it at once. One that fails stays on screen for a moment, so
                 // the reason can be read, until the daemon notices and closes it.
                 "set-hook",
@@ -351,6 +358,14 @@ impl TmuxTerminal {
                 &cols.to_string(),
                 "-y",
                 &rows.to_string(),
+                ";",
+                // `resize-window` pins the size (`manual`); hand it back so attached clients keep resizing it.
+                "set-option",
+                "-w",
+                "-t",
+                &self.session,
+                "window-size",
+                "latest",
             ],
         );
     }
@@ -495,7 +510,8 @@ impl TmuxTerminal {
         Ok(tabs)
     }
 
-    /// Captures the current visible screen of `pane_id` with ANSI colours and cursor position for initial or tab-switch rendering.
+    /// Captures `pane_id` with ANSI colours and cursor position for initial or tab-switch rendering: the visible screen preceded by
+    /// recent scrollback, so the browser has something to scroll through.
     pub fn capture_pane_ansi(&self, pane_id: &str) -> std::io::Result<Vec<u8>> {
         if !claudecord_protocol::is_valid_pane_id(pane_id) {
             return Err(std::io::Error::new(
@@ -523,7 +539,10 @@ impl TmuxTerminal {
             cx = x;
             cy = y;
         }
-        let raw = Self::tmux(&self.socket, &["capture-pane", "-e", "-p", "-t", pane_id])?;
+        let raw = Self::tmux(
+            &self.socket,
+            &["capture-pane", "-e", "-p", "-S", "-1500", "-t", pane_id],
+        )?;
         let lines: Vec<&str> = raw.split('\n').collect();
         // Trim only trailing newline added by capture-pane -p.
         let slice = if lines.last().is_some_and(|l| l.is_empty()) && lines.len() > 1 {
@@ -662,9 +681,49 @@ impl TmuxTerminal {
         let r = rows.to_string();
         Self::tmux(
             &self.socket,
-            &["resize-window", "-t", pane_id, "-x", &c, "-y", &r],
+            &[
+                "resize-window",
+                "-t",
+                pane_id,
+                "-x",
+                &c,
+                "-y",
+                &r,
+                ";",
+                "set-option",
+                "-w",
+                "-t",
+                pane_id,
+                "window-size",
+                "latest",
+            ],
         )
         .map(|_| ())
+    }
+}
+
+/// Lets tmux size every window of `session` from the attached clients again, undoing the fixed size a browser resize set.
+pub fn release_window_sizes(socket: &str, session: &str) {
+    let Ok(out) = Command::new("tmux")
+        .args([
+            "-L",
+            socket,
+            "list-windows",
+            "-t",
+            session,
+            "-F",
+            "#{window_id}",
+        ])
+        .stdin(Stdio::null())
+        .output()
+    else {
+        return;
+    };
+    for w in String::from_utf8_lossy(&out.stdout).lines() {
+        let _ = Command::new("tmux")
+            .args(["-L", socket, "resize-window", "-A", "-t", w])
+            .stdin(Stdio::null())
+            .output();
     }
 }
 

@@ -42,6 +42,28 @@ const BROWSER_WS_CAPACITY: usize = 256;
 /// Maximum time a single WebSocket send to a browser client may stall before closing.
 const BROWSER_SEND_STALL: Duration = Duration::from_secs(10);
 
+/// How long a terminal session lives without a word from its browser. The browser pings every few seconds (a background tab at least once a
+/// minute), so a session that goes quiet this long is gone, not slow. Every message from the browser starts it again.
+const SESSION_IDLE_TTL_MS: i64 = 10 * 60_000;
+
+/// The longest a single terminal session may last, however busy; a person who is still watching just reconnects.
+const SESSION_MAX_MS: i64 = 12 * 3_600_000;
+
+/// When a session that just heard from its browser at `now` runs out: an idle limit from now, never past its full length.
+fn extended_expiry(now: i64, created_at_ms: i64) -> i64 {
+    (now + SESSION_IDLE_TTL_MS).min(created_at_ms + SESSION_MAX_MS)
+}
+
+/// Whether a session is still worth keeping in the table: not past its idle limit (with a minute's slack) nor its full length.
+fn session_kept(now: i64, expires_at_ms: i64, created_at_ms: i64) -> bool {
+    now <= expires_at_ms + 60_000 && now - created_at_ms < SESSION_MAX_MS
+}
+
+/// Close codes the browser relays on. 4003 is final (the grant was revoked); the others mean "connect again".
+const CLOSE_REVOKED: u16 = 4003;
+const CLOSE_EXPIRED: u16 = 4004;
+const CLOSE_LAGGED: u16 = 4005;
+
 /// Default terminal grant lifetime in milliseconds (`TERMINAL_GRANT_TTL_SECS * 1000`).
 const DEFAULT_GRANT_TTL_MS: i64 = TERMINAL_GRANT_TTL_SECS * 1000;
 
@@ -352,7 +374,8 @@ pub(super) async fn create_session_for(st: &AppState, who: Who, req: CreateSessi
     let now = now_ms();
     let now_s = now / 1000;
     let ttl_s = (ttl_ms / 1000).clamp(1, 600);
-    let expires_at_ms = (now_s + ttl_s) * 1000;
+    // The grant is what the machine checks when it opens the session; how long the session itself lasts is its idle limit, which activity extends.
+    let expires_at_ms = now + SESSION_IDLE_TTL_MS.max(ttl_s * 1000);
     let session_id = format!("ts-{}", &random_hex()[..24]);
     let jti = format!("jti-{}", &random_hex()[..24]);
     let e2e_key = if req.e2e.unwrap_or(true) {
@@ -472,7 +495,9 @@ pub(super) async fn create_session_for(st: &AppState, who: Who, req: CreateSessi
     let (browser_tx, _) = broadcast::channel(BROWSER_WS_CAPACITY);
     {
         let mut sessions = st.terminals.sessions.locked();
-        sessions.retain(|_, s| now - s.created_at_ms < 3_600_000);
+        // A session goes when it has been quiet past its idle limit (or lived its full length), never by age alone: opening a terminal from one
+        // device must not end the one another device is watching.
+        sessions.retain(|_, s| session_kept(now, s.expires_at_ms, s.created_at_ms));
         sessions.insert(
             session_id.clone(),
             TermSession {
@@ -633,7 +658,7 @@ pub(super) async fn signal_session_for(
                 .fetch_add(1, Ordering::Relaxed)
                 .max(s.generation + 1);
             s.jti = format!("jti-{}", &random_hex()[..24]);
-            s.expires_at_ms = (now_s + TERMINAL_GRANT_TTL_SECS) * 1000;
+            s.expires_at_ms = extended_expiry(now, s.created_at_ms);
             let claims = TerminalGrantClaims {
                 jti: s.jti.clone(),
                 sub: s.user_id.clone(),
@@ -921,16 +946,20 @@ async fn run_browser_ws(mut socket: WebSocket, st: AppState, session_id: String)
                     };
                     let now = now_ms();
                     let now_s = now / 1000;
-                    let mut expired_or_revoked = false;
+                    let mut gone: Option<(u16, &str)> = None;
                     let mut node_and_frame = None;
                     {
                         let mut sessions = st.terminals.sessions.locked();
                         let Some(s) = sessions.get_mut(&session_id) else {
                             break;
                         };
-                        if s.revoked || now > s.expires_at_ms {
-                            expired_or_revoked = true;
+                        if s.revoked {
+                            gone = Some((CLOSE_REVOKED, "grant revoked"));
+                        } else if now > s.expires_at_ms {
+                            gone = Some((CLOSE_EXPIRED, "session expired"));
                         } else {
+                            // Any word from the browser, a ping included, shows it is still there.
+                            s.expires_at_ms = extended_expiry(now, s.created_at_ms);
                             let node = s.node.clone();
                             let frame_opt = match msg.kind.as_str() {
                                 "term.frame" => {
@@ -953,7 +982,6 @@ async fn run_browser_ws(mut socket: WebSocket, st: AppState, session_id: String)
                                 "term.offer" => {
                                     s.generation += 1;
                                     s.jti = format!("jti-{}", &random_hex()[..24]);
-                                    s.expires_at_ms = (now_s + TERMINAL_GRANT_TTL_SECS) * 1000;
                                     let claims = TerminalGrantClaims {
                                         jti: s.jti.clone(),
                                         sub: s.user_id.clone(),
@@ -996,10 +1024,10 @@ async fn run_browser_ws(mut socket: WebSocket, st: AppState, session_id: String)
                             }
                         }
                     }
-                    if expired_or_revoked {
+                    if let Some((code, reason)) = gone {
                         let _ = socket.send(Message::Close(Some(CloseFrame {
-                            code: 4003,
-                            reason: "grant expired or revoked".into(),
+                            code,
+                            reason: reason.into(),
                         }))).await;
                         break;
                     }
@@ -1041,7 +1069,7 @@ async fn run_browser_ws(mut socket: WebSocket, st: AppState, session_id: String)
                     if is_revoked {
                         let _ = socket
                             .send(Message::Close(Some(CloseFrame {
-                                code: 4003,
+                                code: CLOSE_REVOKED,
                                 reason: "session revoked".into(),
                             })))
                             .await;
@@ -1053,6 +1081,12 @@ async fn run_browser_ws(mut socket: WebSocket, st: AppState, session_id: String)
                         .metrics
                         .slow_reader_drops
                         .fetch_add(1, Ordering::Relaxed);
+                    // Output was dropped, so what the browser draws would be wrong from here on. Having it connect again gives it a whole screen.
+                    let _ = socket.send(Message::Close(Some(CloseFrame {
+                        code: CLOSE_LAGGED,
+                        reason: "fell behind".into(),
+                    }))).await;
+                    break;
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             },
@@ -1068,6 +1102,39 @@ async fn run_browser_ws(mut socket: WebSocket, st: AppState, session_id: String)
                 }
             }
         }
+    }
+    // The browser is gone. A session carried over this socket has nobody left to show, so the machine is told to let go of it (it would otherwise
+    // keep a tmux client attached, and count against the machine's session limit, until its idle check found it). One carried over WebRTC
+    // does not depend on this socket and is left to that check.
+    drop(rx);
+    let closing = {
+        let mut sessions = st.terminals.sessions.locked();
+        let over_wss = sessions.get(&session_id).is_some_and(|s| {
+            s.browser_tx.receiver_count() == 0
+                && matches!(&s.last_state, Some(NodeFrame::TermState { transport, .. }) if transport == "wss")
+        });
+        if over_wss {
+            sessions.remove(&session_id).map(|s| s.node)
+        } else {
+            None
+        }
+    };
+    if let Some(node) = closing {
+        let frame = HubFrame::TermClose {
+            session_id,
+            jti: None,
+            reason: "browser disconnected".into(),
+        };
+        let _ = st
+            .handle
+            .call(move |c, _| {
+                let mut fx = Vec::new();
+                if let Some(conn) = c.conn_of(&node) {
+                    fx.push(Effect::Send { conn, frame });
+                }
+                ((), fx)
+            })
+            .await;
     }
 }
 
@@ -1250,4 +1317,40 @@ pub(super) async fn gw_metrics(State(gw): State<Gateway>, headers: HeaderMap) ->
         );
     };
     metrics_for(&hub.state, Who::Everything).await
+}
+
+#[cfg(test)]
+mod lifetime_tests {
+    use super::*;
+
+    #[test]
+    fn activity_keeps_a_session_for_hours_and_quiet_ends_it_and_nothing_outlives_the_cap() {
+        let created = 1_000_000;
+        // Busy for three hours: each word from the browser pushes the limit out, so it is never "expired" (the old rule ended it at 120 s).
+        let mut exp = created + SESSION_IDLE_TTL_MS;
+        let mut now = created;
+        while now < created + 3 * 3_600_000 {
+            now += 5_000;
+            assert!(now <= exp, "alive while pinged");
+            exp = extended_expiry(now, created);
+        }
+        // Another device opening a terminal an hour in must not remove it (the old rule dropped anything over an hour old).
+        assert!(session_kept(now, exp, created));
+        // Quiet past the limit: expired, and later dropped from the table.
+        assert!(!session_kept(
+            now + SESSION_IDLE_TTL_MS + 61_000,
+            exp,
+            created
+        ));
+        // The full length is a hard cap on both the limit and the table.
+        assert_eq!(
+            extended_expiry(created + SESSION_MAX_MS - 1_000, created),
+            created + SESSION_MAX_MS
+        );
+        assert!(!session_kept(
+            created + SESSION_MAX_MS,
+            created + SESSION_MAX_MS,
+            created
+        ));
+    }
 }

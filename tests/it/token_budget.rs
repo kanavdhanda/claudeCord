@@ -140,6 +140,7 @@ fn coordination_overhead_stays_within_budget_on_a_sample_chat() {
         led.record(&core.on_node_frame(
             "mac",
             NodeFrame::AgentAssign {
+                say_id: None,
                 agent_id: "p/otter".into(),
                 to: to.into(),
                 task: task.into(),

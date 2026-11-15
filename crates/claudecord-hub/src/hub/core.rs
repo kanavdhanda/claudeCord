@@ -93,6 +93,8 @@ pub struct HubCore {
     pub(super) tasks: TrackedMap<Vec<TaskRow>>,
     /// Agent-only messages in a row, per agent.
     pub(super) streak: HashMap<String, u32>,
+    /// Per agent, the few threads it was last messaged from and when (newest last). Only used to notice a say that lands somewhere else.
+    pub(super) recent_in: HashMap<String, Vec<(Option<String>, i64)>>,
     pub(super) queues: TrackedMap<Vec<Queued>>,
     pub(super) pending: TrackedMap<Pending>,
     /// Agents that have already been given their brief.
@@ -155,6 +157,7 @@ impl HubCore {
             grants: Cell::new("grants", &dirty, Vec::new()),
             tasks: TrackedMap::new("tasks", &dirty),
             streak: HashMap::new(),
+            recent_in: HashMap::new(),
             queues: TrackedMap::new("queues", &dirty),
             pending: TrackedMap::new("pending", &dirty),
             briefed: TrackedSet::new("briefed", &dirty),
@@ -598,6 +601,7 @@ impl HubCore {
         self.roster_dirty.remove(id);
         // Without these two, every agent that ever spoke or was sent something would leave a row behind for as long as the hub runs.
         self.streak.remove(id);
+        self.recent_in.remove(id);
         self.pending.retain(|_, p| p.agent_id != id);
     }
 
@@ -888,7 +892,8 @@ impl HubCore {
                 to,
                 task,
                 thread,
-            } => self.assign(&agent_id, &to, &task, thread, now, &mut fx),
+                say_id,
+            } => self.assign(&agent_id, &to, &task, thread, say_id, now, &mut fx),
             NodeFrame::AgentTaskDone {
                 agent_id,
                 task_id,
@@ -1134,6 +1139,9 @@ impl HubCore {
             text: clean.clone(),
             thread: thread.clone(),
         }));
+        if let Some(note) = self.wrong_thread_note(&a, thread.as_deref(), now) {
+            self.say_receipt(&a, say_id.as_deref(), "warn", Some(&note), fx);
+        }
         self.route_agent_message(
             &a,
             &clean,

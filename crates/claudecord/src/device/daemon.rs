@@ -86,6 +86,10 @@ fn direct_failure_reason(
 /// How long `claudecord say` waits for the hub's word: a little longer than the device tries, so a failure it reports arrives first.
 const SAY_REPLY_WAIT: Duration = Duration::from_secs(8);
 
+/// What a say that went to the chat (and to no agent) prints: it is also the reply, so it is not typed out a second time in the terminal.
+const SAID_IN_CHAT: &str =
+    "sent to the chat. That was your reply; do not repeat it in the terminal.";
+
 /// What `claudecord say` prints, from what the hub said. There is no in-between: the agent it named has the message or it failed, and a say
 /// is only a success in the first case (or when it named nobody and just went to the chat).
 fn say_answer(
@@ -102,7 +106,7 @@ fn say_answer(
                 "NOT delivered: {}\nNothing was sent. Try again in a moment; `claudecord team` shows what each agent is doing.",
                 detail.unwrap_or_else(|| "the hub could not send it".into())
             )),
-            _ => Resp::ok("sent"),
+            _ => Resp::ok(SAID_IN_CHAT),
         },
         _ => Resp::err(
             "NOT delivered: the hub did not confirm it, so it may not have been sent. Check `claudecord doctor`, then send it again",
@@ -157,7 +161,7 @@ fn intro(spec: &AgentSpec) -> Option<Delivery> {
     })
 }
 
-pub const RULES: &str = "Team chat is the shell command claudecord: say <text>, ask <question>, assign <agent> <task>, done <id> <summary>, dump (save state), team (who else is here), threads (where you can post), send <file> (to the chat) or send <file> --to <agent> (to another agent's .claudecord inbox). Answer team messages with say, not also in the terminal; answer a person typing at your terminal there. For several lines pipe them in: say - <<'EOF'. Put @theirname before a person's name only when you need their attention; never @ yourself. @agentname addresses ANOTHER agent, in a thread of its own, so keep it short and only when you need them. Ask a person only what you cannot decide, once. A say naming an agent prints delivered, or NOT delivered and why (then it was not sent). Your say on a task goes to its thread; ask, done and report go to the main chat.";
+pub const RULES: &str = "Team chat is the shell command claudecord: say <text>, ask <question>, assign <agent> <task>, done <id> <summary>, dump (save state), team (who else is here), threads (where you can post), send <file> (to the chat) or send <file> --to <agent> (to another agent's .claudecord inbox). A [name] message is from chat: reply with say only, never also in the terminal. Unheaded input is the terminal: reply there, no say. For several lines pipe them in: say - <<'EOF'. Put @theirname before a person's name only when you need their attention; never @ yourself. @agentname addresses ANOTHER agent, in a thread of its own, so keep it short and only when you need them. Ask a person only what you cannot decide, once. A say naming an agent prints delivered, or NOT delivered and why (then it was not sent). Your say on a task goes to its thread; ask, done and report go to the main chat.";
 
 /// Choices that tests change.
 #[derive(Clone)]
@@ -412,6 +416,8 @@ struct State {
     quit: bool,
     /// The `say`s waiting for the hub's word on whether the agents they named have the message, by `say_id`.
     says: HashMap<String, oneshot::Sender<(String, Option<String>)>>,
+    /// Thread warnings that arrived for a say whose receipt has not yet.
+    say_warns: HashMap<String, String>,
     say_seq: u64,
     /// Set by `handle` for a `say`: the answer to the caller comes from this, later, and the daemon's loop carries on meanwhile.
     defer: Option<oneshot::Receiver<(String, Option<String>)>>,
@@ -470,6 +476,7 @@ pub async fn run(cfg: Config, dir: PathBuf, opts: Options) -> std::io::Result<()
         opts: opts.clone(),
         quit: false,
         says: HashMap::new(),
+        say_warns: HashMap::new(),
         say_seq: 0,
         defer: None,
         streams: super::stream::StreamManager::new(cfg.node_name.clone()),
@@ -742,7 +749,24 @@ impl State {
                 detail,
                 ..
             } => {
-                if let Some(tx) = self.says.remove(&say_id) {
+                // A warning comes ahead of the receipt itself and is printed with it, so the agent reads both in one answer.
+                if state == "warn" {
+                    if self.says.contains_key(&say_id) {
+                        self.say_warns.insert(say_id, detail.unwrap_or_default());
+                    }
+                } else if let Some(tx) = self.says.remove(&say_id) {
+                    let (state, detail) = match (self.say_warns.remove(&say_id), state.as_str()) {
+                        (Some(w), "delivered") => {
+                            ("info".into(), Some(format!("delivered: they have it\n{w}")))
+                        }
+                        (Some(w), "info") => {
+                            (state, Some(format!("{}\n{w}", detail.unwrap_or_default())))
+                        }
+                        // Not delivered means not sent, so "posted to" would contradict it.
+                        (Some(_), "failed") => (state, detail),
+                        (Some(w), _) => ("info".into(), Some(format!("{SAID_IN_CHAT}\n{w}"))),
+                        (None, _) => (state, detail),
+                    };
                     let _ = tx.send((state, detail));
                 }
             }
@@ -1377,6 +1401,8 @@ impl State {
     async fn on_tick(&mut self, now: i64) {
         // A `say` that stopped waiting leaves its slot behind: clear them.
         self.says.retain(|_, tx| !tx.is_closed());
+        let live = &self.says;
+        self.say_warns.retain(|id, _| live.contains_key(id));
         for a in self.agents.values_mut() {
             if drop_abandoned(&mut a.files, now, FILE_ABANDON_MS) > 0 {
                 crate::warn!(
@@ -1946,13 +1972,23 @@ impl State {
                 task,
                 thread,
             } => {
-                self.verb(&agent, |id| NodeFrame::AgentAssign {
-                    agent_id: id,
-                    to,
-                    task,
-                    thread,
-                })
-                .await
+                // Like a say: the answer says whether the peer has the task, not just that the hub took the request.
+                let (say_id, rx) = self.expect_reply(&task);
+                let resp = self
+                    .verb(&agent, |id| NodeFrame::AgentAssign {
+                        agent_id: id,
+                        to,
+                        task,
+                        thread,
+                        say_id: Some(say_id.clone()),
+                    })
+                    .await;
+                if resp.ok {
+                    self.defer = Some(rx);
+                } else {
+                    self.says.remove(&say_id);
+                }
+                resp
             }
             Req::Done {
                 agent,

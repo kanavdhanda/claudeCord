@@ -288,6 +288,13 @@ pub enum NodeFrame {
             skip_serializing_if = "Option::is_none"
         )]
         thread: Option<String>,
+        /// Asks the hub for a `say.receipt` about the task, so `claudecord assign` can tell the lead whether the peer has it.
+        #[serde(
+            default,
+            deserialize_with = "opt::de",
+            skip_serializing_if = "Option::is_none"
+        )]
+        say_id: Option<String>,
     },
     #[serde(rename = "agent.taskdone", rename_all = "camelCase")]
     AgentTaskDone {

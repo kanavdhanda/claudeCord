@@ -95,30 +95,35 @@ impl HubCore {
     }
 
     /// The lead gives a task to a peer. Anyone else who tries is told only the lead assigns. The task text is scrubbed.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn assign(
         &mut self,
         from_id: &str,
         to_name: &str,
         task: &str,
         thread: Option<String>,
+        say_id: Option<String>,
         now: i64,
         fx: &mut Vec<Effect>,
     ) {
         let Some(from) = self.agents.get(from_id).cloned() else {
             return;
         };
+        // A refusal is the answer to the assign itself when the lead is waiting on one, and a note in its terminal when it is not.
+        let refuse = |this: &mut Self, text: String, fx: &mut Vec<Effect>| {
+            if say_id.is_some() {
+                this.say_receipt(&from, say_id.as_deref(), "failed", Some(&text), fx);
+            } else {
+                this.tell(&from, text, now, fx);
+            }
+        };
         if !from.is_lead {
-            self.tell(&from, "Only the lead assigns tasks.".into(), now, fx);
+            refuse(self, "Only the lead assigns tasks.".into(), fx);
             return;
         }
         let task_clean = task.trim();
         if task_clean.is_empty() || task_clean == "-" {
-            self.tell(
-                &from,
-                "Task description cannot be empty or '-'.".into(),
-                now,
-                fx,
-            );
+            refuse(self, "Task description cannot be empty or '-'.".into(), fx);
             return;
         }
         let to = self
@@ -137,10 +142,9 @@ impl HubCore {
             } else {
                 peers.join(", ")
             };
-            self.tell(
-                &from,
+            refuse(
+                self,
                 format!("Cannot assign to {to_name}. Peers: {list}."),
-                now,
                 fx,
             );
             return;
@@ -191,10 +195,25 @@ impl HubCore {
                 handoff: None,
                 wake: true,
                 at: now,
-                say: None,
+                say: say_id.clone().map(|id| (from.agent_id.clone(), id)),
             },
         );
         self.flush(&to.agent_id, now, fx);
+        // A peer that cannot take it now (paused, at a limit, offline, still starting) keeps it queued; say so, since "delivered" is not coming soon.
+        if let Some(why) = super::routing::hold_reason(self.status_of(&to.agent_id))
+            .or_else(|| (!self.conns.contains_key(&to.node_name)).then_some("offline"))
+        {
+            self.say_receipt(
+                &from,
+                say_id.as_deref(),
+                "info",
+                Some(&format!(
+                    "NOT delivered yet: {} is {why}. {} waits in their queue and arrives when they can take it.",
+                    to.name, row.id
+                )),
+                fx,
+            );
+        }
         fx.push(Effect::Chat(Chat::Post {
             project: from.project.clone(),
             agent: from.clone(),
@@ -304,7 +323,78 @@ pub(super) fn short_thread(thread: &str) -> String {
     }
 }
 
+/// How long a thread an agent was messaged from counts as one it is actively working in.
+const ACTIVE_THREAD_MS: i64 = 30 * 60_000;
+
 impl HubCore {
+    /// Remembers that `agent_id` was just messaged from `thread` (None is the main channel). The system's own notes do not count.
+    pub(super) fn note_input(
+        &mut self,
+        agent_id: &str,
+        from: &str,
+        thread: Option<&str>,
+        now: i64,
+    ) {
+        if matches!(from, "system" | "claudecord") {
+            return;
+        }
+        let t = thread.map(short_thread);
+        let list = self.recent_in.entry(agent_id.to_string()).or_default();
+        list.retain(|(x, at)| *x != t && now - at <= ACTIVE_THREAD_MS);
+        list.push((t, now));
+        if list.len() > 4 {
+            list.remove(0);
+        }
+    }
+
+    /// A short note for an agent whose say landed in a thread it was not recently messaged from, naming where it could have gone. Nothing
+    /// when it answered where it was asked, spoke with a peer, or was not asked anything lately, so a correct say costs no tokens.
+    pub(super) fn wrong_thread_note(
+        &self,
+        a: &AgentRow,
+        thread: Option<&str>,
+        now: i64,
+    ) -> Option<String> {
+        let target = thread.map(short_thread);
+        if target.as_deref().is_some_and(|t| t.contains(" & ")) {
+            return None;
+        }
+        let recent: Vec<&(Option<String>, i64)> = self
+            .recent_in
+            .get(&a.agent_id)?
+            .iter()
+            .filter(|(_, at)| now - at <= ACTIVE_THREAD_MS)
+            .collect();
+        if recent.is_empty() || recent.iter().any(|(t, _)| *t == target) {
+            return None;
+        }
+        let show = |t: &Option<String>| t.clone().unwrap_or_else(|| "main channel".into());
+        let last = show(&recent[recent.len() - 1].0);
+        let active: Vec<String> = recent.iter().rev().map(|(t, _)| show(t)).collect();
+        let team: Vec<String> = self
+            .agents_of_project(&a.project)
+            .into_iter()
+            .filter(|p| p.agent_id != a.agent_id)
+            .take(6)
+            .map(|p| {
+                format!(
+                    "{} ({})",
+                    p.name,
+                    format!("{:?}", self.status_of(&p.agent_id)).to_lowercase()
+                )
+            })
+            .collect();
+        let mut out = format!(
+            "Posted to {}, but you were last asked in {last}. Wrong place? Say it again with --thread <id> (omit for the main channel). Active: {}.",
+            show(&target),
+            active.join(", ")
+        );
+        if !team.is_empty() {
+            out.push_str(&format!(" Team: {}.", team.join(", ")));
+        }
+        Some(out)
+    }
+
     /// A thread as an agent wrote it: a task id such as `T2` becomes that task's thread name, anything else is kept as written.
     pub(super) fn resolve_thread(&self, project: &str, thread: String) -> String {
         self.tasks

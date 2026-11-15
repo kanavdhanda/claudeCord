@@ -138,6 +138,7 @@ impl HubCore {
             fx,
         );
         Self::event(&a.project, "edge", &q.from, &a.name, 1.0, now, fx);
+        self.note_input(&a.agent_id, &q.from, q.thread.as_deref(), now);
         self.send_to(
             a,
             HubFrame::Deliver {
@@ -244,6 +245,7 @@ impl HubCore {
             Self::event(&a.project, "edge", &q.from, &a.name, 1.0, now, fx);
         }
         for (i, q) in items.into_iter().enumerate() {
+            self.note_input(&a.agent_id, &q.from, q.thread.as_deref(), now);
             pending.references.extend(q.reference.clone());
             pending.task_ids.extend(q.task_id.clone());
             pending.handoffs.extend(q.handoff);
