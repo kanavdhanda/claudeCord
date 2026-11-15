@@ -137,6 +137,7 @@ Run `scripts/check.sh` before and after changing anything; it tests every module
 | File | What it is |
 |---|---|
 | `crates/claudecord-protocol/src/frame.rs` | The frames a device and the hub exchange, and the rules a frame must meet to be accepted. |
+| `crates/claudecord-protocol/src/harness.rs` | The agent programs claudeCord knows by name. |
 | `crates/claudecord-protocol/src/lib.rs` | Wire protocol types, framing, and text sanitization for claudeCord. |
 | `crates/claudecord-protocol/src/terminal.rs` | The interactive terminal streaming protocol, short-lived session grants, end-to-end payload encryption, and tmux Control Mode (`-CC`) framing parser. |
 | `crates/claudecord-protocol/src/text.rs` | Everything pasted into an agent's terminal passes through here. |
