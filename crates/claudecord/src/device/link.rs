@@ -38,6 +38,9 @@ pub struct LinkOpts {
     /// A web proxy to go through, like `http://user:pass@proxy:3128`. None means look at the standard environment
     /// variables (HTTPS_PROXY, HTTP_PROXY, ALL_PROXY, NO_PROXY).
     pub proxy: Option<String>,
+    /// A file to keep the frames the hub has not confirmed in, so they are still sent if this program restarts first. None keeps them in
+    /// memory only.
+    pub outbox: Option<std::path::PathBuf>,
 }
 
 impl Default for LinkOpts {
@@ -49,6 +52,7 @@ impl Default for LinkOpts {
             backoff_min: Duration::from_secs(1),
             backoff_max: Duration::from_secs(60),
             proxy: None,
+            outbox: None,
         }
     }
 }
@@ -196,6 +200,18 @@ pub fn spawn_with(
     Link { out, wake }
 }
 
+/// After the hub says it is restarting, a machine retries every second or so for this long instead of backing off: the hub is back in a few
+/// seconds, and a pause that doubled each time would leave machines waiting a minute for a hub that has been up for fifty seconds of it.
+const HUB_RESTART_WINDOW: Duration = Duration::from_secs(90);
+
+/// The pause between attempts while the hub is restarting: the shortest pause plus up to as much again, so machines do not all arrive together.
+fn restart_pause(o: &LinkOpts) -> Duration {
+    let mut r = [0u8; 4];
+    let _ = getrandom::fill(&mut r);
+    let frac = u32::from_le_bytes(r) as f64 / u32::MAX as f64;
+    o.backoff_min + o.backoff_min.mul_f64(frac)
+}
+
 /// A jump in the wall clock this large between two looks means the machine was suspended in between.
 const RESUME_GAP: Duration = Duration::from_secs(15);
 
@@ -209,14 +225,34 @@ pub fn resumed_from_sleep(before: SystemTime, now: SystemTime, expected: Duratio
 /// hub for a very long time cannot grow without limit.
 const MAX_UNACKED: usize = 10_000;
 
-/// What this machine has sent and the hub has not confirmed. Each frame is numbered under an epoch chosen at start-up, kept until the hub
-/// acknowledges it (which it does only once the change is on disk), and sent again after a reconnect. The hub remembers the last number it
-/// took, so a frame that arrives twice is taken once. If this process itself restarts, a new epoch begins and what was unconfirmed is lost
-/// with it.
+/// How long a frame kept on disk stays worth sending. After a restart, a say or a status from this long ago would only confuse.
+const OUTBOX_KEEP_MS: i64 = 6 * 3_600_000;
+
+/// The journal is rewritten (what was confirmed dropped) once it has grown by this much.
+const OUTBOX_COMPACT_AT: usize = 512 * 1024;
+
+/// What this machine has sent and the hub has not confirmed. Each frame is numbered under an epoch, kept until the hub acknowledges it (which
+/// it does only once the change is on disk), and sent again after a reconnect. The hub remembers the last number it took under each epoch, so a
+/// frame that arrives twice is taken once.
+///
+/// With a file to keep it in (`LinkOpts::outbox`) the epoch, the numbers and the unconfirmed frames survive a restart of this program: the
+/// next start carries on under the same epoch, so what the hub already took is ignored and what it did not is sent. The file belongs to one
+/// hub (a machine moved to another hub starts afresh), holds nothing older than `OUTBOX_KEEP_MS`, and is private to the user.
 struct Unacked {
     epoch: u64,
     next: u64,
     frames: std::collections::VecDeque<(u64, String)>,
+    journal: Option<Journal>,
+}
+
+/// The file behind `Unacked`: a header line, then one line per frame sent (`{"f":[n,at,text]}`) or confirmed (`{"a":n}`), and, after a rewrite,
+/// where the numbering had got to (`{"next":n}`).
+struct Journal {
+    path: std::path::PathBuf,
+    hub: String,
+    written: usize,
+    /// A write failed (a full disk, a folder that went away): said once, and the frames are kept in memory as before.
+    failed: bool,
 }
 
 impl Unacked {
@@ -228,6 +264,125 @@ impl Unacked {
             epoch: u64::from_le_bytes(r) | 1,
             next: 1,
             frames: Default::default(),
+            journal: None,
+        }
+    }
+
+    /// The frames kept in `path` for `hub` if there are any worth sending, else a new start. With no path, memory only.
+    fn open(path: Option<&std::path::Path>, hub: &str) -> Self {
+        let mut me = Self::new();
+        let Some(path) = path else {
+            return me;
+        };
+        me.journal = Some(Journal {
+            path: path.to_path_buf(),
+            hub: hub.to_string(),
+            written: 0,
+            failed: false,
+        });
+        if let Ok(text) = std::fs::read_to_string(path) {
+            me.replay(&text, hub, crate::now_ms());
+        }
+        // What was read is written back as one clean file (stale and confirmed frames gone), or a new file begun.
+        me.rewrite();
+        me
+    }
+
+    /// Takes the state from a journal's text, if it is a readable one for this hub.
+    fn replay(&mut self, text: &str, hub: &str, now: i64) {
+        let mut lines = text.lines();
+        let Some(head) = lines
+            .next()
+            .and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        else {
+            return;
+        };
+        let (Some(epoch), true) = (head["epoch"].as_u64(), head["hub"].as_str() == Some(hub))
+        else {
+            return;
+        };
+        let mut frames: std::collections::VecDeque<(u64, String)> = Default::default();
+        let mut next = 1u64;
+        for line in lines {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                // A line cut short by a crash: whatever came before it is still good.
+                break;
+            };
+            if let Some(f) = v["f"].as_array() {
+                if let (Some(n), Some(at), Some(t)) = (
+                    f.first().and_then(|x| x.as_u64()),
+                    f.get(1).and_then(|x| x.as_i64()),
+                    f.get(2).and_then(|x| x.as_str()),
+                ) {
+                    next = next.max(n + 1);
+                    if now - at <= OUTBOX_KEEP_MS {
+                        frames.push_back((n, t.to_string()));
+                    }
+                }
+            } else if let Some(n) = v["a"].as_u64() {
+                while frames.front().is_some_and(|(k, _)| *k <= n) {
+                    frames.pop_front();
+                }
+            } else if let Some(n) = v["next"].as_u64() {
+                next = next.max(n);
+            }
+        }
+        while frames.len() > MAX_UNACKED {
+            frames.pop_front();
+        }
+        self.epoch = epoch;
+        self.next = next;
+        self.frames = frames;
+    }
+
+    /// Writes the whole state as a fresh journal, replacing the file in one step.
+    fn rewrite(&mut self) {
+        let Some(j) = self.journal.as_mut() else {
+            return;
+        };
+        let now = crate::now_ms();
+        let mut out = serde_json::json!({"v": 1, "hub": j.hub, "epoch": self.epoch}).to_string();
+        out.push('\n');
+        out.push_str(&serde_json::json!({"next": self.next}).to_string());
+        out.push('\n');
+        for (n, t) in &self.frames {
+            out.push_str(&serde_json::json!({"f": [n, now, t]}).to_string());
+            out.push('\n');
+        }
+        let tmp = j.path.with_extension("tmp");
+        let ok = write_private(&tmp, out.as_bytes(), false).is_ok()
+            && std::fs::rename(&tmp, &j.path).is_ok();
+        j.written = if ok { out.len() } else { j.written };
+        Self::note_failure(j, ok);
+    }
+
+    /// Adds one line to the journal.
+    fn append(&mut self, line: serde_json::Value) {
+        let Some(j) = self.journal.as_mut() else {
+            return;
+        };
+        let mut text = line.to_string();
+        text.push('\n');
+        let ok = write_private(&j.path, text.as_bytes(), true).is_ok();
+        if ok {
+            j.written += text.len();
+        }
+        Self::note_failure(j, ok);
+        if j.written > OUTBOX_COMPACT_AT {
+            self.rewrite();
+        }
+    }
+
+    fn note_failure(j: &mut Journal, ok: bool) {
+        if !ok && !j.failed {
+            j.failed = true;
+            crate::warn!(
+                "link",
+                "cannot write {}: frames the hub has not confirmed are kept in memory only, and are lost if this program restarts",
+                j.path.display()
+            );
+        } else if ok {
+            j.failed = false;
         }
     }
 
@@ -249,15 +404,42 @@ impl Unacked {
             );
         }
         self.frames.push_back((n, text.clone()));
+        self.append(serde_json::json!({"f": [n, crate::now_ms(), text]}));
         text
     }
 
     /// The hub has everything up to `n`.
     fn ack(&mut self, n: u64) {
+        let before = self.frames.len();
         while self.frames.front().is_some_and(|(k, _)| *k <= n) {
             self.frames.pop_front();
         }
+        if self.frames.len() != before {
+            self.append(serde_json::json!({"a": n}));
+        }
     }
+}
+
+/// Writes (or appends) a file that only this user can read: it holds what agents said to people.
+pub(super) fn write_private(
+    path: &std::path::Path,
+    data: &[u8],
+    append: bool,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut o = std::fs::OpenOptions::new();
+    o.create(true).write(true);
+    if append {
+        o.append(true);
+    } else {
+        o.truncate(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    o.open(path)?.write_all(data)
 }
 
 /// The reconnect loop.
@@ -271,8 +453,10 @@ async fn run(
     wake: Arc<Notify>,
 ) {
     let mut failures = 0u32;
-    let mut unacked = Unacked::new();
+    let mut unacked = Unacked::open(opts.outbox.as_deref(), &url);
     let mut said = String::new();
+    // Set when the hub said it is restarting: until then a failed attempt is retried quickly (see `HUB_RESTART_WINDOW`).
+    let mut restarting_until: Option<tokio::time::Instant> = None;
     loop {
         let started = tokio::time::Instant::now();
         let conn = match auth.bearer().await {
@@ -295,7 +479,20 @@ async fn run(
         }
         if let Ok(ws) = conn {
             said.clear();
-            let replaced = session(ws, &node, &events, &mut outbox, &mut unacked, &opts).await;
+            let mut going_away = false;
+            let replaced = session(
+                ws,
+                &node,
+                &events,
+                &mut outbox,
+                &mut unacked,
+                &opts,
+                &mut going_away,
+            )
+            .await;
+            if going_away {
+                restarting_until = Some(tokio::time::Instant::now() + HUB_RESTART_WINDOW);
+            }
             if events.send(LinkEvent::Down).await.is_err() {
                 return;
             }
@@ -309,7 +506,12 @@ async fn run(
             }
         }
         failures = failures.saturating_add(1);
-        if sleep_or_wake(pause(failures, &opts), &wake, &mut outbox, &mut unacked).await {
+        let wait = if restarting_until.is_some_and(|t| tokio::time::Instant::now() < t) {
+            restart_pause(&opts)
+        } else {
+            pause(failures, &opts)
+        };
+        if sleep_or_wake(wait, &wake, &mut outbox, &mut unacked).await {
             // Woken by activity or by the machine waking up: try straight away and start the pauses over.
             failures = 0;
         }
@@ -497,6 +699,7 @@ async fn session(
     outbox: &mut mpsc::Receiver<NodeFrame>,
     unacked: &mut Unacked,
     opts: &LinkOpts,
+    going_away: &mut bool,
 ) -> bool {
     let (mut tx, mut rx) = ws.split();
     let hello = NodeFrame::Hello {
@@ -570,7 +773,13 @@ async fn session(
                             }
                             None => {}
                         },
-                        Message::Close(_) => return replaced,
+                        Message::Close(frame) => {
+                            // The hub said it is restarting: it will be back in moments, so the pauses before retrying stay short.
+                            if frame.is_some_and(|f| f.code == tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Away) {
+                                *going_away = true;
+                            }
+                            return replaced;
+                        }
                         _ => {}
                     }
                 }
@@ -592,6 +801,107 @@ async fn session(
                 if resumed_from_sleep(last_watch, now, Duration::from_secs(1)) { return replaced; }
                 last_watch = now;
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod outbox_tests {
+    use super::*;
+
+    fn frame(t: &str) -> NodeFrame {
+        NodeFrame::AgentSay {
+            agent_id: "p/a".into(),
+            text: t.into(),
+            thread: None,
+            say_id: None,
+        }
+    }
+
+    fn dir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("cc-outbox-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn what_the_hub_has_not_confirmed_survives_a_restart_under_the_same_epoch() {
+        let d = dir("restart");
+        let path = d.join("outbox.jsonl");
+        let mut a = Unacked::open(Some(&path), "wss://hub/a");
+        for t in ["one", "two", "three"] {
+            a.stamp(&frame(t));
+        }
+        a.ack(1);
+        let epoch = a.epoch;
+        drop(a);
+        // The program starts again: the same epoch, the two frames still owed, and numbering that carries on (no number is used twice).
+        let mut b = Unacked::open(Some(&path), "wss://hub/a");
+        assert_eq!(b.epoch, epoch);
+        assert_eq!(
+            b.frames.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert!(b.frames[0].1.contains("two") && b.frames[1].1.contains("three"));
+        b.stamp(&frame("four"));
+        assert_eq!(b.frames.back().unwrap().0, 4);
+        // Everything confirmed: nothing owed, but the numbers still do not start over under that epoch.
+        b.ack(4);
+        drop(b);
+        let c = Unacked::open(Some(&path), "wss://hub/a");
+        assert!(c.frames.is_empty());
+        assert_eq!((c.epoch, c.next), (epoch, 5));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "what agents said is private");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn frames_for_another_hub_or_too_old_or_cut_short_are_not_trusted() {
+        let d = dir("trust");
+        let path = d.join("outbox.jsonl");
+        let mut a = Unacked::open(Some(&path), "wss://hub/a");
+        a.stamp(&frame("one"));
+        let epoch = a.epoch;
+        drop(a);
+        // A machine moved to another hub does not send the old hub's frames to the new one.
+        let b = Unacked::open(Some(&path), "wss://hub/b");
+        assert!(b.frames.is_empty());
+        assert_ne!(b.epoch, epoch);
+        drop(b);
+        // A frame older than the limit is dropped, but its number is not reused.
+        let mut text = serde_json::json!({"v": 1, "hub": "h", "epoch": 7}).to_string();
+        text.push('\n');
+        text.push_str(&serde_json::json!({"f": [1, 0, "old"]}).to_string());
+        text.push('\n');
+        text.push_str(&serde_json::json!({"f": [2, crate::now_ms(), "fresh"]}).to_string());
+        text.push('\n');
+        // And a last line cut short by a crash is ignored, what came before it kept.
+        text.push_str("{\"f\":[3,");
+        std::fs::write(&path, &text).unwrap();
+        let c = Unacked::open(Some(&path), "h");
+        assert_eq!((c.epoch, c.next), (7, 3));
+        assert_eq!(
+            c.frames.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+            vec![2]
+        );
+        // Not a journal at all: a fresh start, not a failure.
+        std::fs::write(&path, "garbage").unwrap();
+        assert!(Unacked::open(Some(&path), "h").frames.is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_pause_after_a_hub_restart_stays_short() {
+        let o = LinkOpts::default();
+        for _ in 0..50 {
+            let p = restart_pause(&o);
+            assert!(p >= o.backoff_min && p <= o.backoff_min * 2, "{p:?}");
         }
     }
 }

@@ -153,6 +153,7 @@ async fn rig_with(name: &str, me_failures: usize) -> Rig {
             backoff_min: Duration::from_millis(30),
             backoff_max: Duration::from_millis(200),
             proxy: None,
+            outbox: None,
         },
     );
     let cfg = BridgeConfig {

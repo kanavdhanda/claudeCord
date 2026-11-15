@@ -29,6 +29,7 @@ fn fast() -> LinkOpts {
         backoff_min: Duration::from_millis(30),
         backoff_max: Duration::from_millis(300),
         proxy: None,
+        outbox: None,
     }
 }
 
@@ -111,6 +112,7 @@ async fn a_machine_that_must_use_a_web_proxy_connects_through_it_with_its_login(
     let (tx, mut rx) = mpsc::channel(16);
     let opts = LinkOpts {
         proxy: Some(format!("http://user:pw@{paddr}")),
+        outbox: None,
         ..fast()
     };
     let _l = link::spawn(
@@ -149,6 +151,7 @@ async fn a_proxy_that_refuses_is_reported_by_doctor_in_plain_words() {
         &cfg,
         &LinkOpts {
             proxy: Some(format!("http://{paddr}")),
+            outbox: None,
             ..fast()
         },
     )

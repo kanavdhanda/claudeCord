@@ -442,13 +442,19 @@ pub async fn run(cfg: Config, dir: PathBuf, opts: Options) -> std::io::Result<()
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
     }
+    let seen_before = load_seen(&dir);
     let (ev_tx, mut events) = mpsc::channel(256);
+    // What the hub has not confirmed is kept in a file here, so a restart of this program does not lose it.
+    let mut link_opts = opts.link.clone();
+    if link_opts.outbox.is_none() {
+        link_opts.outbox = Some(dir.join("outbox.jsonl"));
+    }
     let link = link::spawn_with(
         link::Auth::new(&cfg.hub_url, cfg.token.clone(), Some(dir.clone())),
         cfg.connect_url(),
         cfg.node_name.clone(),
         ev_tx,
-        opts.link.clone(),
+        link_opts,
     );
     let (call_tx, mut calls) = mpsc::channel::<Call>(64);
     let attach_calls = call_tx.clone();
@@ -471,7 +477,7 @@ pub async fn run(cfg: Config, dir: PathBuf, opts: Options) -> std::io::Result<()
         dir,
         link,
         agents: HashMap::new(),
-        seen: VecDeque::new(),
+        seen: seen_before,
         up: false,
         opts: opts.clone(),
         quit: false,
@@ -689,9 +695,10 @@ impl State {
                         return;
                     }
                     self.seen.push_back(id.clone());
-                    if self.seen.len() > 512 {
+                    if self.seen.len() > SEEN_KEEP {
                         self.seen.pop_front();
                     }
+                    note_seen(&self.dir, id);
                 }
                 if let Some(a) = self.agents.get_mut(&agent_id) {
                     if from != "system" {
@@ -2618,6 +2625,29 @@ fn describe(req: &Req) -> Option<(&str, &'static str, String)> {
     })
 }
 
+/// How many delivery ids are remembered, so one the hub sends again is recognised.
+const SEEN_KEEP: usize = 512;
+
+/// The delivery ids remembered from before this program last stopped. The hub sends an unaccepted delivery again after a reconnect, and a
+/// machine that forgot it had the first one would paste it twice.
+fn load_seen(dir: &std::path::Path) -> VecDeque<String> {
+    let path = dir.join("seen.log");
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let all: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+    let keep = &all[all.len().saturating_sub(SEEN_KEEP)..];
+    // The file only ever grows by a line at a time, so it is cut back to what is kept when it has got long.
+    if all.len() > SEEN_KEEP * 4 {
+        let _ =
+            super::link::write_private(&path, format!("{}\n", keep.join("\n")).as_bytes(), false);
+    }
+    keep.iter().map(|l| l.to_string()).collect()
+}
+
+/// Remembers a delivery id on disk (best effort: if it cannot be written, the id is still remembered in memory).
+fn note_seen(dir: &std::path::Path, id: &str) {
+    let _ = super::link::write_private(&dir.join("seen.log"), format!("{id}\n").as_bytes(), true);
+}
+
 /// The agent type name an agent is started from again: its named program if it has one, else its adapter.
 fn adapter_arg(spec: &AgentSpec) -> String {
     spec.harness
@@ -2868,5 +2898,40 @@ mod status_tests {
             next_status(Starting, &screen(false, true, false), false, true, 0),
             Idle
         );
+    }
+}
+
+#[cfg(test)]
+mod seen_tests {
+    use super::*;
+
+    #[test]
+    fn delivery_ids_are_remembered_across_a_restart_and_the_file_is_kept_short() {
+        let d = std::env::temp_dir().join(format!("cc-seen-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        assert!(load_seen(&d).is_empty(), "a first start remembers nothing");
+        for i in 0..3 {
+            note_seen(&d, &format!("m{i}"));
+        }
+        assert_eq!(
+            load_seen(&d),
+            VecDeque::from(["m0".to_string(), "m1".into(), "m2".into()])
+        );
+        // A long file is cut back to the newest ones.
+        for i in 3..(SEEN_KEEP * 5) {
+            note_seen(&d, &format!("m{i}"));
+        }
+        let seen = load_seen(&d);
+        assert_eq!(seen.len(), SEEN_KEEP);
+        assert_eq!(seen.back().unwrap(), &format!("m{}", SEEN_KEEP * 5 - 1));
+        assert!(
+            std::fs::read_to_string(d.join("seen.log"))
+                .unwrap()
+                .lines()
+                .count()
+                <= SEEN_KEEP
+        );
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

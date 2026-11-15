@@ -24,6 +24,7 @@ fn fast() -> LinkOpts {
         backoff_min: Duration::from_millis(30),
         backoff_max: Duration::from_millis(300),
         proxy: None,
+        outbox: None,
     }
 }
 
