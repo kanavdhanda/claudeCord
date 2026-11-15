@@ -699,7 +699,7 @@ fn terminal_probe() -> Probe {
             .map_err(|e| e.to_string())?;
         let sid = created["sessionId"]
             .as_str()
-            .ok_or("missing sessionId")?
+            .ok_or_else(|| format!("missing sessionId in the hub's answer: {created}"))?
             .to_string();
 
         let revoked = client
