@@ -50,6 +50,7 @@ export type State = { devices: Device[]; projects: Record<string, ProjectState> 
 
 export const api = {
   me: () => get<Me>('/api/v1/me'),
+  version: () => get<{ version: string; min_client_version: string }>('/version'),
   logout: () => post<null>('/auth/logout', {}),
   state: () => get<State>('/api/v1/state'),
   machines: () => get<Machine[]>('/api/v1/machines'),

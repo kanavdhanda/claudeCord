@@ -7,6 +7,7 @@ import { Pick } from './pages/Pick'
 import { Bots } from './pages/Bots'
 import { Commands } from './pages/Commands'
 import { Insights } from './pages/Insights'
+import { Landing } from './pages/Landing'
 import { Login } from './pages/Login'
 import { Machines } from './pages/Machines'
 import { Overview } from './pages/Overview'
@@ -16,12 +17,15 @@ import { TerminalPage } from './pages/Terminal'
 const MeContext = createContext<Me | null>(null)
 export const useMe = () => useContext(MeContext)!
 
-/** Everything except the sign-in page needs a signed-in person; anyone else is sent to sign in and brought back afterwards. */
+/** Everything except the sign-in and welcome pages needs a signed-in person. Someone not signed in sees the welcome page at `/` and is sent to
+ *  sign in (and brought back afterwards) anywhere else. */
 export function App() {
   const { data: me, error } = useLoad(api.me)
   const loc = useLocation()
+  const signedOut = error instanceof ApiError && error.status === 401
   if (loc.pathname === '/login') return <Login />
-  if (error instanceof ApiError && error.status === 401) {
+  if (loc.pathname === '/welcome' || (signedOut && loc.pathname === '/')) return <Landing signedIn={!!me} />
+  if (signedOut) {
     const next = encodeURIComponent(loc.pathname + loc.search)
     return <Navigate to={`/login?next=${next}`} replace />
   }
