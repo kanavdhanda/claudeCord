@@ -15,6 +15,7 @@ export function Login() {
           Sign in with Discord
         </a>
         <p className="small muted">We only ask for your Discord id and name. Nothing else about you.</p>
+        <a className="small" href="/welcome">What is claudeCord?</a>
       </div>
     </div>
   )
