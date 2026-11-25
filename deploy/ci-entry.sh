@@ -32,11 +32,13 @@ case "$action" in
     [[ $arg =~ ^[0-9a-f]{40}$ ]] || { echo "deploy needs a full 40-character commit id" >&2; exit 2; }
 
     echo "==> 1. Build the candidate in a separate worktree"
-    git fetch --tags origin
-    git worktree prune 2>/dev/null || true
-    rm -rf .staging_build
-    git worktree add --detach .staging_build "$arg"
+    # Anything that fails before the swap must say so with exit 10, or the workflow puts back an older version the hub was not running.
     trap 'cd "$DIR"; git worktree remove --force .staging_build 2>/dev/null || rm -rf .staging_build; git worktree prune 2>/dev/null || true; docker rm -f claudecord-staging >/dev/null 2>&1 || true' EXIT
+    git fetch --tags origin || staging_failed "could not fetch from GitHub"
+    # A deploy that was cancelled mid-build leaves its worktree behind: remove the folder first, then prune, so git forgets it too.
+    rm -rf .staging_build
+    git worktree prune 2>/dev/null || true
+    git worktree add --force --detach .staging_build "$arg" || staging_failed "could not check out $arg"
     (cd .staging_build && docker build -t claudecord:staging -f Dockerfile .) || staging_failed "the candidate did not build"
 
     echo "==> 2. Test the candidate"
